@@ -38,3 +38,31 @@ async def db(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_factory(tmp_path):
+    """隔离的 async_sessionmaker(会话工厂),供需要多会话的组件用(如发布调度器)。
+
+    与 db fixture 同源(每测试独立临时 sqlite + 建表 + 结束清理),但暴露的是会话工厂
+    而非单一会话——调度器/队列每次操作各开一个短事务会话,须共享同一底层引擎。
+    """
+    from app.core.db import Base
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = create_async_engine(url, future=True)
+
+    import app.models  # noqa: F401  触发模型注册到 Base.metadata
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+    try:
+        yield session_factory
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
