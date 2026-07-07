@@ -1,6 +1,16 @@
-"""ORM 模型包占位。
+"""ORM 模型包:集中导入 4 张核心表,使其注册到 app.core.db.Base.metadata。
 
-Task 0.4 起在此(或子模块)定义并导入各 ORM 模型,使其注册到
-app.core.db.Base.metadata;init_db() 依赖 `import app.models` 触发注册后 create_all。
-当前为空占位,不定义任何表。
+`import app.models` 即触发全部模型注册,init_db() / 测试 db fixture 的 create_all
+以及 Alembic autogenerate(env.py 导入本包)据此感知全部表结构。
 """
+
+from app.models.operator import Operator, OperatorAccountAccess
+from app.models.publish_job import PublishJob
+from app.models.xhs_account import XhsAccount
+
+__all__ = [
+    "Operator",
+    "OperatorAccountAccess",
+    "XhsAccount",
+    "PublishJob",
+]
