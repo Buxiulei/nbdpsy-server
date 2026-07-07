@@ -20,14 +20,22 @@ from app.core.db import get_session
 from app.core.security import hash_apikey
 from app.models.operator import Operator
 
-# 无需鉴权的白名单:健康探活(精确)与下载静态资源(前缀)。
+# 无需鉴权的白名单:健康探活(精确)与下载静态资源(带斜杠前缀)。
+# 下载白名单必须用带斜杠的边界前缀,否则裸 startswith("/downloads") 会把
+# /downloads-evil、/downloadsX 等以此开头但非真下载路由的路径也误放行。
 _WHITELIST_EXACT = frozenset({"/healthz"})
-_WHITELIST_PREFIX = ("/downloads",)
+_DOWNLOADS_ROOT = "/downloads"
 
 
 def _is_whitelisted(path: str) -> bool:
-    """判断请求路径是否落在免鉴权白名单。"""
-    return path in _WHITELIST_EXACT or path.startswith(_WHITELIST_PREFIX)
+    """判断请求路径是否落在免鉴权白名单。
+
+    healthz 走精确匹配;downloads 只放行 /downloads 本身或 /downloads/ 前缀下
+    的子路径(带斜杠边界),避免 /downloads-evil / /downloadsX 借前缀绕过鉴权。
+    """
+    if path in _WHITELIST_EXACT:
+        return True
+    return path == _DOWNLOADS_ROOT or path.startswith(_DOWNLOADS_ROOT + "/")
 
 
 def _extract_apikey(request: Request) -> str | None:

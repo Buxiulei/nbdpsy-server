@@ -117,6 +117,23 @@ async def test_whoami_without_key_401(tmp_path, monkeypatch):
         assert r.status_code == 401
 
 
+async def test_downloads_prefix_whitelisted_without_key(tmp_path, monkeypatch):
+    """/downloads/ 下的路径无 apikey 仍放行(非 401)。
+
+    端点自身可能因未打包 zip 返回 404,但白名单短路在鉴权之前,故断言不是 401。
+    """
+    async with isolated_client(tmp_path, monkeypatch) as (c, _):
+        r = await c.get("/downloads/extension.zip")
+        assert r.status_code != 401
+
+
+async def test_downloads_lookalike_path_requires_key_401(tmp_path, monkeypatch):
+    """/downloadsevil 以 /downloads 开头但无斜杠边界 → 不放行,走鉴权 401。"""
+    async with isolated_client(tmp_path, monkeypatch) as (c, _):
+        r = await c.get("/downloadsevil")
+        assert r.status_code == 401
+
+
 async def test_whoami_bad_key_401(tmp_path, monkeypatch):
     """非法 key → 401。"""
     async with isolated_client(tmp_path, monkeypatch) as (c, _):
