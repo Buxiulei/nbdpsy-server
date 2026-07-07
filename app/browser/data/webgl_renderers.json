@@ -1,0 +1,136 @@
+{
+    "description": "真实 WebGL 渲染器列表，按平台和 GPU 厂商分类",
+    "renderers": {
+        "windows": [
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 10
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 8
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 7
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) HD Graphics 530 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) HD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 6
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 4
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 4
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (AMD)",
+                "renderer": "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (AMD)",
+                "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (AMD)",
+                "renderer": "ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "weight": 2
+            }
+        ],
+        "macos": [
+            {
+                "vendor": "Google Inc. (Apple)",
+                "renderer": "ANGLE (Apple, Apple M1, OpenGL 4.1)",
+                "weight": 10
+            },
+            {
+                "vendor": "Google Inc. (Apple)",
+                "renderer": "ANGLE (Apple, Apple M2, OpenGL 4.1)",
+                "weight": 8
+            },
+            {
+                "vendor": "Google Inc. (Apple)",
+                "renderer": "ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)",
+                "weight": 6
+            },
+            {
+                "vendor": "Google Inc. (Apple)",
+                "renderer": "ANGLE (Apple, Apple M1 Max, OpenGL 4.1)",
+                "weight": 4
+            },
+            {
+                "vendor": "Google Inc. (Apple)",
+                "renderer": "ANGLE (Apple, Apple M3, OpenGL 4.1)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel Inc., Intel(R) Iris(TM) Plus Graphics 655, OpenGL 4.1)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel Inc., Intel(R) UHD Graphics 630, OpenGL 4.1)",
+                "weight": 2
+            }
+        ],
+        "linux": [
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)",
+                "weight": 5
+            },
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Mesa Intel(R) HD Graphics 530 (SKL GT2), OpenGL 4.6)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060/PCIe/SSE2, OpenGL 4.6)",
+                "weight": 3
+            },
+            {
+                "vendor": "Google Inc. (AMD)",
+                "renderer": "ANGLE (AMD, AMD Radeon RX 580 (polaris10, LLVM 15.0.7, DRM 3.49), OpenGL 4.6)",
+                "weight": 2
+            }
+        ]
+    }
+}

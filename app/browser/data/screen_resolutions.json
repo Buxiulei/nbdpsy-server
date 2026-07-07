@@ -1,0 +1,103 @@
+{
+    "description": "主流屏幕分辨率分布，权重基于 StatCounter 2025 桌面端数据",
+    "resolutions": [
+        {
+            "width": 1920,
+            "height": 1080,
+            "weight": 30,
+            "category": "desktop_fhd"
+        },
+        {
+            "width": 2560,
+            "height": 1440,
+            "weight": 12,
+            "category": "desktop_qhd"
+        },
+        {
+            "width": 1366,
+            "height": 768,
+            "weight": 11,
+            "category": "laptop_hd"
+        },
+        {
+            "width": 1536,
+            "height": 864,
+            "weight": 9,
+            "category": "laptop_hd+"
+        },
+        {
+            "width": 1440,
+            "height": 900,
+            "weight": 7,
+            "category": "laptop_wxga+"
+        },
+        {
+            "width": 1680,
+            "height": 1050,
+            "weight": 5,
+            "category": "desktop_wsxga+"
+        },
+        {
+            "width": 2560,
+            "height": 1600,
+            "weight": 4,
+            "category": "laptop_wqxga"
+        },
+        {
+            "width": 3840,
+            "height": 2160,
+            "weight": 4,
+            "category": "desktop_4k"
+        },
+        {
+            "width": 1600,
+            "height": 900,
+            "weight": 4,
+            "category": "laptop_hd+"
+        },
+        {
+            "width": 1280,
+            "height": 720,
+            "weight": 3,
+            "category": "laptop_hd"
+        },
+        {
+            "width": 1280,
+            "height": 800,
+            "weight": 3,
+            "category": "laptop_wxga"
+        },
+        {
+            "width": 1280,
+            "height": 1024,
+            "weight": 2,
+            "category": "desktop_sxga"
+        },
+        {
+            "width": 3440,
+            "height": 1440,
+            "weight": 2,
+            "category": "ultrawide"
+        },
+        {
+            "width": 2880,
+            "height": 1800,
+            "weight": 2,
+            "category": "retina_15"
+        },
+        {
+            "width": 1920,
+            "height": 1200,
+            "weight": 2,
+            "category": "desktop_wuxga"
+        }
+    ],
+    "viewport_offsets": {
+        "description": "浏览器视口通常比屏幕分辨率小（工具栏/地址栏占用）",
+        "height_offset_range": [
+            40,
+            120
+        ],
+        "width_offset": 0
+    }
+}
