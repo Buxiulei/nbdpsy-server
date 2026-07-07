@@ -45,6 +45,8 @@ import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
+from app.browser.cookie_checker import CookieChecker
+from app.core.config import settings
 from app.http.cookies_import import router as cookies_import_router
 from app.http.downloads import router as downloads_router
 from app.publish.runtime import set_active_scheduler
@@ -61,10 +63,11 @@ def create_app() -> FastAPI:
     # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     mcp_app = mcp.http_app(path="/")
 
-    # 3. 父应用 lifespan:建表 → 引导 root 管理员 → 起发布调度器(队列 worker + scan 循环);
-    #    需与 mcp_app.lifespan 组合以启动 session manager。发布调度器经模块级单例交给
-    #    publish_note 工具(投递立即发布任务)。session_factory 在此处读 db_module.async_session
-    #    而非 import 期绑定,使测试对 async_session 的 monkeypatch 生效(落隔离库、不碰生产库)。
+    # 3. 父应用 lifespan:建表 → 引导 root 管理员 → 起发布调度器(队列 worker + scan 循环)→
+    #    可选起 cookie 周期巡检;需与 mcp_app.lifespan 组合以启动 session manager。发布调度器
+    #    经模块级单例交给 publish_note 工具(投递立即发布任务)。session_factory 在此处读
+    #    db_module.async_session 而非 import 期绑定,使测试对 async_session 的 monkeypatch 生效
+    #    (落隔离库、不碰生产库)。cookie 巡检默认关闭(COOKIE_CHECK_INTERVAL=0),测试不受影响。
     @asynccontextmanager
     async def app_lifespan(_app: FastAPI):
         await db_module.init_db()
@@ -72,11 +75,20 @@ def create_app() -> FastAPI:
         scheduler = PublishScheduler(db_module.async_session)
         scheduler.start()
         set_active_scheduler(scheduler)
+        # 可选后台 cookie 巡检:仅在配置 >0 时起(逐个号跑登录检测并写回状态,号间隔防频控)。
+        cookie_checker: CookieChecker | None = None
+        if settings.COOKIE_CHECK_INTERVAL > 0:
+            cookie_checker = CookieChecker(
+                db_module.async_session, settings.COOKIE_CHECK_INTERVAL
+            )
+            cookie_checker.start()
         try:
             yield
         finally:
             set_active_scheduler(None)
             await scheduler.stop()
+            if cookie_checker is not None:
+                await cookie_checker.stop()
 
     app = FastAPI(
         title="nbdpsy-mcp",
