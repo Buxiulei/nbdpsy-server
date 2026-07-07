@@ -36,12 +36,13 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.auth.bootstrap import bootstrap_admin
-from app.auth.context import current_operator
+from app.auth.context import AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
 from app.core.db import init_db
 from app.tools import register_all
@@ -70,6 +71,20 @@ def create_app() -> FastAPI:
 
     # 4. apikey 鉴权中间件:白名单(/healthz、/downloads)放行,其余(含 /mcp/)校验 apikey。
     app.add_middleware(ApiKeyMiddleware)
+
+    # 4.1 app 级异常处理器:把 REST 端点里抛出的鉴权异常转成干净 HTTP,不泄栈成 500。
+    #     (MCP 工具内部抛这些异常时 fastmcp 会自行包成工具错误返回,不走这里。)
+    @app.exception_handler(AuthError)
+    async def _handle_auth_error(_request: Request, exc: AuthError) -> JSONResponse:
+        """未认证/认证失败 → 401 JSON。"""
+        return JSONResponse({"error": str(exc)}, status_code=401)
+
+    @app.exception_handler(PermissionError)
+    async def _handle_permission_error(
+        _request: Request, exc: PermissionError
+    ) -> JSONResponse:
+        """越权 → 403 JSON。"""
+        return JSONResponse({"error": str(exc)}, status_code=403)
 
     # 5. 明文探活 REST:独立于 /mcp,鉴权白名单放行,便于健康检查。
     @app.get("/healthz")

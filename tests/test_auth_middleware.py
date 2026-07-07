@@ -312,3 +312,58 @@ async def test_contextvar_propagation_into_mcp_tool(tmp_path, monkeypatch):
     assert structured["authenticated"] is True
     assert structured["name"] == "root"
     assert structured["role"] == "admin"
+
+
+# ---------------- app 级异常处理器(Task 1.2 附带) ----------------
+
+
+async def test_exception_handlers_and_unauth_whoami(tmp_path, monkeypatch):
+    """app 级异常处理器把鉴权异常转成干净 HTTP,不泄栈成 500。
+
+    - 认证通过后路由抛 AuthError → 401 JSON {"error": ...}
+    - 认证通过后路由抛 PermissionError → 403 JSON {"error": ...}
+    - 未认证打 /api/whoami:中间件先拦,仍 401 不 500(处理器不劣化既有行为)
+    """
+    tmp_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path}/h.db", future=True
+    )
+    tmp_sessionmaker = async_sessionmaker(
+        tmp_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(db_module, "engine", tmp_engine)
+    monkeypatch.setattr(db_module, "async_session", tmp_sessionmaker)
+    monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", ADMIN_KEY)
+
+    from app.auth.context import AuthError
+
+    app = create_app()
+
+    # 挂两个只在本测试用的路由,分别抛 AuthError / PermissionError,验证处理器转码。
+    @app.get("/api/_raise_auth")
+    async def _raise_auth() -> dict:
+        raise AuthError("boom-auth")
+
+    @app.get("/api/_raise_perm")
+    async def _raise_perm() -> dict:
+        raise PermissionError("boom-perm")
+
+    try:
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://t"
+            ) as c:
+                auth = {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+                ra = await c.get("/api/_raise_auth", headers=auth)
+                assert ra.status_code == 401
+                assert ra.json()["error"] == "boom-auth"
+
+                rp = await c.get("/api/_raise_perm", headers=auth)
+                assert rp.status_code == 403
+                assert rp.json()["error"] == "boom-perm"
+
+                # 未认证 whoami 仍由中间件拦成 401(不 500)
+                rw = await c.get("/api/whoami")
+                assert rw.status_code == 401
+    finally:
+        await tmp_engine.dispose()
