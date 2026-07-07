@@ -46,6 +46,7 @@ from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
 from app.http.cookies_import import router as cookies_import_router
+from app.http.downloads import router as downloads_router
 from app.publish.runtime import set_active_scheduler
 from app.publish.scheduler import PublishScheduler
 from app.tools import register_all
@@ -113,6 +114,9 @@ def create_app() -> FastAPI:
 
     # 7. 挂载 REST 路由:插件推 cookie 端点。路径不在中间件白名单,自动受 apikey 保护。
     app.include_router(cookies_import_router)
+
+    # 7.1 挂载插件包下载端点。路径落在中间件白名单 /downloads 前缀,无需 apikey 即可下载。
+    app.include_router(downloads_router)
 
     # 8. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
     app.mount("/mcp", mcp_app)

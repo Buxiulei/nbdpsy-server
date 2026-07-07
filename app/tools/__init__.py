@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 from app.tools.accounts import register_accounts
 from app.tools.admin import register_admin
 from app.tools.cookies import register_cookies
+from app.tools.extension import register_extension
 from app.tools.publish import register_publish
 from app.tools.system import register_system
 
@@ -20,3 +21,4 @@ def register_all(mcp: FastMCP) -> None:
     register_accounts(mcp)
     register_cookies(mcp)
     register_publish(mcp)
+    register_extension(mcp)
