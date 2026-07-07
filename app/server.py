@@ -1,0 +1,74 @@
+"""FastAPI + FastMCP(Streamable HTTP)骨架 + /healthz 探活。
+
+================= fastmcp API 结论 =================
+来源:context7(/prefecthq/fastmcp)核对 + 本地实测,安装版本 fastmcp 3.4.3。
+
+1. 创建实例 & 注册工具
+   mcp = FastMCP("名字")
+   用装饰器 @mcp.tool(不带括号)把函数注册为工具;工具返回 dict 时,
+   FastMCP 会同时给出 structured_content(dict)与 JSON 文本 content。
+   实例上直接有异步 mcp.list_tools() / mcp.call_tool(name, args)(3.x;
+   注意不是 2.x 的 get_tools(),也无 _tool_manager 私有属性)。
+
+2. 取 Streamable HTTP ASGI app & 挂到 FastAPI
+   mcp_app = mcp.http_app(path="/")     # 返回 StarletteWithLifespan
+   # http_app 的 transport 默认 "http" 即 Streamable HTTP(SSE 为兼容旧协议)。
+   # 子 app 内路径设 "/",挂到父应用 /mcp,则 MCP 端点落在 /mcp/。
+   # 关键:必须把 mcp_app.lifespan 交给父应用,否则 MCP session manager 的
+   #       task group 不初始化,请求 /mcp 会因 task group 未启动而报错。
+   # 与父应用自身 lifespan 组合,用 fastmcp.utilities.lifespan.combine_lifespans:
+   app = FastAPI(lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan))
+   app.mount("/mcp", mcp_app)
+   # /healthz 是父应用上的独立明文路由,不经过 /mcp 子 app,故不依赖上面的
+   # lifespan——探活/后续鉴权白名单选它正因如此。
+
+3. 工具内读取 HTTP 请求头(Task 1.1 apikey 中间件将用)
+   from fastmcp.server.dependencies import get_http_headers
+   headers = get_http_headers()          # -> dict[str, str];无 HTTP 上下文返回 {}
+   # 默认剔除 host/content-length 等;get_http_headers(include_all=True) 取全部。
+   # 另有依赖注入写法(本地已确认可 import):
+   #   from fastmcp.dependencies import CurrentHeaders, CurrentRequest
+   #   @mcp.tool
+   #   async def t(headers: dict = CurrentHeaders()): ...
+   # Task 1.1 优先用 get_http_headers()(免改工具签名,鉴权在中间件/依赖里统一取)。
+===================================================
+"""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastmcp import FastMCP
+from fastmcp.utilities.lifespan import combine_lifespans
+
+from app.core.db import init_db
+from app.tools import register_all
+
+
+def create_app() -> FastAPI:
+    """构建并返回挂载了 FastMCP 的 FastAPI 应用。"""
+    # 1. FastMCP 实例 + 注册全部工具(此刻只 system.health)。
+    mcp = FastMCP("nbdpsy-mcp")
+    register_all(mcp)
+
+    # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
+    mcp_app = mcp.http_app(path="/")
+
+    # 3. 父应用 lifespan:暂只建表;需与 mcp_app.lifespan 组合以启动 session manager。
+    @asynccontextmanager
+    async def app_lifespan(_app: FastAPI):
+        await init_db()
+        yield
+
+    app = FastAPI(
+        title="nbdpsy-mcp",
+        lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
+    )
+
+    # 4. 明文探活 REST:独立于 /mcp,便于健康检查与后续鉴权白名单放行。
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"ok": True}
+
+    # 5. 挂载 MCP 端点。
+    app.mount("/mcp", mcp_app)
+    return app
