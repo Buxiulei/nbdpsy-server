@@ -227,16 +227,25 @@ async def test_queue_submit_runs_runner():
 
 
 async def test_publish_runner_full_flow(db_factory, monkeypatch):
-    """真实 runner:载参 → mark_publishing → 锁 → to_thread(publish_once) → finish=published。"""
+    """真实 runner:载参 → mark_publishing → 物料化 → 锁 → to_thread(publish_once) → finish=published。"""
+    from pathlib import Path
+
     account_id = await _make_account(db_factory)
     job_id = await _make_job(
         db_factory,
         account_id,
-        images_json=json.dumps(["/img/a.png"]),
+        images_json=json.dumps(["https://cdn/a.png"]),
         topics_json=json.dumps(["#心理"]),
     )
 
     captured = {}
+
+    # 物料化打桩:URL → 本地路径(不触真下载),断言 runner 用物料化后的本地路径调 publish_once
+    def fake_materialize(images, workdir):
+        captured["materialize"] = (list(images), str(workdir))
+        return [Path("/local/a.png")]
+
+    monkeypatch.setattr(scheduler_mod, "materialize_images", fake_materialize)
 
     def fake_publish_once(acc_id, cookies, title, content, image_paths, topics):
         captured["args"] = (acc_id, cookies, title, content, image_paths, topics)
@@ -252,11 +261,13 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
     assert job.status == "published"
     assert job.note_id == "nid"
     assert job.note_url == "https://xhs/1"
-    # 发布参数由 job 正确拆出(account 无 cookie → 空列表)
+    # 物料化收到原始 URL 列表
+    assert captured["materialize"][0] == ["https://cdn/a.png"]
+    # 发布参数由 job 正确拆出(account 无 cookie → 空列表),image_paths 是物料化后的本地路径
     acc_id, cookies, title, content, image_paths, topics = captured["args"]
     assert acc_id == account_id
     assert cookies == []
-    assert image_paths == ["/img/a.png"]
+    assert image_paths == ["/local/a.png"]
     assert topics == ["#心理"]
 
 

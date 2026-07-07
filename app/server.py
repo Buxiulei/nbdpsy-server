@@ -41,11 +41,13 @@ from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.utilities.lifespan import combine_lifespans
 
+import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
-from app.core.db import init_db
 from app.http.cookies_import import router as cookies_import_router
+from app.publish.runtime import set_active_scheduler
+from app.publish.scheduler import PublishScheduler
 from app.tools import register_all
 
 
@@ -58,12 +60,22 @@ def create_app() -> FastAPI:
     # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     mcp_app = mcp.http_app(path="/")
 
-    # 3. 父应用 lifespan:建表后引导 root 管理员;需与 mcp_app.lifespan 组合以启动 session manager。
+    # 3. 父应用 lifespan:建表 → 引导 root 管理员 → 起发布调度器(队列 worker + scan 循环);
+    #    需与 mcp_app.lifespan 组合以启动 session manager。发布调度器经模块级单例交给
+    #    publish_note 工具(投递立即发布任务)。session_factory 在此处读 db_module.async_session
+    #    而非 import 期绑定,使测试对 async_session 的 monkeypatch 生效(落隔离库、不碰生产库)。
     @asynccontextmanager
     async def app_lifespan(_app: FastAPI):
-        await init_db()
+        await db_module.init_db()
         await bootstrap_admin()
-        yield
+        scheduler = PublishScheduler(db_module.async_session)
+        scheduler.start()
+        set_active_scheduler(scheduler)
+        try:
+            yield
+        finally:
+            set_active_scheduler(None)
+            await scheduler.stop()
 
     app = FastAPI(
         title="nbdpsy-mcp",

@@ -16,13 +16,16 @@
 
 import asyncio
 import json
+import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from loguru import logger
 from sqlalchemy import or_, select, update
 
 from app.browser import sync_client
+from app.browser.images import materialize_images
 from app.core.config import settings
 from app.core.security import decrypt_cookies
 from app.models.publish_job import PublishJob
@@ -61,8 +64,11 @@ def make_publish_runner(
         if not await scheduler.mark_publishing(job_id):
             return
 
-        # 2. 占用成功后的整个执行(载数据 + 线程发布 + finish)统一兜底:任何一步抛异常都
-        #    显式 finish(success=False),交回重试/退避机制,绝不让 job 卡死在 publishing。
+        # 临时物料目录:URL/base64 图片落成本地文件的落盘处,发布结束(无论成败)清理。
+        workdir = Path(settings.UPLOAD_DIR) / f"job_{job_id}"
+
+        # 2. 占用成功后的整个执行(载数据 + 物料化 + 线程发布 + finish)统一兜底:任何一步抛异常
+        #    都显式 finish(success=False),交回重试/退避机制,绝不让 job 卡死在 publishing。
         try:
             # 2a. 载 job + account + cookie(会话内取尽所需字段,出会话不再触发 lazy load)
             async with session_factory() as session:
@@ -73,11 +79,17 @@ def make_publish_runner(
                 account_id = job.account_id
                 title = job.title
                 content = job.content
-                image_paths = json.loads(job.images_json or "[]")
+                raw_images = json.loads(job.images_json or "[]")
                 topics = json.loads(job.topics_json or "[]")
                 cookies = _decrypt_account_cookies(account)
 
-            # 2b. per-account 锁串行 + 线程内跑 sync 发布(禁同号并发)
+            # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
+            #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
+            #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
+            paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
+            image_paths = [str(p) for p in paths]
+
+            # 2c. per-account 锁串行 + 线程内跑 sync 发布(禁同号并发)
             async with account_locks.get(account_id):
                 result = await asyncio.to_thread(
                     sync_client.publish_once,
@@ -89,15 +101,18 @@ def make_publish_runner(
                     topics,
                 )
 
-            # 2c. 落状态机(成功→published;失败→重试排期或 failed)
+            # 2d. 落状态机(成功→published;失败→重试排期或 failed)
             await scheduler.finish(job_id, result)
         except Exception as exc:
             # publish_once 内部已把可预期失败转成 PublishResult;能逃到这里的是构造/收尾/
-            # 载数据等意外异常。兜底落一个失败结果,让状态机排重试而非永久 publishing。
+            # 载数据/物料化等意外异常。兜底落一个失败结果,让状态机排重试而非永久 publishing。
             logger.exception("发布 runner 处理 job {} 异常,兜底转失败", job_id)
             await scheduler.finish(
                 job_id, sync_client.PublishResult(success=False, error=str(exc))
             )
+        finally:
+            # 清理临时物料目录(成功 / 失败 / 提前 return 都清;不存在则忽略)
+            shutil.rmtree(workdir, ignore_errors=True)
 
     return publish_runner
 
@@ -125,6 +140,14 @@ class PublishScheduler:
         self._poll_interval = poll_interval
         self._stop_event: asyncio.Event | None = None
         self._loop_task: asyncio.Task | None = None
+
+    def submit(self, job_id: int) -> None:
+        """把 job_id 立即投入内部队列(publish_note 无定时发布走此路径,免等下个 scan 周期)。
+
+        与 scan 循环共用同一队列 + runner;即便扫表也捞到同一 job,``mark_publishing`` 的
+        原子占用保证只处理一次,重复 submit 安全。
+        """
+        self._queue.submit(job_id)
 
     async def scan_once(self) -> list[int]:
         """选可发布的 pending job id:schedule_time 与 next_retry_at 均为空或已到期,按 id 升序。"""
