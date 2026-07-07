@@ -1,0 +1,50 @@
+{
+    "manifest_version": 3,
+    "name": "NBDpsy 小红书账号助手",
+    "version": "2.0.0",
+    "description": "在真实浏览器人工登录小红书，一键把账号 Cookie 推送到 NBDpsy 后台（远程登录唯一入口）",
+    "permissions": [
+        "cookies",
+        "activeTab",
+        "storage",
+        "tabs",
+        "scripting",
+        "webRequest"
+    ],
+    "host_permissions": [
+        "https://*.xiaohongshu.com/*",
+        "https://*.xhslink.com/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://xhs.nbdpsy.com/*"
+    ],
+    "action": {
+        "default_popup": "popup/popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon48.png",
+            "128": "icons/icon128.png"
+        },
+        "default_title": "NBDpsy 账号助手"
+    },
+    "background": {
+        "service_worker": "background/service-worker.js",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://*.xiaohongshu.com/*"
+            ],
+            "js": [
+                "content/content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    }
+}
