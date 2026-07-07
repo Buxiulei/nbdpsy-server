@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Text
+from sqlalchemy import DateTime, Index, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -16,6 +16,17 @@ class XhsAccount(Base):
     """
 
     __tablename__ = "xhs_accounts"
+
+    # user_id 部分唯一索引:非 NULL 时全库唯一(同一小红书号只允许一行);
+    # user_id 为 NULL(仅 name 建的号)不受约束,可多行并存。
+    __table_args__ = (
+        Index(
+            "uq_xhs_account_user_id",
+            "user_id",
+            unique=True,
+            sqlite_where=text("user_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # 内部展示名(运营者可读),必填

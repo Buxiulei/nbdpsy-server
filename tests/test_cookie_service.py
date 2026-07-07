@@ -9,7 +9,9 @@
 
 import json
 
+import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import AccessDenied
@@ -165,6 +167,68 @@ async def test_import_idempotent_by_account_name(db: AsyncSession):
         await db.execute(select(func.count()).select_from(XhsAccount))
     ).scalar()
     assert total == 1
+
+
+async def test_user_id_partial_unique_index_enforced(db: AsyncSession):
+    """user_id 部分唯一索引:同一非空 user_id 第二行 IntegrityError;多个 NULL 允许并存。"""
+    a1 = XhsAccount(name="号1")
+    a1.user_id = "dup"
+    db.add(a1)
+    await db.commit()
+
+    # 同一非空 user_id 再插一行 → 撞唯一索引
+    a2 = XhsAccount(name="号2")
+    a2.user_id = "dup"
+    db.add(a2)
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+    # 部分索引:user_id 为 NULL(仅 name 建的号)不受约束,可多行并存
+    n1 = XhsAccount(name="空号A")
+    n2 = XhsAccount(name="空号B")
+    db.add_all([n1, n2])
+    await db.commit()
+
+    total = (
+        await db.execute(select(func.count()).select_from(XhsAccount))
+    ).scalar()
+    # a1(dup) + n1 + n2;a2 已回滚
+    assert total == 3
+
+
+async def test_import_no_false_merge_across_user_ids(db: AsyncSession):
+    """account_name 兜底防误并:同名但不同 user_id 不并入,新建独立行。"""
+    op = await _make_operator(db)
+
+    # 1) 仅 account_name、无 user_id → 新建(user_id 为空)
+    acc0, c0 = await cookie_service.import_cookies(
+        db, op, "同名号", [{"name": "a1", "value": "0"}], None
+    )
+    assert c0 is True
+    assert acc0.user_id is None
+
+    # 2) 相同 account_name 带 user_id A → 允许并入该行(把 A 盖上,合理)
+    accA, cA = await cookie_service.import_cookies(
+        db, op, "同名号", [{"name": "a1", "value": "A"}], {"user_id": "A"}
+    )
+    assert cA is False
+    assert accA.id == acc0.id
+    assert accA.user_id == "A"
+
+    # 3) 相同 account_name 带不同 user_id B → 不并入(现在该行 user_id=A),新建独立行
+    accB, cB = await cookie_service.import_cookies(
+        db, op, "同名号", [{"name": "a1", "value": "B"}], {"user_id": "B"}
+    )
+    assert cB is True
+    assert accB.id != accA.id
+    assert accB.user_id == "B"
+
+    # 两行,id 不同
+    total = (
+        await db.execute(select(func.count()).select_from(XhsAccount))
+    ).scalar()
+    assert total == 2
 
 
 # ---------------- get_cookies ----------------
