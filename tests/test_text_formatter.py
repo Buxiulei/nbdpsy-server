@@ -81,6 +81,38 @@ def test_truncate_emoji_not_split():
     assert text_formatter.get_display_length(out) <= 5
 
 
+def test_truncate_consecutive_independent_emoji():
+    """连续但无 ZWJ 连接的独立 emoji 可逐个保留、用满预算,不被整串丢弃。
+
+    "a😀😀😀" + max_width=3:a(1) + 😀(len1+可见1=2)= 3 恰好用满;加第二个 😀
+    → get_display_length("a😀😀")=len3+可见1=4 > 3 → 停。结果 "a😀"。
+    (旧实现把 😀😀😀 当一个不可分单元,边界落其中 → 只剩 "a"。)
+    """
+    assert text_formatter.truncate_by_display("a😀😀😀", 3) == "a😀"
+
+
+def test_truncate_consecutive_emoji_uses_full_budget():
+    """"新品🎉🎉🎉" + max_width=4:新品(2) + 🎉(len1+可见1) → 4 恰好;加第二个 🎉=5 超。"""
+    assert text_formatter.truncate_by_display("新品🎉🎉🎉", 4) == "新品🎉"
+
+
+def test_truncate_zwj_emoji_kept_whole_when_fits():
+    """ZWJ 复合 emoji 放得下时整体保留(原子单元不被拆):中中中🏃‍♀️ 宽 8 @ 8 全留。"""
+    text = "中中中🏃‍♀️"
+    assert text_formatter.get_display_length(text) == 8
+    assert text_formatter.truncate_by_display(text, 8) == text
+
+
+def test_truncate_pure_emoji():
+    """纯独立 emoji 串按预算逐个保留:😀😀😀 @ 2 → 😀(len1+可见1=2 用满,第二个超)。"""
+    assert text_formatter.truncate_by_display("😀😀😀", 2) == "😀"
+
+
+def test_truncate_max_width_zero():
+    """max_width=0 → 空串(放不下任何单元)。"""
+    assert text_formatter.truncate_by_display("abc", 0) == ""
+
+
 def test_truncate_shorter_than_limit_unchanged():
     """未超限时原样返回。"""
     assert text_formatter.truncate_by_display("短", 20) == "短"

@@ -50,45 +50,60 @@ def get_display_length(text: str) -> int:
     return len(text) + visible_emoji_count
 
 
-def _iter_units(text: str):
-    """把文本切成不可分割的单元,并给出每个单元在 ``get_display_length`` 下的贡献宽度。
+# 截断专用的原子单元正则。与计数用的 ``_EMOJI_PATTERN`` 关键区别:后续 emoji 基础
+# 字符**必须由 ZWJ(U+200D)连接**才并入同一单元 —— 因此 ZWJ 复合序列(如 🏃‍♀️)
+# 整体不可分,而**相邻但无 ZWJ 的独立 emoji**(😀😀)各自成独立单元,不被贪婪合并。
+# (``_EMOJI_PATTERN`` 末尾那段无 ZWJ 也贪婪续接,截断时会把整串独立 emoji 当一个
+#  不可分单元、边界落其中就整串丢弃 —— 那是计数语义,不适合切分。)
+_ATOMIC_EMOJI_PATTERN = re.compile(
+    r'(?:'
+    r'[\U0001F1E6-\U0001F1FF]{2}'  # 国旗(两个区域指示符)
+    r'|'
+    r'[\U0001F300-\U0001F9FF\U0001FA70-\U0001FAFF\U00002600-\U000027BF]'  # emoji 基础字符
+    r'[\U0001F3FB-\U0001F3FF️]*'  # 可选的肤色修饰符 / 变体选择器
+    r'(?:‍[\U0001F300-\U0001F9FF\U0001FA70-\U0001FAFF\U00002600-\U000027BF][\U0001F3FB-\U0001F3FF️]*)*'  # 仅经 ZWJ 续接后续 emoji
+    r')'
+)
 
-    - emoji 序列(含 ZWJ 复合)整体为一个单元,宽度 = 码点数 + 1(可见 emoji 计一次);
-    - 其余每个普通字符为一个单元,宽度 1。
 
-    保证:所有单元宽度之和 == ``get_display_length(text)``,且 emoji 序列不会被拆开,
-    从而截断时不会切出半个 emoji。
+def _iter_atomic_units(text: str):
+    """把文本切成不可再分的原子单元(截断边界只落在单元之间)。
+
+    - ZWJ 复合 emoji 序列(如 🏃‍♀️ = emoji + ZWJ + emoji + 修饰符)整体为一个单元;
+    - 相邻但无 ZWJ 连接的独立 emoji(😀😀)各自成独立单元;
+    - 其余每个普通字符各为一个单元。
+
+    宽度裁判交给 ``get_display_length``,本函数只负责"在哪切"。
     """
-    spans = {m.start(): m.end() for m in _EMOJI_PATTERN.finditer(text)}
+    spans = {m.start(): m.end() for m in _ATOMIC_EMOJI_PATTERN.finditer(text)}
     i, n = 0, len(text)
     while i < n:
         if i in spans:
             end = spans[i]
-            seg = text[i:end]
-            yield seg, len(seg) + 1  # 码点数 + 可见 emoji 1
+            yield text[i:end]
             i = end
         else:
-            yield text[i], 1
+            yield text[i]
             i += 1
 
 
 def truncate_by_display(text: str, max_width: int) -> str:
     """按 ``get_display_length`` 度量截断文本,保证结果长度 ≤ ``max_width``。
 
-    逐单元(普通字符或整段 emoji 序列)累加宽度,一旦加入下个单元会超出 ``max_width``
-    就停止 —— 因此永远在字符 / emoji 序列边界处截断,不会切出半个 emoji。
+    以 ``get_display_length`` 为唯一宽度裁判,逐原子单元累加:放得下就加上,放不下就
+    停 —— 因此永远在字符 / emoji 序列边界处截断,不会切出半个 emoji;且相邻独立 emoji
+    各自成单元,可逐个保留、用满预算(不因贪婪合并被整串丢弃)。ZWJ 复合序列仍整体不可分。
     """
     if not text or max_width <= 0:
         return "" if max_width <= 0 else text
 
-    width = 0
-    result = []
-    for seg, w in _iter_units(text):
-        if width + w > max_width:
+    result = ""
+    for unit in _iter_atomic_units(text):
+        if get_display_length(result + unit) <= max_width:
+            result += unit
+        else:
             break
-        width += w
-        result.append(seg)
-    return "".join(result)
+    return result
 
 
 def format_for_xiaohongshu(text: str) -> str:
