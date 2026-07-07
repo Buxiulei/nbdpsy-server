@@ -1,8 +1,9 @@
 """text_formatter 纯逻辑单测(不起真浏览器)。
 
 覆盖:
-- get_display_length:半角 1 / 全角(CJK)2 / emoji 2
-- truncate_by_display:按显示宽度截断,结果 ≤ max_width 且不截半个字符
+- get_display_length:小红书字符计数 = len(text) + 可见 emoji 序列个数
+  (每字符含中文按 1,每个可见 emoji 额外 +1;经旧仓生产验证)
+- truncate_by_display:按该度量截断,结果 ≤ max_width 且不截半个字符 / emoji 序列
 - format_for_xiaohongshu:清除 Markdown 标记(加粗 / 标题 / 链接等)
 
 顺带对 login_detector / sync_human_actions 做 import 冒烟
@@ -13,50 +14,71 @@ import pytest
 from app.browser import text_formatter
 
 
-# ── get_display_length ──
-def test_display_width_ascii():
+# ── get_display_length(len + 可见 emoji 序列个数,中文按 1)──
+def test_display_length_ascii():
     """纯半角字符按 1 计。"""
     assert text_formatter.get_display_length("abc") == 3
 
 
-def test_display_width_emoji():
-    """半角 1 + emoji 2 = 3。"""
+def test_display_length_emoji():
+    """a=1 + 😀(len1 + 可见 emoji1 = 2) = 3。"""
     assert text_formatter.get_display_length("a😀") == 3
 
 
-def test_display_width_cjk_fullwidth():
-    """中文全角每字计 2。"""
-    assert text_formatter.get_display_length("中") == 2
-    assert text_formatter.get_display_length("中文") == 4
+def test_display_length_cjk_counts_one():
+    """中文每字计 1(旧仓生产语义:20 个中文标题 = 20,符合小红书 20 上限)。"""
+    assert text_formatter.get_display_length("中") == 1
+    assert text_formatter.get_display_length("中文标题") == 4
 
 
-def test_display_width_mixed():
-    """中英混排:2 个中文(4) + 3 个半角(3) = 7。"""
-    assert text_formatter.get_display_length("你好abc") == 7
+def test_display_length_cjk_with_emoji():
+    """2 个中文(2) + 😀(len1 + 可见 emoji1 = 2) = 4。"""
+    assert text_formatter.get_display_length("中文😀") == 4
 
 
-def test_display_width_empty():
-    """空串宽度为 0。"""
+def test_display_length_mixed():
+    """中英混排:2 个中文(2) + 3 个半角(3) = 5。"""
+    assert text_formatter.get_display_length("你好abc") == 5
+
+
+def test_display_length_zwj_emoji():
+    """ZWJ 复合 emoji 🏃‍♀️ 整体计 1 个可见 emoji:len(4) + 1 = 5。"""
+    text = "🏃‍♀️"
+    assert text_formatter.get_display_length(text) == len(text) + 1
+    assert text_formatter.get_display_length(text) == 5
+
+
+def test_display_length_empty():
+    """空串长度为 0。"""
     assert text_formatter.get_display_length("") == 0
 
 
-# ── truncate_by_display ──
-def test_truncate_title_within_width():
-    """按显示宽度截到 ≤ 20。"""
-    long_title = "很长的标题" * 10  # 全角 50 字 → 显示宽 100
-    out = text_formatter.truncate_by_display(long_title, 20)
-    assert text_formatter.get_display_length(out) <= 20
+# ── truncate_by_display(按 get_display_length 度量截断)──
+def test_truncate_20_cjk_unchanged():
+    """20 个中文 + max_width=20 → 恰好不截断(每字计 1,总长 20 ≤ 20)。"""
+    title = "标" * 20
+    out = text_formatter.truncate_by_display(title, 20)
+    assert out == title
+    assert text_formatter.get_display_length(out) == 20
 
 
-def test_truncate_no_half_char():
-    """不截半个字符:宽 2 的字符不会因边界被切成半个。
+def test_truncate_21_cjk_to_20():
+    """21 个中文 + max_width=20 → 截到 20 个中文。"""
+    out = text_formatter.truncate_by_display("标" * 21, 20)
+    assert out == "标" * 20
+    assert text_formatter.get_display_length(out) == 20
 
-    "中中中" 显示宽 6,截到 5 时只能容纳 2 个中文(宽 4),第 3 个会溢出到 6 > 5,
-    因此保留 2 个,宽度 4 ≤ 5,且不出现半个字符。
+
+def test_truncate_emoji_not_split():
+    """含 emoji 时不把 emoji 序列截半:边界处放不下整段 emoji 就整段丢弃。
+
+    "中中中🏃‍♀️":前 3 个中文宽 3,🏃‍♀️ 宽 5(len4 + 可见 1),总宽 8。
+    截到 5 时只容得下 3 个中文(宽 3),加 emoji 会到 8 > 5 → 丢弃整段 emoji,
+    结果 "中中中" 宽 3 ≤ 5,不出现半个 emoji。
     """
-    out = text_formatter.truncate_by_display("中中中", 5)
-    assert out == "中中"
-    assert text_formatter.get_display_length(out) == 4
+    out = text_formatter.truncate_by_display("中中中🏃‍♀️", 5)
+    assert out == "中中中"
+    assert text_formatter.get_display_length(out) <= 5
 
 
 def test_truncate_shorter_than_limit_unchanged():
