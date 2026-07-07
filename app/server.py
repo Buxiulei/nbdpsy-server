@@ -40,6 +40,9 @@ from fastapi import FastAPI
 from fastmcp import FastMCP
 from fastmcp.utilities.lifespan import combine_lifespans
 
+from app.auth.bootstrap import bootstrap_admin
+from app.auth.context import current_operator
+from app.auth.middleware import ApiKeyMiddleware
 from app.core.db import init_db
 from app.tools import register_all
 
@@ -53,10 +56,11 @@ def create_app() -> FastAPI:
     # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     mcp_app = mcp.http_app(path="/")
 
-    # 3. 父应用 lifespan:暂只建表;需与 mcp_app.lifespan 组合以启动 session manager。
+    # 3. 父应用 lifespan:建表后引导 root 管理员;需与 mcp_app.lifespan 组合以启动 session manager。
     @asynccontextmanager
     async def app_lifespan(_app: FastAPI):
         await init_db()
+        await bootstrap_admin()
         yield
 
     app = FastAPI(
@@ -64,11 +68,20 @@ def create_app() -> FastAPI:
         lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
     )
 
-    # 4. 明文探活 REST:独立于 /mcp,便于健康检查与后续鉴权白名单放行。
+    # 4. apikey 鉴权中间件:白名单(/healthz、/downloads)放行,其余(含 /mcp/)校验 apikey。
+    app.add_middleware(ApiKeyMiddleware)
+
+    # 5. 明文探活 REST:独立于 /mcp,鉴权白名单放行,便于健康检查。
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True}
 
-    # 5. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
+    # 6. 受保护探针 REST:中间件校验通过后,读取上下文里的当前运营者(验证 ContextVar 穿透 REST 路由)。
+    @app.get("/api/whoami")
+    async def whoami() -> dict:
+        op = current_operator()  # 未认证时中间件已拦截返回 401,此处必有运营者
+        return {"name": op.name, "role": op.role}
+
+    # 7. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
     app.mount("/mcp", mcp_app)
     return app

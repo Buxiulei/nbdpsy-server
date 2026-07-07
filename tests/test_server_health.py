@@ -73,6 +73,12 @@ async def test_mcp_endpoint_wired_via_real_lifespan(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(db_module, "engine", tmp_engine)
     monkeypatch.setattr(db_module, "async_session", tmp_sessionmaker)
+    # /mcp/ 现在受 apikey 中间件保护:注入 ROOT_ADMIN_APIKEY 让 bootstrap 建 root,
+    # 再用 Bearer 头通过校验(否则 initialize 直接被中间件 401 拦掉)。
+    from app.core import config as config_module
+
+    admin_key = "wired-test-admin-key"
+    monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", admin_key)
 
     app = create_app()
     try:
@@ -92,7 +98,10 @@ async def test_mcp_endpoint_wired_via_real_lifespan(tmp_path, monkeypatch):
                             "clientInfo": {"name": "t", "version": "0"},
                         },
                     },
-                    headers={"Accept": "application/json, text/event-stream"},
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": f"Bearer {admin_key}",
+                    },
                 )
     finally:
         await tmp_engine.dispose()
