@@ -91,6 +91,25 @@ async def test_check_once_only_valid_and_writes_back(smk, monkeypatch):
         assert iv.cookie_status == "invalid"  # 未被巡检,保持原状
 
 
+async def test_check_once_error_preserves_status(smk, monkeypatch):
+    """基础设施失败(check_login_once 返回 error):不写回,保留原 cookie_status='valid'。"""
+    valid_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
+
+    def fake_check(account_id, cookies):
+        return {"status": "error", "user_info": None, "reason": "浏览器启动失败:boom"}
+
+    monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    checked = await checker.check_once()
+
+    assert checked == 1  # 仍算已检测(浏览器确实尝试过)
+    async with smk() as s:
+        v = await s.get(XhsAccount, valid_id)
+        assert v.cookie_status == "valid"  # 好号未被误标失效
+        assert v.last_check_at is None  # error 态不写任何字段
+
+
 async def test_check_once_skips_valid_without_cookies(smk, monkeypatch):
     """cookie_status=valid 但无 login_cookies 的号:跳过检测,不误改状态。"""
     empty_id = await _add_account(smk, "空号", "valid", cookies=None)

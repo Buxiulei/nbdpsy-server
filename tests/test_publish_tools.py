@@ -171,7 +171,7 @@ async def test_publish_note_creates_pending_and_enqueues(tmp_path, monkeypatch):
             reset_current_operator(token)
 
         data = res.structured_content
-        assert data["status"] == "queued"
+        assert data["status"] == "pending"
         job_id = data["job_id"]
         assert isinstance(job_id, int)
         # 立即入队
@@ -199,7 +199,7 @@ async def test_publish_note_scheduled_not_enqueued(tmp_path, monkeypatch):
                 {
                     "account_id": ids["acc1"],
                     "title": "T", "content": "C",
-                    "images": [], "topics": [],
+                    "images": ["https://cdn/x.png"], "topics": [],
                     "schedule_time": "2099-01-01T08:00:00",
                 },
             )
@@ -239,6 +239,58 @@ async def test_publish_note_denied_without_access(tmp_path, monkeypatch):
             assert cnt == 0
 
 
+# ---------------- D1:publish_note 图片张数校验(建 job 前早失败) ----------------
+
+
+async def test_publish_note_rejects_empty_images(tmp_path, monkeypatch):
+    """D1:images 为空 → 立即报错,不建 pending job、不入队。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, sched):
+        ids = await _seed(smk)
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            with pytest.raises(ToolError) as ei:
+                await mcp.call_tool(
+                    "publish_note",
+                    {
+                        "account_id": ids["acc1"],
+                        "title": "T", "content": "C",
+                        "images": [], "topics": [],
+                    },
+                )
+            assert "至少需要 1 张图片" in str(ei.value)
+        finally:
+            reset_current_operator(token)
+        assert sched.submitted == []
+        async with smk() as s:
+            cnt = (await s.execute(select(func.count()).select_from(PublishJob))).scalar()
+            assert cnt == 0
+
+
+async def test_publish_note_rejects_too_many_images(tmp_path, monkeypatch):
+    """D1:images 超 18 张 → 立即报错,不建 pending job。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, sched):
+        ids = await _seed(smk)
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            with pytest.raises(ToolError) as ei:
+                await mcp.call_tool(
+                    "publish_note",
+                    {
+                        "account_id": ids["acc1"],
+                        "title": "T", "content": "C",
+                        "images": [f"https://cdn/{i}.png" for i in range(19)],
+                        "topics": [],
+                    },
+                )
+            assert "最多 18 张图片" in str(ei.value)
+        finally:
+            reset_current_operator(token)
+        assert sched.submitted == []
+        async with smk() as s:
+            cnt = (await s.execute(select(func.count()).select_from(PublishJob))).scalar()
+            assert cnt == 0
+
+
 # ---------------- get_publish_status ----------------
 
 
@@ -271,6 +323,32 @@ async def test_get_publish_status_reads_and_access(tmp_path, monkeypatch):
             assert "无权操作账号" in str(ei.value)
         finally:
             reset_current_operator(token)
+
+
+async def test_get_publish_status_returns_enriched_fields(tmp_path, monkeypatch):
+    """C2:返回体补全 job_id/account_id/schedule_time/next_retry_at,既有字段不删。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        job_id = await _make_job(
+            smk, ids["acc1"], status="failed", error="boom", retries=1,
+            schedule_time=datetime(2099, 1, 1, 0, 0, 0),
+            next_retry_at=datetime(2099, 1, 1, 0, 5, 0),
+        )
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            res = await mcp.call_tool("get_publish_status", {"job_id": job_id})
+        finally:
+            reset_current_operator(token)
+        data = res.structured_content
+        # 新增字段
+        assert data["job_id"] == job_id
+        assert data["account_id"] == ids["acc1"]
+        assert data["schedule_time"] == "2099-01-01T00:00:00"
+        assert data["next_retry_at"] == "2099-01-01T00:05:00"
+        # 既有字段仍在(向后兼容)
+        assert data["status"] == "failed"
+        assert data["error"] == "boom"
+        assert data["retries"] == 1
 
 
 # ---------------- list_publish_jobs ----------------
@@ -328,6 +406,40 @@ async def test_list_publish_jobs_status_filter(tmp_path, monkeypatch):
         assert got == {pending}
 
 
+async def test_list_publish_jobs_rejects_bad_status(tmp_path, monkeypatch):
+    """D2:status 传非法值 → 明确报错(列出合法值),而非静默返回空。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        await _make_job(smk, ids["acc1"], status="pending")
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            with pytest.raises(ToolError) as ei:
+                await mcp.call_tool(
+                    "list_publish_jobs", {"status": "done"}
+                )
+            msg = str(ei.value)
+            assert "status 非法" in msg
+            assert "pending" in msg  # 报错里带上合法值
+        finally:
+            reset_current_operator(token)
+
+
+async def test_list_publish_jobs_limit(tmp_path, monkeypatch):
+    """D2:limit 限制返回条数(按新→旧取前 N)。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        job_ids = [await _make_job(smk, ids["acc1"]) for _ in range(5)]
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            res = await mcp.call_tool("list_publish_jobs", {"limit": 2})
+        finally:
+            reset_current_operator(token)
+        jobs = res.structured_content["jobs"]
+        assert len(jobs) == 2
+        # 新→旧:取最后建的两条
+        assert [j["job_id"] for j in jobs] == sorted(job_ids, reverse=True)[:2]
+
+
 # ---------------- cancel_publish_job ----------------
 
 
@@ -345,6 +457,8 @@ async def test_cancel_only_pending(tmp_path, monkeypatch):
 
             not_ok = await mcp.call_tool("cancel_publish_job", {"job_id": publishing})
             assert not_ok.structured_content["ok"] is False
+            # C3:非 pending 时带上当前状态,让 caller 一眼看出为何取消不了
+            assert not_ok.structured_content["status"] == "publishing"
         finally:
             reset_current_operator(token)
 
@@ -432,6 +546,45 @@ async def test_check_cookies_denied_without_access(tmp_path, monkeypatch):
         finally:
             reset_current_operator(token)
         assert called["n"] == 0  # 越权在起浏览器前就被拦
+
+
+async def test_check_cookies_error_preserves_status(tmp_path, monkeypatch):
+    """D4:check_login_once 返回 error(基础设施失败)→ 不覆盖 cookie_status,原值保留。"""
+    import app.tools.cookies as cookies_mod
+
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        # acc1 原本是 valid 号,带一份加密 cookie
+        async with smk() as s:
+            acc = await s.get(XhsAccount, ids["acc1"])
+            acc.cookie_status = "valid"
+            acc.login_cookies = encrypt_cookies(
+                json.dumps([{"name": "a", "value": "x"}])
+            )
+            await s.commit()
+
+        def fake_check_login_once(account_id, cookies):
+            return {"status": "error", "user_info": None, "reason": "浏览器启动失败:boom"}
+
+        monkeypatch.setattr(
+            cookies_mod.sync_client, "check_login_once", fake_check_login_once
+        )
+
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            res = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+        finally:
+            reset_current_operator(token)
+
+        data = res.structured_content
+        assert data["status"] == "error"
+        assert "浏览器启动失败" in data["reason"]
+
+        # 关键:好号未被误标 —— cookie_status 保留原 valid,last_check_at 未被写
+        async with smk() as s:
+            acc = await s.get(XhsAccount, ids["acc1"])
+            assert acc.cookie_status == "valid"
+            assert acc.last_check_at is None
 
 
 # ---------------- runner 图片物料化(接线洞修复) ----------------

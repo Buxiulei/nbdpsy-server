@@ -43,7 +43,18 @@ def register_accounts(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def list_accounts() -> dict:
-        """列出当前运营者可见的小红书账号(admin 全见;不含 cookie)。"""
+        """列出当前运营者可见的小红书账号(admin 全见;不含 cookie)。
+
+        cookie_status 取值:
+          - unknown:尚未巡检过
+          - valid:登录态有效,可发布
+          - invalid:登录态失效,需人重新扫码登录
+          - captcha:被验证码/滑块拦截,需人工过验证
+          - error:巡检时浏览器基础设施失败(非 cookie 失效,登录态未知,见 check_cookies)
+        status 字段**预留未启用**,判断登录态请看 cookie_status。
+        提示:可先用本工具返回的 cookie_status/last_check_at 做**廉价预检**(cookie 近期
+        valid 就直接发),不必每次盲调慢的 check_cookies(那会起浏览器,20-40s)。
+        """
         operator = current_operator()
         async with get_session() as session:
             accounts = await account_service.list_accounts(session, operator)
@@ -51,7 +62,11 @@ def register_accounts(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def get_account(account_id: int) -> dict:
-        """查看单个账号元信息(需 access;不含 cookie)。"""
+        """查看单个账号元信息(需 access;不含 cookie)。
+
+        cookie_status 取值:unknown/valid/invalid/captcha/error(含义见 list_accounts)。
+        status 字段**预留未启用**,判断登录态请看 cookie_status。
+        """
         operator = current_operator()
         async with get_session() as session:
             account = await account_service.get_account(

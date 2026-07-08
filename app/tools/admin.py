@@ -7,6 +7,8 @@ ToolError 返回)——随后自开独立会话调 operator_service。
 create/rotate 返回的明文 apikey 仅本次可见,库内只存 hash;工具响应里带 note 明示。
 """
 
+from typing import Literal
+
 from fastmcp import FastMCP
 
 from app.auth.context import current_operator
@@ -22,8 +24,10 @@ def register_admin(mcp: FastMCP) -> None:
     """把 admin 分组工具注册到 mcp 实例(装饰器需闭包内的 mcp)。"""
 
     @mcp.tool
-    async def create_operator(name: str, role: str = "operator") -> dict:
-        """[管理员] 新建运营者,返回其信息与一次性明文 apikey。"""
+    async def create_operator(
+        name: str, role: Literal["operator", "admin"] = "operator"
+    ) -> dict:
+        """[管理员] 新建运营者,返回其信息与一次性明文 apikey。role ∈ {"operator","admin"}。"""
         require_admin(current_operator())
         async with get_session() as session:
             op, apikey = await operator_service.create_operator(
@@ -62,11 +66,11 @@ def register_admin(mcp: FastMCP) -> None:
     @mcp.tool
     async def update_operator(
         operator_id: int,
-        role: str | None = None,
+        role: Literal["operator", "admin"] | None = None,
         enabled: bool | None = None,
         name: str | None = None,
     ) -> dict:
-        """[管理员] 局部更新运营者 role/enabled/name(留空的字段不改)。"""
+        """[管理员] 局部更新运营者 role/enabled/name(留空的字段不改)。role ∈ {"operator","admin"}。"""
         require_admin(current_operator())
         async with get_session() as session:
             op = await operator_service.update_operator(

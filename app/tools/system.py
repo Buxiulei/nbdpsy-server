@@ -18,10 +18,11 @@ def register_system(mcp: FastMCP) -> None:
 
     @mcp.tool
     def whoami() -> dict:
-        """返回中间件写入上下文的当前运营者 name/role;未认证返回 authenticated=False。
+        """确认当前 operator 身份与是否 admin,编排起点。
 
-        用途兼诊断与 ContextVar 穿透验证:若中间件在父 FastAPI 上 set 的上下文
-        能被挂载在 /mcp 的工具执行读到,则此处返回 authenticated=True。
+        返回当前运营者 {authenticated: True, name, role};role=='admin' 表示可见全部账号。
+        未认证(缺/错 apikey)返回 {authenticated: False}。典型编排的第一步:先 whoami 确认
+        身份与权限,再 list_accounts / publish_note 等。
         """
         # 延迟 import:避免 app.auth 与 app.tools 在包加载期形成循环依赖。
         from app.auth.context import AuthError, current_operator

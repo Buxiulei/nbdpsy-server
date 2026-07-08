@@ -273,6 +273,87 @@ async def test_import_cookies_tool_parses_json_and_creates(tmp_path, monkeypatch
             assert cnt == 1
 
 
+async def test_import_cookies_tool_accepts_list(tmp_path, monkeypatch):
+    """B3:cookies_json 直接传 list(已解析数组)也能建号,不必先 JSON 序列化。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk):
+        async with smk() as s:
+            op = Operator(
+                name="importer", role="operator", apikey_hash=hash_apikey("k"),
+                enabled=True,
+            )
+            s.add(op)
+            await s.commit()
+            op_id = op.id
+
+        token = set_current_operator(_ctx(op_id, "operator"))
+        try:
+            res = await mcp.call_tool(
+                "import_cookies",
+                {
+                    "account_name": "list号",
+                    # 直接传数组(非 JSON 字符串)
+                    "cookies_json": [{"name": "a1", "value": "x", "sameSite": "lax"}],
+                    "user_info": {"user_id": "ulist"},
+                },
+            )
+        finally:
+            reset_current_operator(token)
+
+        data = res.structured_content
+        assert data["created"] is True
+        async with smk() as s:
+            acc = await s.get(XhsAccount, data["account_id"])
+            assert acc.user_id == "ulist"
+
+
+async def test_import_cookies_tool_rejects_bad_input(tmp_path, monkeypatch):
+    """D3:cookies_json 非法 JSON 字符串 / 非 cookie 数组 → 明确中文报错,不建坏号。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk):
+        async with smk() as s:
+            op = Operator(
+                name="importer", role="operator", apikey_hash=hash_apikey("k"),
+                enabled=True,
+            )
+            s.add(op)
+            await s.commit()
+            op_id = op.id
+
+        token = set_current_operator(_ctx(op_id, "operator"))
+        try:
+            # 非法 JSON 字符串
+            with pytest.raises(ToolError) as ei_json:
+                await mcp.call_tool(
+                    "import_cookies",
+                    {"account_name": "坏号", "cookies_json": "{不是合法json"},
+                )
+            assert "cookie 对象数组" in str(ei_json.value)
+
+            # 合法 JSON 但不是数组(是对象)
+            with pytest.raises(ToolError) as ei_shape:
+                await mcp.call_tool(
+                    "import_cookies",
+                    {"account_name": "坏号", "cookies_json": json.dumps({"name": "a"})},
+                )
+            assert "cookie 对象数组" in str(ei_shape.value)
+
+            # 数组元素不是 dict
+            with pytest.raises(ToolError) as ei_elem:
+                await mcp.call_tool(
+                    "import_cookies",
+                    {"account_name": "坏号", "cookies_json": json.dumps(["a", "b"])},
+                )
+            assert "cookie 对象数组" in str(ei_elem.value)
+        finally:
+            reset_current_operator(token)
+
+        # 三次非法输入都没建出账号
+        async with smk() as s:
+            cnt = (
+                await s.execute(select(func.count()).select_from(XhsAccount))
+            ).scalar()
+            assert cnt == 0
+
+
 async def test_get_cookies_tool_access_control(tmp_path, monkeypatch):
     """get_cookies 工具:导入者能解密回读;无 access 的 operator → ToolError。"""
     async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk):

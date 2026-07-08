@@ -95,9 +95,10 @@ class CookieChecker:
             return list(result.scalars().all())
 
     async def _check_account(self, account_id: int) -> bool:
-        """检测单个号:解密 cookie → 线程内跑登录检测 → 三态写回 cookie_status/last_check_at。
+        """检测单个号:解密 cookie → 线程内跑登录检测 → valid/invalid/captcha 写回状态。
 
-        返回是否真正执行了检测:无 cookie 可检时跳过(不误改状态)返回 False。
+        返回是否真正执行了检测:无 cookie 可检时跳过(不误改状态)返回 False;基础设施
+        失败(error 态)不写回、保留原状态,但仍算已检测(返回 True)。
         """
         async with self._session_factory() as session:
             account = await session.get(XhsAccount, account_id)
@@ -111,6 +112,15 @@ class CookieChecker:
         )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")
+
+        # 基础设施失败(error)不写回 —— 保留原 cookie_status,与 check_cookies 工具一致,
+        # 避免后台巡检把浏览器起不来误当成 cookie 失效、把好号刷成非 valid 后续不再巡检。
+        if status == "error":
+            logger.warning(
+                f"cookie 巡检基础设施失败,保留原状态 account_id={account_id}: "
+                f"{result.get('reason')}"
+            )
+            return True
 
         async with self._session_factory() as session:
             account = await session.get(XhsAccount, account_id)

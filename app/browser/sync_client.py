@@ -417,18 +417,23 @@ def publish_once(
 def check_login_once(account_id: int, cookies: List[Dict[str, Any]]) -> Dict[str, Any]:
     """一次性登录检测:建 client → start → 登录/验证码判定 + 取 user_info → stop。
 
-    返回 ``{status: 'valid'|'invalid'|'captcha', user_info: dict|None}``。
-    浏览器启动失败保守归为 'invalid'(无独立 error 通道,契约仅三态)。
+    返回 ``{status, user_info, reason?}``,status 四态:
+      - ``valid`` / ``invalid`` / ``captcha``:来自 ``check_login()``,即"页面正常加载后"的
+        真实登录判定(``invalid`` = 页面加载正常但未登录,cookie 真失效);
+      - ``error``:浏览器基础设施失败(启动失败/页面超时/异常),带 ``reason`` 说明,**与 cookie
+        失效严格区分**——调用方据此保留原状态,不把好号误标失效。
     """
     client = SyncClient(account_id, cookies)
     try:
         start = client.start()
         if not start.get("success"):
-            logger.warning(f"[check_login_once] 启动失败 account_id={account_id}: {start.get('error')}")
-            return {"status": "invalid", "user_info": None}
+            reason = f"浏览器启动失败:{start.get('error')}"
+            logger.warning(f"[check_login_once] {reason} account_id={account_id}")
+            return {"status": "error", "user_info": None, "reason": reason}
         return client.check_login()
     except Exception as e:
-        logger.error(f"[check_login_once] 异常 account_id={account_id}: {e}")
-        return {"status": "invalid", "user_info": None}
+        reason = f"浏览器异常:{e}"
+        logger.error(f"[check_login_once] {reason} account_id={account_id}")
+        return {"status": "error", "user_info": None, "reason": reason}
     finally:
         client.stop()
