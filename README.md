@@ -206,17 +206,33 @@ runner 里再物料化成本地文件,工具本身不碰浏览器。
 
 ## 安装 / 接入 MCP(远程 agent 如何连)
 
-MCP 传输为 **Streamable HTTP**,端点 `POST {PUBLIC_BASE_URL}/mcp/`(**注意结尾斜杠**,
-无斜杠会 307 重定向),鉴权头 `Authorization: Bearer <apikey>`。
+MCP 传输为 **Streamable HTTP**,端点 `POST <公网地址>/mcp/`(**注意结尾斜杠**,无斜杠会
+307 重定向),鉴权头 `Authorization: Bearer <apikey>`。本部署的公网地址为
+**`https://mcp.nbdpsy.com`**(经 Cloudflare 隧道回源 `localhost:8848`),下文示例即用它;
+你自建部署时替换成自己的域名。
+
+### 从另一台机器连接(三步)
+
+别的机器上的 agent 接入本服务,只需要**公网地址 + 一把 operator apikey**(向管理员索取,见
+「apikey 与首个管理员」)——**不需要在那台机器上装本项目代码或 chrome 插件**(插件只在"登录
+小红书"时才用,且装在人工登录的那台真实浏览器上,与调用 MCP 的 agent 机器无关)。
+
+1. **确认可达**(在该机器上):
+   ```bash
+   curl https://mcp.nbdpsy.com/healthz          # 应返回 {"ok":true}
+   ```
+2. **把 MCP 装进该机器的 agent 客户端**(见下方各客户端命令,把 `<你的-apikey>` 换成管理员发的 key)。
+3. **验证**:让 agent 调 `whoami`(返回你的 operator 身份)、`list_accounts`(看你有权操作的号)。
+
+> apikey 是密钥:别写进公开仓库 / 截图 / 聊天分享。泄露了让管理员用 `rotate_operator_apikey` 轮换。
 
 ### 各客户端安装步骤
 
-前提:服务端已按「启动步骤」跑起来、反代好 `PUBLIC_BASE_URL`,并已拿到一把 operator
-apikey(首个 admin 见「apikey 与首个管理员」)。把本 MCP 装进 agent 客户端:
+前提:服务端已部署可达(见上)、你已拿到一把 operator apikey。把本 MCP 装进 agent 客户端:
 
 **Claude Code(命令行,推荐)**:
 ```bash
-claude mcp add --transport http nbdpsy https://你的域名/mcp/ \
+claude mcp add --transport http nbdpsy https://mcp.nbdpsy.com/mcp/ \
   --header "Authorization: Bearer <你的-apikey>"
 ```
 之后会话里即可用全部工具;`claude mcp list` 查看、`claude mcp remove nbdpsy` 卸载。
@@ -228,7 +244,7 @@ claude mcp add --transport http nbdpsy https://你的域名/mcp/ \
   "mcpServers": {
     "nbdpsy": {
       "type": "http",
-      "url": "https://你的域名/mcp/",
+      "url": "https://mcp.nbdpsy.com/mcp/",
       "headers": { "Authorization": "Bearer <你的-apikey>" }
     }
   }
