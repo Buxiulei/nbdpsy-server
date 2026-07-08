@@ -1,0 +1,13 @@
+[Unit]
+Description=nbdpsy-mcp Xvfb 虚拟显示 :99(发布/检测用 Camoufox 需要)
+After=network.target
+
+[Service]
+Type=simple
+User=roots
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
