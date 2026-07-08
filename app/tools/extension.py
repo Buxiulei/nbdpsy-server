@@ -7,6 +7,8 @@
 让操作者填"连接本服务的同一把 apikey";忘了就由管理员 rotate_operator_apikey 重置。
 """
 
+from datetime import datetime
+
 from fastmcp import FastMCP
 
 from app import __version__
@@ -34,14 +36,18 @@ def register_extension(mcp: FastMCP) -> None:
 
     @mcp.tool
     def get_extension_download() -> dict:
-        """返回 chrome 插件包下载地址、版本、安装步骤与 apikey 引导语。
+        """返回 chrome 插件包下载地址、版本、安装步骤、apikey 引导语与服务端当前时间。
 
         download_url 指向白名单放行的 /downloads/extension.zip(无需 apikey 即可下载);
         apikey_hint 是引导语而非明文 key(库内只存 hash,无法回取)。
+        server_time 是服务端当前时间(naive UTC 的 ISO 串):**拿它做 poll_login(since=...)
+        的起点**——发插件给操作者扫码登录前记下 server_time,登录发起后用它当基准轮询
+        poll_login,直到检测到新号/该号登录时间刷新(避免用客户端本地时钟错判早/晚)。
         """
         return {
             "download_url": f"{settings.PUBLIC_BASE_URL}/downloads/extension.zip",
             "version": __version__,
             "apikey_hint": _APIKEY_HINT,
             "install_steps": _INSTALL_STEPS,
+            "server_time": datetime.utcnow().isoformat(),
         }

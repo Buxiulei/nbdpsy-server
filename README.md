@@ -115,7 +115,8 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 
 - **所有小红书账号 + 登录状态**:`list_accounts()`(admin 全见)→ 每个含 `status` /
   `cookie_status`(valid/invalid/captcha/unknown)/ `last_check_at` / 昵称等(不含 cookie)。
-- **刷新某号实时活性**:`check_cookies(account_id)` → 起浏览器验登录态,把三态写回。
+- **刷新某号实时活性**:`check_cookies(account_id)` **异步**——返回 `{check_id}` 后用
+  `get_cookie_check(check_id)` 轮询到 valid/invalid/captcha/error,把三态写回。
   想自动周期巡检:设 `COOKIE_CHECK_INTERVAL`(秒,>0 才起,默认 0)。
 - **发布任务状态**:`list_publish_jobs(account_id?, status?)`。
 - **所有运营者**:`list_operators()` → id/name/role/enabled(不含 apikey);某人授权了哪些号:
@@ -143,7 +144,7 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 
 ## MCP 工具清单
 
-共 22 个工具,分 6 组。远程 agent 通过 MCP `tools/call` 调用;除白名单外均需 apikey,
+共 24 个工具,分 6 组。远程 agent 通过 MCP `tools/call` 调用;除白名单外均需 apikey,
 且按 RBAC 收窄到 caller 有权的账号(admin 全见)。
 
 ### system(2)
@@ -166,7 +167,7 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 | `revoke_account_access` | `(operator_id, xhs_account_id) -> {operator_id, xhs_account_id, revoked}` | 回收授权(幂等) |
 | `list_operator_grants` | `(operator_id) -> {operator_id, xhs_account_ids}` | 列某运营者已授权的号 |
 
-### accounts(4,RBAC 收窄)
+### accounts(5,RBAC 收窄)
 
 | 工具 | 签名 | 说明 |
 |---|---|---|
@@ -174,14 +175,16 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 | `get_account` | `(account_id) -> {account view}` | 查单个账号元信息 |
 | `update_account` | `(account_id, name?) -> {account view}` | 改内部展示名(安全字段) |
 | `delete_account` | `(account_id) -> {deleted}` | 删账号并清其授权 |
+| `poll_login` | `(since, account_id?) -> {done, accounts?/account?}` | 轮询登录完成信号(自 since 起有无新号/新登录) |
 
-### cookies(3)
+### cookies(4)
 
 | 工具 | 签名 | 说明 |
 |---|---|---|
 | `import_cookies` | `(account_name, cookies_json, user_info?) -> {account_id, created}` | 灌 cookie,upsert 唯一号 |
 | `get_cookies` | `(account_id) -> {account_id, cookies}` | 解密回读(需 access) |
-| `check_cookies` | `(account_id) -> {status, user_info?}` | 起浏览器巡检活性,三态写回 |
+| `check_cookies` | `(account_id) -> {check_id, status}` | 异步起浏览器巡检,立即返 check_id |
+| `get_cookie_check` | `(check_id) -> {status, user_info?, reason?}` | 轮询 check_cookies 的检测结果 |
 
 ### publish(4,RBAC 收窄)
 
@@ -200,7 +203,7 @@ runner 里再物料化成本地文件,工具本身不碰浏览器。
 
 | 工具 | 签名 | 说明 |
 |---|---|---|
-| `get_extension_download` | `() -> {download_url, version, apikey_hint, install_steps}` | 插件下载 + 安装引导 |
+| `get_extension_download` | `() -> {download_url, version, apikey_hint, install_steps, server_time}` | 插件下载 + 安装引导 + poll_login 起点时间 |
 
 ---
 
@@ -265,11 +268,15 @@ claude mcp add --transport http nbdpsy https://mcp.nbdpsy.com/mcp/ \
 1. **确认身份**:`whoami` → 看当前 operator 的 name/role(admin 才能用管理员工具)。
 2. **看有哪些号**:`list_accounts` → 你有权操作的小红书账号(admin 全见,不含 cookie)。
 3. **远程登录 = 没有"登录工具"**(重要):小红书登录及各种验证由**人 + chrome 插件**在真实
-   浏览器完成,agent **不自动化登录**。agent 调 `get_extension_download` 拿下载地址+安装步骤,
-   交给操作者:装插件 → 填本 operator 的 apikey 与 serverUrl → 隐身窗口扫码登录;插件自动把
-   cookie(含 httpOnly)推回后台并 upsert 账号。新号导入后当前 operator 自动获得 access。
-4. **验 cookie**:`check_cookies(account_id)` → valid/invalid/captcha 并回写状态
-   (基础设施异常会保守归 invalid,不完全等于 cookie 真失效)。
+   浏览器完成,agent **不自动化登录**。agent 调 `get_extension_download` 拿下载地址+安装步骤
+   + `server_time`(记为 poll_login 的 since 起点),交给操作者:装插件 → 填本 operator 的
+   apikey 与 serverUrl → 隐身窗口扫码登录;插件自动把 cookie(含 httpOnly)推回后台并 upsert
+   账号。新号导入后当前 operator 自动获得 access。**等登录完成**用 `poll_login(since=server_time
+   [, account_id])` 每 ~10s 轮询到 `done=true`(登新号不传 account_id,重登旧号传 account_id),
+   建议 5-10 分钟超时;别用 check_cookies 探登录。
+4. **验 cookie(异步)**:`check_cookies(account_id)` 返回 `{check_id}` → 轮询
+   `get_cookie_check(check_id)` 到 valid/invalid/captcha/error(error=浏览器基础设施失败,
+   不代表 cookie 真失效,别据此让人重登)。
 5. **发布 = 异步,必须轮询**(重要):`publish_note(account_id, title, content, images,
    topics, schedule_time?)` 只返回 `{job_id}` → **轮询** `get_publish_status(job_id)` 到
    `published`(取 note_url)或 `failed`。图片可直接传 http URL 或 base64,agent 在别的机器上

@@ -14,6 +14,7 @@ check_cookies 的浏览器调用 monkeypatch sync_client.check_login_once(不起
 - runner 图片物料化:monkeypatch materialize_images + publish_once,断言用物料化后的本地路径发布且发布后清理 workdir。
 """
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -476,13 +477,24 @@ async def test_cancel_only_pending(tmp_path, monkeypatch):
             reset_current_operator(token)
 
 
-# ---------------- check_cookies ----------------
+# ---------------- check_cookies(异步)+ get_cookie_check ----------------
 
 
-async def test_check_cookies_valid_writes_back(tmp_path, monkeypatch):
-    """check_login_once 返回 valid:写回 cookie_status/last_check_at + 回填 user_info。"""
-    import app.tools.cookies as cookies_mod
+async def _await_cookie_check(mcp, check_id: str) -> dict:
+    """轮询 get_cookie_check 到非 checking 终态并返回;带超时防死等后台任务。
 
+    需在已 set_current_operator 的上下文内调用(get_cookie_check 走 access 鉴权)。
+    """
+    for _ in range(250):  # 250 * 0.02 = 5s 上限
+        res = await mcp.call_tool("get_cookie_check", {"check_id": check_id})
+        if res.structured_content["status"] != "checking":
+            return res.structured_content
+        await asyncio.sleep(0.02)
+    raise AssertionError("异步 cookie 检测未在超时内落终态")
+
+
+async def test_check_cookies_async_returns_check_id_and_valid(tmp_path, monkeypatch):
+    """check_cookies 立即返 check_id/status=checking;get_cookie_check 轮到 valid 并写回。"""
     async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
         ids = await _seed(smk)
         # 给 acc1 灌一份加密 cookie(check_cookies 会解密后传入 check_login_once)
@@ -499,17 +511,24 @@ async def test_check_cookies_valid_writes_back(tmp_path, monkeypatch):
             captured["args"] = (account_id, cookies)
             return {"status": "valid", "user_info": {"nickname": "小蓝", "user_id": "u1"}}
 
-        monkeypatch.setattr(cookies_mod.sync_client, "check_login_once", fake_check_login_once)
+        # 后台检测在 cookie_check 服务里调 sync_client.check_login_once,pat 该模块属性
+        monkeypatch.setattr(
+            "app.browser.sync_client.check_login_once", fake_check_login_once
+        )
 
         token = set_current_operator(_ctx(ids["op1"], "operator"))
         try:
-            res = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+            started = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+            sc = started.structured_content
+            assert sc["status"] == "checking"
+            assert isinstance(sc["check_id"], str) and sc["check_id"]
+
+            final = await _await_cookie_check(mcp, sc["check_id"])
         finally:
             reset_current_operator(token)
 
-        data = res.structured_content
-        assert data["status"] == "valid"
-        assert data["user_info"]["nickname"] == "小蓝"
+        assert final["status"] == "valid"
+        assert final["user_info"]["nickname"] == "小蓝"
         # 解密后的 cookie 传给了 check_login_once
         assert captured["args"][0] == ids["acc1"]
         assert captured["args"][1] == [{"name": "a", "value": "x"}]
@@ -525,8 +544,6 @@ async def test_check_cookies_valid_writes_back(tmp_path, monkeypatch):
 
 async def test_check_cookies_denied_without_access(tmp_path, monkeypatch):
     """op2 无 acc1 的 access → check_cookies 抛 ToolError,且不触发 check_login_once。"""
-    import app.tools.cookies as cookies_mod
-
     async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
         ids = await _seed(smk)
 
@@ -536,7 +553,9 @@ async def test_check_cookies_denied_without_access(tmp_path, monkeypatch):
             called["n"] += 1
             return {"status": "valid", "user_info": None}
 
-        monkeypatch.setattr(cookies_mod.sync_client, "check_login_once", fake_check_login_once)
+        monkeypatch.setattr(
+            "app.browser.sync_client.check_login_once", fake_check_login_once
+        )
 
         token = set_current_operator(_ctx(ids["op2"], "operator"))
         try:
@@ -545,13 +564,11 @@ async def test_check_cookies_denied_without_access(tmp_path, monkeypatch):
             assert "无权操作账号" in str(ei.value)
         finally:
             reset_current_operator(token)
-        assert called["n"] == 0  # 越权在起浏览器前就被拦
+        assert called["n"] == 0  # 越权在起后台检测前就被拦
 
 
-async def test_check_cookies_error_preserves_status(tmp_path, monkeypatch):
-    """D4:check_login_once 返回 error(基础设施失败)→ 不覆盖 cookie_status,原值保留。"""
-    import app.tools.cookies as cookies_mod
-
+async def test_check_cookies_async_error_preserves_status(tmp_path, monkeypatch):
+    """D4:后台检测返回 error(基础设施失败)→ 不覆盖 cookie_status,原值保留;结果仍可轮询。"""
     async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
         ids = await _seed(smk)
         # acc1 原本是 valid 号,带一份加密 cookie
@@ -567,24 +584,78 @@ async def test_check_cookies_error_preserves_status(tmp_path, monkeypatch):
             return {"status": "error", "user_info": None, "reason": "浏览器启动失败:boom"}
 
         monkeypatch.setattr(
-            cookies_mod.sync_client, "check_login_once", fake_check_login_once
+            "app.browser.sync_client.check_login_once", fake_check_login_once
         )
 
         token = set_current_operator(_ctx(ids["op1"], "operator"))
         try:
-            res = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+            started = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+            final = await _await_cookie_check(
+                mcp, started.structured_content["check_id"]
+            )
         finally:
             reset_current_operator(token)
 
-        data = res.structured_content
-        assert data["status"] == "error"
-        assert "浏览器启动失败" in data["reason"]
+        assert final["status"] == "error"
+        assert "浏览器启动失败" in final["reason"]
 
         # 关键:好号未被误标 —— cookie_status 保留原 valid,last_check_at 未被写
         async with smk() as s:
             acc = await s.get(XhsAccount, ids["acc1"])
             assert acc.cookie_status == "valid"
             assert acc.last_check_at is None
+
+
+async def test_get_cookie_check_unknown_id(tmp_path, monkeypatch):
+    """get_cookie_check 传未知 check_id → ToolError(不存在或已过期)。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        token = set_current_operator(_ctx(ids["admin"], "admin"))
+        try:
+            with pytest.raises(ToolError) as ei:
+                await mcp.call_tool(
+                    "get_cookie_check", {"check_id": "does-not-exist"}
+                )
+            assert "不存在或已过期" in str(ei.value)
+        finally:
+            reset_current_operator(token)
+
+
+async def test_get_cookie_check_denied_cross_operator(tmp_path, monkeypatch):
+    """越权:op1 发起的 check,op2(无 acc1 access)查其结果 → ToolError(无权操作账号)。"""
+    async with isolated_mcp(tmp_path, monkeypatch) as (mcp, smk, _s):
+        ids = await _seed(smk)
+        async with smk() as s:
+            acc = await s.get(XhsAccount, ids["acc1"])
+            acc.login_cookies = encrypt_cookies(
+                json.dumps([{"name": "a", "value": "x"}])
+            )
+            await s.commit()
+
+        def fake_check_login_once(account_id, cookies):
+            return {"status": "valid", "user_info": None}
+
+        monkeypatch.setattr(
+            "app.browser.sync_client.check_login_once", fake_check_login_once
+        )
+
+        # op1 有 acc1 access,发起检测并等后台落终态(仍在 op1 上下文)
+        token = set_current_operator(_ctx(ids["op1"], "operator"))
+        try:
+            started = await mcp.call_tool("check_cookies", {"account_id": ids["acc1"]})
+            check_id = started.structured_content["check_id"]
+            await _await_cookie_check(mcp, check_id)
+        finally:
+            reset_current_operator(token)
+
+        # op2 无 acc1 access,查该 check_id → 越权 ToolError
+        token = set_current_operator(_ctx(ids["op2"], "operator"))
+        try:
+            with pytest.raises(ToolError) as ei:
+                await mcp.call_tool("get_cookie_check", {"check_id": check_id})
+            assert "无权操作账号" in str(ei.value)
+        finally:
+            reset_current_operator(token)
 
 
 # ---------------- runner 图片物料化(接线洞修复) ----------------

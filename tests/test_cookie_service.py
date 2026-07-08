@@ -8,6 +8,7 @@
 """
 
 import json
+from datetime import datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -148,6 +149,30 @@ async def test_import_idempotent_by_user_id(db: AsyncSession):
         await db.execute(select(func.count()).select_from(XhsAccount))
     ).scalar()
     assert total == 1
+
+
+async def test_import_update_refreshes_last_login_at(db: AsyncSession):
+    """更新既有号(二次 import)也刷新 last_login_at —— 重登旧号 poll_login 才检测得到。"""
+    op = await _make_operator(db)
+    acc, created = await cookie_service.import_cookies(
+        db, op, "号1", [{"name": "a1", "value": "old"}], {"user_id": "u1"}
+    )
+    assert created is True
+    assert acc.last_login_at is not None
+
+    # 人为把 last_login_at 拨回过去,模拟"上一次登录"
+    old_time = datetime(2000, 1, 1, 0, 0, 0)
+    acc.last_login_at = old_time
+    await db.commit()
+
+    # 二次 import 走更新路径,应把 last_login_at 刷新到 old_time 之后
+    acc2, created2 = await cookie_service.import_cookies(
+        db, op, "号1", [{"name": "a1", "value": "new"}], {"user_id": "u1"}
+    )
+    assert created2 is False
+    assert acc2.id == acc.id
+    assert acc2.last_login_at is not None
+    assert acc2.last_login_at > old_time
 
 
 async def test_import_idempotent_by_account_name(db: AsyncSession):

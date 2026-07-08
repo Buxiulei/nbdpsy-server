@@ -67,7 +67,8 @@ Claude Code / Claude Desktop / Cursor 等客户端的完整步骤见项目 READM
 - 远程登录没有"登录工具":小红书登录及各种验证由人 + chrome 插件在真实浏览器完成——调
   get_extension_download 拿插件包递给操作者装好扫码,插件自动把 cookie(含 httpOnly)推回后台。
 - 发布是异步的:publish_note 只返回 {job_id},必须用 get_publish_status(job_id) 轮询到 published/failed;仅图文无视频。
-- 典型编排:whoami → list_accounts →(操作者用插件登录)→ check_cookies → publish_note → 轮询 get_publish_status。
+- cookie 巡检也是异步的:check_cookies 只返回 {check_id},用 get_cookie_check(check_id) 轮询到 valid/invalid/captcha/error。
+- 典型编排:whoami → list_accounts →(操作者用插件登录,poll_login 收口)→ check_cookies →轮询 get_cookie_check → publish_note → 轮询 get_publish_status。
 
 发布硬约束速览(publish_note,均为服务端强制):
 - 仅图文,图片 ≥1 且 ≤18 张(越界立即报错);标题按显示长度截断 ≤20、正文截断 ≤900、
@@ -75,9 +76,9 @@ Claude Code / Claude Desktop / Cursor 等客户端的完整步骤见项目 READM
 - schedule_time 定时发布**务必带时区偏移**(如 +08:00);不带偏移按 UTC 解释,会早/晚 8 小时。
 
 登录闭环协议(没有登录工具,登录靠人 + 插件):
-- 调 get_extension_download 把插件包 + 安装步骤 + apikey 引导语递给操作者,让其装好插件扫码登录。
-- 发起后每 ~10s 轮询 list_accounts,直到出现新账号或某号 cookie_status 变 valid;建议设 5-10 分钟超时。
-- 别盲调 check_cookies 探登录(它会起浏览器、20-40s);先看 list_accounts 的 cookie_status/last_check_at 做廉价预检。
+- 调 get_extension_download 拿 server_time + 插件包 + 安装步骤 + apikey 引导语,把插件递给操作者装好扫码登录;记下 server_time 作为下一步 poll_login 的 since 起点。
+- 发起后每 ~10s 调 poll_login(since=server_time[, account_id]) 直到 done=true:登新号不传 account_id(库里出现 since 之后的新号即完成),重登旧号传 account_id(该号 last_login_at 刷新到 since 之后即完成);建议设 5-10 分钟超时。
+- 别用 check_cookies 探登录(它异步起浏览器、20-40s,是验活性不是等登录);登录完成判据用 poll_login,廉价预检看 list_accounts 的 cookie_status/last_check_at。
 """
 
 

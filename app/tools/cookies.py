@@ -4,27 +4,22 @@ register_cookies(mcp) 注册 3 个工具,均取 current_operator() 收窄到有 
 - import_cookies:把 cookies(list 或 JSON 字符串)归一成 list[dict] 再 upsert 唯一账号行,
   返回 {account_id, created};新建时给导入 operator 建 access。
 - get_cookies:鉴权后解密回读某号 cookie(受 access 限制,admin 放行)。
-- check_cookies:鉴权后解密该号 cookie → 线程内起浏览器跑登录检测(check_login_once)→
-  把 valid/invalid/captcha 写回 cookie_status/last_check_at(有 user_info 则回填资料)→ 返回。
-  基础设施失败(error 态)不写回,保留原 cookie_status,避免把好号误标失效。
+- check_cookies:**异步**——鉴权后解密该号 cookie → 经 cookie_check.start_check 起后台浏览器
+  检测并**立即返回 {check_id, status:"checking"}**;真正结果用 get_cookie_check(check_id) 轮询。
+- get_cookie_check:按 check_id 取后台检测结果(鉴权防越权看别人号);valid/invalid/captcha/error
+  四终态,error 为基础设施失败(不代表 cookie 失效),写回语义见 cookie_check 服务。
 """
 
-import asyncio
 import json
-from datetime import datetime
 
 from fastmcp import FastMCP
 
 from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
-from app.browser import sync_client
 from app.core.db import get_session
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
-from app.services import cookie_service
-
-# check_cookies 回填到账号的 user_info 字段(与 cookie_service 一致的子集)
-_USER_INFO_FIELDS = ("nickname", "user_id", "red_id", "avatar")
+from app.services import cookie_check, cookie_service
 
 # import_cookies 入参非法时的中文提示(list 或 JSON 字符串两种合法形态)
 _COOKIES_ARG_HINT = (
@@ -97,17 +92,14 @@ def register_cookies(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def check_cookies(account_id: int) -> dict:
-        """巡检某号 cookie 活性:起浏览器跑登录检测,把状态写回账号并返回 {status, ...}。
+        """异步巡检某号 cookie 活性:起后台浏览器检测,立即返回 check_id(不阻塞等待)。
 
-        **注意:本调用会真起浏览器,通常耗时 20-40s,请耐心等待、勿重复调用。**
+        起浏览器检测约 20-40s,**本调用不等检测完成、立即返回** {check_id, status:"checking"};
+        随后每 ~2-5s 调 get_cookie_check(check_id) 轮询,直到 status 变
+        valid/invalid/captcha/error(四态含义见 get_cookie_check),别重复对同号发起检测。
 
-        鉴权后解密该号 cookie → 线程内 check_login_once(不阻塞事件循环)→ 按状态处理:
-          - valid:登录态有效,写回 cookie_status;带 user_info 时回填 nickname/user_id/red_id/avatar
-          - invalid:页面正常加载但未登录(cookie 真失效),写回 cookie_status
-          - captcha:被验证码/滑块拦截,写回 cookie_status
-          - error:浏览器基础设施失败(启动失败/超时/异常),**不写回 cookie_status(保留原值)**,
-            返回 {status:"error", reason}——这不代表 cookie 失效,别据此让人重登。
-        valid/invalid/captcha 三态会写回 cookie_status/last_check_at;error 态不改任何字段。
+        鉴权后解密该号 cookie → 交 cookie_check 起后台任务(线程内跑登录检测,写回 cookie_status/
+        last_check_at,error 态不写回保留原值)→ 返回 check_id。
         """
         operator = current_operator()
         async with get_session() as session:
@@ -117,31 +109,35 @@ def register_cookies(mcp: FastMCP) -> None:
                 raise ValueError(f"账号 {account_id} 不存在")
             cookies = _decrypt_account_cookies(account)
 
-        # 阻塞的 sync 浏览器调用下沉到线程,避免卡事件循环
-        result = await asyncio.to_thread(
-            sync_client.check_login_once, account_id, cookies
-        )
-        status = result.get("status", "invalid")
-        user_info = result.get("user_info")
+        check_id = cookie_check.start_check(account_id, cookies)
+        return {"check_id": check_id, "status": "checking"}
 
-        # D4:基础设施失败(error)不写回 —— 保留原 cookie_status,避免把好号误标失效。
-        if status == "error":
-            return {"status": "error", "reason": result.get("reason")}
+    @mcp.tool
+    async def get_cookie_check(check_id: str) -> dict:
+        """轮询 check_cookies 发起的异步检测结果(受 access 限制,admin 放行)。
 
-        # valid/invalid/captcha:写回巡检态 + 回填资料(会话内重取账号,避免操作 detached 实例)
+        status 四态 + 进行中:
+          - checking:检测仍在跑(浏览器未返回),继续轮询。
+          - valid:登录态有效;附 user_info(nickname/user_id/red_id/avatar)。
+          - invalid:页面正常加载但未登录,cookie 真失效,需人重新扫码登录。
+          - captcha:被验证码/滑块拦截,需人工过验证。
+          - error:浏览器起不来/超时等基础设施失败,**不代表 cookie 失效**,附 reason,别据此让人重登。
+        找不到 check_id(从未发起 / 进程重启已丢 / 拼错)会报错;鉴权用台账里存的 account_id,
+        防越权查看别人号的检测结果。
+        """
+        entry = cookie_check.get_check(check_id)
+        if entry is None:
+            raise ValueError(f"check_id {check_id} 不存在或已过期")
+        operator = current_operator()
         async with get_session() as session:
-            account = await session.get(XhsAccount, account_id)
-            if account is not None:
-                account.cookie_status = status
-                account.last_check_at = datetime.utcnow()
-                if user_info:
-                    for field in _USER_INFO_FIELDS:
-                        value = user_info.get(field)
-                        if value:
-                            setattr(account, field, value)
-                await session.commit()
+            await assert_account_access(operator, entry["account_id"], session)
 
-        return {"status": status, "user_info": user_info}
+        result: dict = {"status": entry["status"]}
+        if entry.get("user_info") is not None:
+            result["user_info"] = entry["user_info"]
+        if entry.get("reason") is not None:
+            result["reason"] = entry["reason"]
+        return result
 
 
 def _decrypt_account_cookies(account: XhsAccount) -> list[dict]:

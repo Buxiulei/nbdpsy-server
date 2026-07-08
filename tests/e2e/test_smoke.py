@@ -168,11 +168,17 @@ async def test_publish_chain_real_account(tmp_path, monkeypatch):
             )
             account_id = imported.structured_content["account_id"]
 
-            # 2. 活性巡检:真浏览器起来核对登录态
-            checked = await mcp.call_tool("check_cookies", {"account_id": account_id})
-            assert checked.structured_content["status"] == "valid", (
-                "cookie 已失效,先重新导出再跑"
-            )
+            # 2. 活性巡检(异步):check_cookies 返 check_id → 轮询 get_cookie_check 到终态
+            started = await mcp.call_tool("check_cookies", {"account_id": account_id})
+            check_id = started.structured_content["check_id"]
+            check_status = None
+            for _ in range(30):  # 最多 ~60s 等浏览器检测
+                got = await mcp.call_tool("get_cookie_check", {"check_id": check_id})
+                check_status = got.structured_content["status"]
+                if check_status != "checking":
+                    break
+                await asyncio.sleep(2)
+            assert check_status == "valid", "cookie 已失效,先重新导出再跑"
 
             # 3. 建发布任务(立即入队)
             published = await mcp.call_tool(
