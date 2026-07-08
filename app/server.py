@@ -54,13 +54,30 @@ from app.publish.scheduler import PublishScheduler
 from app.tools import register_all
 
 
+# FastMCP 服务自述:agent 连上后经 MCP 拿到这段,等于整个服务的"docstring"。
+# 讲清接入方式 + 三条最容易踩的使用要点;客户端安装步骤详见 README「安装 / 接入 MCP 客户端」。
+MCP_INSTRUCTIONS = """nbdpsy-mcp:小红书运营能力的 MCP 后台(自动发布 / 多账号管理 / cookie 管理 / 远程登录)。
+
+接入:传输为 Streamable HTTP,端点是本服务地址加 /mcp/(带结尾斜杠,无斜杠会 307),
+鉴权头 Authorization: Bearer <你的-operator-apikey>(或 X-API-Key)。把本服务装进
+Claude Code / Claude Desktop / Cursor 等客户端的完整步骤见项目 README「安装 / 接入 MCP 客户端」。
+
+使用要点(重要):
+- 除白名单外所有调用都要带 operator apikey;访问不属于你的小红书账号会抛 AccessDenied(403),admin 全见。
+- 远程登录没有"登录工具":小红书登录及各种验证由人 + chrome 插件在真实浏览器完成——调
+  get_extension_download 拿插件包递给操作者装好扫码,插件自动把 cookie(含 httpOnly)推回后台。
+- 发布是异步的:publish_note 只返回 {job_id},必须用 get_publish_status(job_id) 轮询到 published/failed;仅图文无视频。
+- 典型编排:whoami → list_accounts →(操作者用插件登录)→ check_cookies → publish_note → 轮询 get_publish_status。
+"""
+
+
 def create_app() -> FastAPI:
     """构建并返回挂载了 FastMCP 的 FastAPI 应用。"""
     # 0. 启动闸:生产必须设置非默认 SECRET_KEY(否则 Fernet 加密形同虚设),fail-fast 拒绝起服务。
     assert_secret_key_configured()
 
     # 1. FastMCP 实例 + 注册全部工具(此刻只 system.health)。
-    mcp = FastMCP("nbdpsy-mcp")
+    mcp = FastMCP("nbdpsy-mcp", instructions=MCP_INSTRUCTIONS)
     register_all(mcp)
 
     # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
