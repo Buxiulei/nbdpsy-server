@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "NBDpsy 小红书账号助手",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "description": "在真实浏览器人工登录小红书，一键把账号 Cookie 推送到 NBDpsy 后台（远程登录唯一入口）",
     "permissions": [
         "cookies",
@@ -16,7 +16,7 @@
         "https://*.xhslink.com/*",
         "http://localhost/*",
         "http://127.0.0.1/*",
-        "https://xhs.nbdpsy.com/*"
+        "https://*.nbdpsy.com/*"
     ],
     "action": {
         "default_popup": "popup/popup.html",
