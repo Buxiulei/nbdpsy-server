@@ -53,6 +53,17 @@
       <div id="server-status" class="server-status"></div>
     </div>
 
+    <!-- 我的账号：点一张卡片即开无痕窗口注入该号 cookie 打开小红书 -->
+    <div class="accounts-section">
+      <div class="accounts-header">
+        <label class="label">我的账号</label>
+        <button id="btn-refresh-accounts" class="btn btn-small" type="button">刷新</button>
+      </div>
+      <div id="accounts-list" class="accounts-list">
+        <div class="accounts-empty">填好服务器地址与 apikey 后加载账号</div>
+      </div>
+    </div>
+
     <!-- 操作按钮 -->
     <div class="action-section">
       <button id="btn-sync" class="btn btn-primary btn-large" disabled>

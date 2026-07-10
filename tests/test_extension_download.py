@@ -139,10 +139,12 @@ async def test_tool_registered_and_download_url(monkeypatch):
         config_module.settings, "PUBLIC_BASE_URL", "https://xhs.example.com"
     )
     payload = await _call_tool()
-    assert (
-        payload["download_url"]
-        == "https://xhs.example.com/downloads/extension.zip"
-    )
+    # download_url 带 cache-buster 查询串(?t=<zip mtime>,绕 CDN 边缘缓存);断言基础路径,
+    # 并确认 cache-buster 存在。
+    download_url = payload["download_url"]
+    base, _, query = download_url.partition("?")
+    assert base == "https://xhs.example.com/downloads/extension.zip"
+    assert query.startswith("t=")
     assert payload["version"] == __version__
 
 

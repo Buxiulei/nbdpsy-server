@@ -48,6 +48,7 @@ from app.auth.middleware import ApiKeyMiddleware
 from app.browser.account_locks import account_locks
 from app.browser.cookie_checker import CookieChecker
 from app.core.config import assert_secret_key_configured, settings
+from app.http.accounts_rest import router as accounts_rest_router
 from app.http.cookies_import import router as cookies_import_router
 from app.http.downloads import router as downloads_router
 from app.publish.runtime import set_active_scheduler
@@ -163,6 +164,9 @@ def create_app() -> FastAPI:
 
     # 7. 挂载 REST 路由:插件推 cookie 端点。路径不在中间件白名单,自动受 apikey 保护。
     app.include_router(cookies_import_router)
+
+    # 7.0.1 挂载"我的账号"REST:列表 + 取解密 cookie(插件无痕注入用)。同样不在白名单,受 apikey 保护。
+    app.include_router(accounts_rest_router)
 
     # 7.1 挂载插件包下载端点。路径落在中间件白名单 /downloads 前缀,无需 apikey 即可下载。
     app.include_router(downloads_router)

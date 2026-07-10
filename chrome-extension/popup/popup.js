@@ -22,6 +22,8 @@ const elements = {
     btnSync: document.getElementById('btn-sync'),
     btnRemoteLogin: document.getElementById('btn-remote-login'),
     btnOpenXhs: document.getElementById('btn-open-xhs'),
+    accountsList: document.getElementById('accounts-list'),
+    btnRefreshAccounts: document.getElementById('btn-refresh-accounts'),
     message: document.getElementById('message')
 };
 
@@ -36,15 +38,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (verEl) verEl.textContent = 'v' + chrome.runtime.getManifest().version;
     await loadConfig();
     await checkLoginStatus();
+    await loadAccounts();
     bindEvents();
     // 远程采集结果可能在 popup 关闭期间产生，打开时先读一次兜底
-    chrome.storage.local.get('remoteLoginResult', ({ remoteLoginResult }) => {
-        if (remoteLoginResult) showRemoteResult(remoteLoginResult);
+    chrome.storage.local.get(['remoteLoginResult', 'accountSessionResult'], (res) => {
+        if (res.remoteLoginResult) showRemoteResult(res.remoteLoginResult);
+        if (res.accountSessionResult) showAccountSessionResult(res.accountSessionResult);
     });
-    // popup 仍开着时采集完成，实时展示
+    // popup 仍开着时采集/注入完成，实时展示
     chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && changes.remoteLoginResult?.newValue) {
+        if (area !== 'local') return;
+        if (changes.remoteLoginResult?.newValue) {
             showRemoteResult(changes.remoteLoginResult.newValue);
+        }
+        if (changes.accountSessionResult?.newValue) {
+            showAccountSessionResult(changes.accountSessionResult.newValue);
         }
     });
 });
@@ -168,6 +176,136 @@ function showRemoteResult(r) {
     chrome.action?.setBadgeText?.({ text: '' });
 }
 
+// ── 我的账号：列出后台托管账号 → 点卡片开无痕窗注入 ──
+
+// cookie_status → 中文徽标文案（禁 emoji）。
+const ACCOUNT_STATUS_LABEL = {
+    valid: '有效',
+    invalid: '失效',
+    captcha: '验证',
+    error: '异常',
+    unknown: '未检测'
+};
+
+// 头像兜底占位（内联 SVG data URI，禁 emoji）。
+const AVATAR_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23999"><circle cx="12" cy="8" r="4"/><ellipse cx="12" cy="18" rx="7" ry="4"/></svg>';
+
+// 从后台拉取当前 apikey 可见的账号并渲染卡片列表。
+async function loadAccounts() {
+    const key = elements.apikey.value.trim();
+    const base = serverUrl.replace(/\/+$/, '');
+    if (!base || !key) {
+        renderAccountsEmpty('填好服务器地址与 apikey 后加载账号');
+        return;
+    }
+    renderAccountsEmpty('加载中...');
+    let resp;
+    try {
+        resp = await fetch(`${base}/api/accounts`, {
+            headers: { 'Authorization': `Bearer ${key}` }
+        });
+    } catch (e) {
+        renderAccountsEmpty('无法连接服务器，请检查地址');
+        return;
+    }
+    if (resp.status === 401) {
+        renderAccountsEmpty('apikey 无效，请在上方重新填写并保存');
+        return;
+    }
+    if (!resp.ok) {
+        renderAccountsEmpty(`加载失败（HTTP ${resp.status}）`);
+        return;
+    }
+    let data = {};
+    try { data = await resp.json(); } catch (e) { data = {}; }
+    renderAccounts(data.accounts || []);
+}
+
+// 渲染一行占位/提示文案。
+function renderAccountsEmpty(text) {
+    elements.accountsList.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'accounts-empty';
+    empty.textContent = text;
+    elements.accountsList.appendChild(empty);
+}
+
+// 渲染账号卡片列表。
+function renderAccounts(accounts) {
+    elements.accountsList.innerHTML = '';
+    if (!accounts.length) {
+        renderAccountsEmpty('暂无托管账号');
+        return;
+    }
+    for (const acc of accounts) {
+        elements.accountsList.appendChild(buildAccountCard(acc));
+    }
+}
+
+// 用 DOM API 构造卡片（名称用 textContent 防注入），点击即触发无痕注入。
+function buildAccountCard(acc) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'account-card';
+    card.dataset.accountId = acc.id;
+
+    const avatar = document.createElement('span');
+    avatar.className = 'account-avatar';
+    const img = document.createElement('img');
+    img.src = acc.avatar || AVATAR_FALLBACK;
+    img.alt = '';
+    img.addEventListener('error', () => { img.src = AVATAR_FALLBACK; });
+    avatar.appendChild(img);
+
+    const meta = document.createElement('span');
+    meta.className = 'account-meta';
+    const name = document.createElement('span');
+    name.className = 'account-name';
+    name.textContent = acc.nickname || acc.name || `账号 ${acc.id}`;
+    const status = acc.cookie_status || 'unknown';
+    const badge = document.createElement('span');
+    badge.className = `account-badge ${status}`;
+    badge.textContent = ACCOUNT_STATUS_LABEL[status] || status;
+    meta.appendChild(name);
+    meta.appendChild(badge);
+
+    const openIcon = document.createElement('span');
+    openIcon.className = 'account-open-icon';
+    openIcon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+
+    card.appendChild(avatar);
+    card.appendChild(meta);
+    card.appendChild(openIcon);
+    card.addEventListener('click', () => openAccountSessionFromCard(acc.id));
+    return card;
+}
+
+// 点击账号卡片：触发 service worker 开无痕窗注入。聚焦新窗口会关闭 popup，
+// 故这里只"点火"，结果由 SW 写入 storage，popup 下次打开或仍在时经 onChanged 展示。
+async function openAccountSessionFromCard(accountId) {
+    if (!elements.apikey.value.trim()) {
+        showMessage('error', '请先填写并保存 apikey');
+        return;
+    }
+    await chrome.storage.local.remove('accountSessionResult');
+    chrome.action?.setBadgeText?.({ text: '' });
+    showMessage('info', '正在打开无痕窗口并注入该账号 cookie...');
+    chrome.runtime.sendMessage({ action: 'openAccountSession', accountId });
+}
+
+// 展示无痕注入结果（成功/部分失败/失败），并清一次性标记与徽标。
+function showAccountSessionResult(r) {
+    if (!r) return;
+    if (r.success) {
+        const failNote = r.failed ? `，${r.failed} 条失败` : '';
+        showMessage('success', `已在无痕窗口打开账号（注入 ${r.injected} 条 cookie${failNote}）。若未见新窗口，请到 chrome://extensions 勾选「在无痕模式下启用」`);
+    } else {
+        showMessage('error', `打开失败: ${r.error || '未知错误'}`);
+    }
+    chrome.storage.local.remove('accountSessionResult');
+    chrome.action?.setBadgeText?.({ text: '' });
+}
+
 // 保存 serverUrl + apikey
 async function saveConfig() {
     const newUrl = elements.serverUrl.value.trim();
@@ -192,6 +330,9 @@ async function saveConfig() {
     const isConnected = await checkServerConnection();
     showServerStatus(isConnected ? 'success' : 'error',
         isConnected ? '连接成功' : '无法连接到服务器');
+
+    // 配置更新后刷新"我的账号"列表（新 apikey 可见范围可能变化）。
+    await loadAccounts();
 }
 
 // 探活后台（/healthz 不需要 apikey）
@@ -208,6 +349,7 @@ function bindEvents() {
     elements.btnSync.addEventListener('click', syncAccount);
     elements.btnRemoteLogin.addEventListener('click', remoteLogin);
     elements.btnSaveConfig.addEventListener('click', saveConfig);
+    elements.btnRefreshAccounts.addEventListener('click', loadAccounts);
     elements.btnOpenXhs.addEventListener('click', () => {
         chrome.tabs.create({ url: 'https://www.xiaohongshu.com' });
     });

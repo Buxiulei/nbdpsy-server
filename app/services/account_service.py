@@ -21,6 +21,32 @@ from app.models.xhs_account import XhsAccount
 _UPDATABLE_FIELDS = frozenset({"name"})
 
 
+def account_view(account: XhsAccount) -> dict:
+    """把账号序列化为对外元信息视图;刻意不含 login_cookies,避免泄露登录态。
+
+    accounts 分组 MCP 工具与 /api/accounts REST 端点共用此视图,避免两处各写一份漂移。
+    """
+    return {
+        "id": account.id,
+        "name": account.name,
+        "nickname": account.nickname,
+        "user_id": account.user_id,
+        "red_id": account.red_id,
+        "avatar": account.avatar,
+        "status": account.status,
+        "cookie_status": account.cookie_status,
+        "last_check_at": (
+            account.last_check_at.isoformat() if account.last_check_at else None
+        ),
+        "last_login_at": (
+            account.last_login_at.isoformat() if account.last_login_at else None
+        ),
+        "created_at": (
+            account.created_at.isoformat() if account.created_at else None
+        ),
+    }
+
+
 async def list_accounts(
     session: AsyncSession, operator: Operator
 ) -> list[XhsAccount]:

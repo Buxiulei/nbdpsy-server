@@ -17,6 +17,7 @@ from app.auth.guards import assert_account_access, visible_account_ids
 from app.core.db import get_session
 from app.models.xhs_account import XhsAccount
 from app.services import account_service
+from app.services.account_service import account_view as _account_view
 
 
 def _parse_since(since: str) -> datetime:
@@ -29,29 +30,6 @@ def _parse_since(since: str) -> datetime:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
-
-
-def _account_view(account: XhsAccount) -> dict:
-    """把账号序列化为对外元信息视图;刻意不含 login_cookies,避免泄露登录态。"""
-    return {
-        "id": account.id,
-        "name": account.name,
-        "nickname": account.nickname,
-        "user_id": account.user_id,
-        "red_id": account.red_id,
-        "avatar": account.avatar,
-        "status": account.status,
-        "cookie_status": account.cookie_status,
-        "last_check_at": (
-            account.last_check_at.isoformat() if account.last_check_at else None
-        ),
-        "last_login_at": (
-            account.last_login_at.isoformat() if account.last_login_at else None
-        ),
-        "created_at": (
-            account.created_at.isoformat() if account.created_at else None
-        ),
-    }
 
 
 def register_accounts(mcp: FastMCP) -> None:

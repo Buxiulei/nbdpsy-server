@@ -1,16 +1,20 @@
 /**
  * NBDpsy 小红书账号助手 - 后台服务 (Service Worker)
  *
- * 职责（远程登录唯一入口）：
+ * 职责：
  * 1. 采集小红书 Cookies（跨所有 cookieStore + Set-Cookie 响应头补抓 httpOnly）
  * 2. 打开无痕窗口让操作者人工登录，登录成功后采集 Cookies + 用户信息
  * 3. 统一推送到后台 POST {serverUrl}/api/cookies/import，鉴权用 Operator apikey
+ * 4. 客户端注入（路线 B）：从后台取某号解密 cookie，开无痕窗注入后打开小红书
+ *    （openAccountSession，popup"我的账号"列表点击入口）
  *
  * 与旧仓差异：
  * - 鉴权从 JWT Bearer token 换成 Operator apikey（Authorization: Bearer <apikey>）。
  * - 推送端点统一为 /api/cookies/import（去掉 save-cookies / create-with-cookies 二分）。
  * - serverUrl + apikey 由 popup 存入 chrome.storage.local，本 worker 读取后使用。
- * - 删除依赖旧后台前端桥的 openRemoteBrowser（cookie 注入远程操控）与 onMessageExternal。
+ * - openAccountSession 移植旧仓 openRemoteBrowser 的无痕开窗+注入逻辑，但 sameSite 保原值
+ *   映射（不统一降 lax）、入口改为 popup 消息（无 onMessageExternal 前端桥）、cookie 源改为
+ *   带 apikey 拉 /api/accounts/{id}/cookies。
  */
 
 // 后台默认地址（对应后端 config.PUBLIC_BASE_URL 默认值），操作者可在 popup 覆盖。
@@ -438,6 +442,166 @@ async function startRemoteLogin() {
     }
 }
 
+// ── 客户端注入（路线 B）：列出后台托管账号 → 点一个 → 开无痕窗注入该号 cookie 打开小红书 ──
+
+// 把后台下发 cookie 的 sameSite 映射到 chrome.cookies.set 要求的小写枚举，**保留原值语义**
+// （不像旧仓统一降 lax，否则 XHS 跨站 cookie（SameSite=None）会失效）。
+// 后台存的是 Playwright 形式（Strict/Lax/None）；兼容小写与 Chrome 扩展别名 no_restriction。
+// 缺省/未识别 → 'lax'。
+function toChromeSameSite(value) {
+    const v = typeof value === 'string' ? value.toLowerCase() : '';
+    if (v === 'none' || v === 'no_restriction') return 'no_restriction';
+    if (v === 'strict') return 'strict';
+    if (v === 'lax') return 'lax';
+    return 'lax';
+}
+
+// 从后台取某号解密 cookie（带 apikey）；返回 { ok, cookies, error }。
+async function fetchAccountCookies(accountId) {
+    const { serverUrl, apikey } = await getConfig();
+    if (!apikey) {
+        return { ok: false, error: '未配置 apikey，请在扩展弹窗中填写' };
+    }
+    let response;
+    try {
+        response = await fetch(`${serverUrl}/api/accounts/${accountId}/cookies`, {
+            headers: { 'Authorization': `Bearer ${apikey}` }
+        });
+    } catch (e) {
+        return { ok: false, error: `拉取 cookie 失败: ${e.message}` };
+    }
+    let result = {};
+    try {
+        result = await response.json();
+    } catch (e) {
+        result = {};
+    }
+    if (!response.ok) {
+        return {
+            ok: false,
+            error: result.detail || result.error || `HTTP ${response.status}`
+        };
+    }
+    return { ok: true, cookies: result.cookies || [] };
+}
+
+// 把 cookie 逐条注入指定 cookieStore；单条失败只记 log 不中断，返回 { injected, failed }。
+async function injectCookiesIntoStore(cookies, storeId) {
+    let injected = 0;
+    let failed = 0;
+    for (const cookie of cookies) {
+        try {
+            const domain = (cookie.domain || '').replace(/^\./, '');
+            const path = cookie.path || '/';
+            const details = {
+                url: `https://${domain}${path}`,
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: path,
+                // 未显式 secure=false 即视为 secure（与旧仓一致；SameSite=None 亦要求 secure）。
+                secure: cookie.secure !== false,
+                // httpOnly 原样透传。
+                httpOnly: cookie.httpOnly || false,
+                // sameSite 保留原值映射（见 toChromeSameSite）。
+                sameSite: toChromeSameSite(cookie.sameSite),
+                storeId: storeId
+            };
+            // expires>0 才带 expirationDate（<=0 视为会话 cookie，不设过期）。
+            const expires = cookie.expires ?? cookie.expirationDate;
+            if (typeof expires === 'number' && expires > 0) {
+                details.expirationDate = expires;
+            }
+            await chrome.cookies.set(details);
+            injected++;
+        } catch (e) {
+            console.warn(`[NBDpsy] 注入 Cookie ${cookie && cookie.name} 失败:`, e.message);
+            failed++;
+        }
+    }
+    return { injected, failed };
+}
+
+// 开无痕窗口 + 注入某号 cookie + 导航到小红书（移植旧仓 openRemoteBrowser，适配路线 B）。
+async function openAccountSession(accountId) {
+    // 1. 从后台取该号解密 cookie。
+    const fetched = await fetchAccountCookies(accountId);
+    if (!fetched.ok) {
+        return { success: false, error: fetched.error };
+    }
+    const cookies = fetched.cookies;
+    if (cookies.length === 0) {
+        return { success: false, error: '该账号暂无可用 cookie（可能尚未登录采集）' };
+    }
+
+    // 2. 创建无痕窗口（先空白页，拿到独立 cookieStore 后再导航，避免注入前就发请求）。
+    const win = await chrome.windows.create({
+        incognito: true,
+        state: 'maximized',
+        url: 'about:blank'
+    });
+    const windowId = win.id;
+    console.log(`[NBDpsy] 无痕窗口已创建，窗口 ID: ${windowId}`);
+
+    // 3. 定位该无痕窗的 cookieStore（无痕有独立 store）；匹配不到回退 '1'（无痕常见值）。
+    let storeId = '1';
+    try {
+        const stores = await chrome.cookies.getAllCookieStores();
+        const winTabIds = (win.tabs || []).map(t => t.id);
+        const matched = stores.find(
+            s => (s.tabIds || []).some(id => winTabIds.includes(id))
+        );
+        if (matched) storeId = matched.id;
+    } catch (e) {
+        console.warn('[NBDpsy] 获取 cookieStore 失败，回退 storeId=1:', e.message);
+    }
+    console.log(`[NBDpsy] 使用 Cookie Store ID: ${storeId}`);
+
+    // 4. 先清该 store 里旧的 .xiaohongshu.com cookie（避免与既有会话串味）。
+    try {
+        const existing = await chrome.cookies.getAll({
+            domain: '.xiaohongshu.com',
+            storeId: storeId
+        });
+        for (const c of existing) {
+            try {
+                await chrome.cookies.remove({
+                    url: `https://${c.domain.replace(/^\./, '')}${c.path}`,
+                    name: c.name,
+                    storeId: storeId
+                });
+            } catch (e) { /* 单条清理失败忽略 */ }
+        }
+        if (existing.length > 0) {
+            console.log(`[NBDpsy] 已清除 ${existing.length} 个旧 Cookie`);
+        }
+    } catch (e) {
+        console.warn('[NBDpsy] 清理旧 cookie 失败:', e.message);
+    }
+
+    // 5. 逐条注入（sameSite 保原值；单条失败不中断）。
+    const { injected, failed } = await injectCookiesIntoStore(cookies, storeId);
+    console.log(`[NBDpsy] 注入完成 ${injected} 成功 / ${failed} 失败`);
+
+    // 6. 导航到小红书（无痕窗 tab 可能异步就绪，兜底查询一次）。
+    let tabId = win.tabs && win.tabs[0] && win.tabs[0].id;
+    if (tabId == null) {
+        try {
+            const tabs = await chrome.tabs.query({ windowId: windowId });
+            if (tabs && tabs.length > 0) tabId = tabs[0].id;
+        } catch (e) { /* 忽略 */ }
+    }
+    if (tabId != null) {
+        try {
+            await chrome.tabs.update(tabId, { url: 'https://www.xiaohongshu.com' });
+        } catch (e) {
+            console.warn('[NBDpsy] 导航到小红书失败:', e.message);
+        }
+    }
+
+    return { success: true, injected, failed, windowId, accountId };
+}
+
 // 采集当前会话 cookie + 活动标签页用户信息后推送后台（快速同步路径）。
 async function syncCurrentSession() {
     const cookies = await collectXHSCookies();
@@ -468,6 +632,16 @@ async function finishRemoteLogin(result) {
         await chrome.action.setBadgeText({ text: result.success ? '✓' : '!' });
         await chrome.action.setBadgeBackgroundColor({ color: result.success ? '#28a745' : '#dc3545' });
     } catch (e) { /* 徽标可选，失败不影响采集结果落地 */ }
+}
+
+// 打开无痕账号会话点击后，聚焦到新无痕窗口会立即销毁 popup、断裂消息回调，
+// 故结果不走 sendResponse，改写入 storage + 打扩展徽标；popup 下次打开或仍在时读取展示。
+async function finishAccountSession(result) {
+    await chrome.storage.local.set({ accountSessionResult: { ...result, ts: Date.now() } });
+    try {
+        await chrome.action.setBadgeText({ text: result.success ? '✓' : '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: result.success ? '#28a745' : '#dc3545' });
+    } catch (e) { /* 徽标可选，失败不影响注入结果落地 */ }
 }
 
 // 监听来自 popup 的消息
@@ -510,6 +684,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             startRemoteLogin()
                 .then(r => finishRemoteLogin(r))
                 .catch(e => finishRemoteLogin({ success: false, error: e.message }));
+            return false;
+
+        case 'openAccountSession':
+            // 立即 ack（聚焦新无痕窗会销毁 popup）；注入结果经 finishAccountSession 写 storage
+            sendResponse({ success: true, started: true });
+            openAccountSession(request.accountId)
+                .then(r => finishAccountSession(r))
+                .catch(e => finishAccountSession({ success: false, error: e.message }));
             return false;
 
         default:
