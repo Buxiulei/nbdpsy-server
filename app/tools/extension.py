@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -44,8 +45,11 @@ def register_extension(mcp: FastMCP) -> None:
         的起点**——发插件给操作者扫码登录前记下 server_time,登录发起后用它当基准轮询
         poll_login,直到检测到新号/该号登录时间刷新(避免用客户端本地时钟错判早/晚)。
         """
+        # 带 zip mtime 做 cache-buster：每次重打包链接即变，绕开 CDN 边缘缓存拿最新包。
+        zip_path = Path(settings.DATA_DIR) / "extension.zip"
+        buster = int(zip_path.stat().st_mtime) if zip_path.is_file() else 0
         return {
-            "download_url": f"{settings.PUBLIC_BASE_URL}/downloads/extension.zip",
+            "download_url": f"{settings.PUBLIC_BASE_URL}/downloads/extension.zip?t={buster}",
             "version": __version__,
             "apikey_hint": _APIKEY_HINT,
             "install_steps": _INSTALL_STEPS,

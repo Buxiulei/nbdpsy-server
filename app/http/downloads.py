@@ -25,8 +25,10 @@ async def download_extension() -> FileResponse:
             status_code=404,
             detail="插件包尚未生成,请先运行 scripts/pack_extension.sh 打包",
         )
+    # 插件包频繁迭代，禁 CDN/浏览器长缓存（否则新版本被边缘缓存卡住，运营下到旧包）。
     return FileResponse(
         zip_path,
         media_type="application/zip",
         filename="nbdpsy-extension.zip",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
