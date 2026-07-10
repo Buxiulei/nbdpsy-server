@@ -1,0 +1,12 @@
+{
+  "name": "nbdpsy",
+  "owner": { "name": "NBDpsy" },
+  "plugins": [
+    {
+      "name": "nbdpsy-mcp",
+      "source": "./plugins/nbdpsy-mcp",
+      "description": "小红书运营 MCP 后台接入：发布/账号/cookie/查询。安装时填你的 operator apikey 即可连 https://mcp.nbdpsy.com。",
+      "version": "0.1.0"
+    }
+  ]
+}

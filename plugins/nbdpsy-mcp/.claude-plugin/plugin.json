@@ -1,0 +1,14 @@
+{
+  "name": "nbdpsy-mcp",
+  "description": "小红书运营 MCP 后台（远程 HTTP，Streamable HTTP）。安装时输入管理员发给你的 operator apikey，自动接入 https://mcp.nbdpsy.com/mcp/，开箱即用。",
+  "version": "0.1.0",
+  "userConfig": {
+    "apikey": {
+      "type": "string",
+      "title": "nbdpsy-mcp operator apikey",
+      "description": "管理员发给你的专属 apikey（Bearer）。存本地安全存储，不写入配置文件/仓库。",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}
