@@ -27,13 +27,26 @@ const elements = {
 
 let currentCookies = [];
 let currentUserInfo = null;
-let serverUrl = 'http://127.0.0.1:8848';
+let serverUrl = 'https://mcp.nbdpsy.com';
 
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('[NBDpsy] Popup 加载');
+    // 版本号从 manifest 动态读，避免写死漂移
+    const verEl = document.querySelector('.version');
+    if (verEl) verEl.textContent = 'v' + chrome.runtime.getManifest().version;
     await loadConfig();
     await checkLoginStatus();
     bindEvents();
+    // 远程采集结果可能在 popup 关闭期间产生，打开时先读一次兜底
+    chrome.storage.local.get('remoteLoginResult', ({ remoteLoginResult }) => {
+        if (remoteLoginResult) showRemoteResult(remoteLoginResult);
+    });
+    // popup 仍开着时采集完成，实时展示
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.remoteLoginResult?.newValue) {
+            showRemoteResult(changes.remoteLoginResult.newValue);
+        }
+    });
 });
 
 // 加载 serverUrl + apikey
@@ -129,25 +142,30 @@ async function syncAccount() {
     }
 }
 
-// 远程登录采集：触发 service worker 开无痕窗口
+// 远程登录采集：触发 service worker 开无痕窗口。
+// 采集是长流程，点击后本 popup 会被新窗口聚焦而关闭，故这里只"点火"，
+// 结果由 SW 写入 storage，popup 下次打开或仍在时经 onChanged 展示（见 DOMContentLoaded）。
 async function remoteLogin() {
     if (!elements.apikey.value.trim()) {
         showMessage('error', '请先填写并保存 apikey');
         return;
     }
+    await chrome.storage.local.remove('remoteLoginResult');
+    chrome.action?.setBadgeText?.({ text: '' });
+    showMessage('info', '已打开无痕窗口，请在其中完成登录（扫码/短信/验证码）；登录成功后会自动采集，回到本弹窗即可看到结果');
+    chrome.runtime.sendMessage({ action: 'startRemoteLogin' });
+}
 
-    showMessage('info', '已打开无痕窗口，请在其中完成登录（扫码/短信/验证码），登录成功后将自动采集');
-    try {
-        const result = await sendMessage({ action: 'startRemoteLogin' });
-        if (result && result.success) {
-            showMessage('success', `${result.message || '采集成功'}（account_id=${result.accountId}）`);
-        } else {
-            showMessage('error', `采集失败: ${(result && result.error) || '未知错误'}`);
-        }
-    } catch (error) {
-        console.error('[NBDpsy] 远程登录采集失败:', error);
-        showMessage('error', `采集失败: ${error.message}`);
+// 展示远程采集结果（成功/失败），并清掉一次性标记与徽标
+function showRemoteResult(r) {
+    if (!r) return;
+    if (r.success) {
+        showMessage('success', r.message || `采集成功（account_id=${r.accountId ?? '?'}）`);
+    } else {
+        showMessage('error', `采集失败: ${r.error || '未知错误'}`);
     }
+    chrome.storage.local.remove('remoteLoginResult');
+    chrome.action?.setBadgeText?.({ text: '' });
 }
 
 // 保存 serverUrl + apikey

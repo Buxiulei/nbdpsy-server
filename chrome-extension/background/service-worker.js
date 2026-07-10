@@ -14,7 +14,7 @@
  */
 
 // 后台默认地址（对应后端 config.PUBLIC_BASE_URL 默认值），操作者可在 popup 覆盖。
-const DEFAULT_SERVER_URL = 'http://127.0.0.1:8848';
+const DEFAULT_SERVER_URL = 'https://mcp.nbdpsy.com';
 
 // 读取 serverUrl + apikey 配置。
 function getConfig() {
@@ -207,16 +207,17 @@ async function startRemoteLogin() {
         const windowId = loginWindow.id;
         console.log(`[NBDpsy] 无痕登录窗口已创建，窗口 ID: ${windowId}`);
 
-        // 获取 tab（无痕模式下 tabs 可能为空，需主动查询）
+        // 获取 tab（无痕模式下 tabs 可能为空，需主动查询；多次重试缓解偶发早退）
         let tabId;
         if (loginWindow.tabs && loginWindow.tabs.length > 0) {
             tabId = loginWindow.tabs[0].id;
         } else {
-            await new Promise(r => setTimeout(r, 1000));
-            const tabs = await chrome.tabs.query({ windowId: windowId });
-            if (tabs && tabs.length > 0) {
-                tabId = tabs[0].id;
-            } else {
+            for (let i = 0; i < 6 && tabId == null; i++) {
+                await new Promise(r => setTimeout(r, 500));
+                const tabs = await chrome.tabs.query({ windowId: windowId });
+                if (tabs && tabs.length > 0) tabId = tabs[0].id;
+            }
+            if (tabId == null) {
                 throw new Error('无法获取无痕窗口的 tab，请确保扩展已开启"在无痕模式下启用"');
             }
         }
@@ -459,6 +460,16 @@ async function syncCurrentSession() {
     return pushCookies({ accountName, cookies, userInfo });
 }
 
+// 远程采集是最长 5 分钟的流程，而点击后 popup 会因新窗口聚焦立即销毁、消息回调随之断裂。
+// 因此结果不走 sendResponse，改写入 storage + 打扩展徽标；popup 下次打开时读取并展示。
+async function finishRemoteLogin(result) {
+    await chrome.storage.local.set({ remoteLoginResult: { ...result, ts: Date.now() } });
+    try {
+        await chrome.action.setBadgeText({ text: result.success ? '✓' : '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: result.success ? '#28a745' : '#dc3545' });
+    } catch (e) { /* 徽标可选，失败不影响采集结果落地 */ }
+}
+
 // 监听来自 popup 的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('[NBDpsy] 收到消息:', request.action);
@@ -494,10 +505,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case 'startRemoteLogin':
+            // 立即 ack（不依赖 popup 存活）；真正结果经 finishRemoteLogin 写 storage
+            sendResponse({ success: true, started: true });
             startRemoteLogin()
-                .then(result => sendResponse(result))
-                .catch(error => sendResponse({ success: false, error: error.message }));
-            return true;
+                .then(r => finishRemoteLogin(r))
+                .catch(e => finishRemoteLogin({ success: false, error: e.message }));
+            return false;
 
         default:
             sendResponse({ success: false, error: '未知操作' });
