@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # 调试截图开关
     DEBUG_SCREENSHOTS_ENABLED: bool = False
 
+    # ── 选择器自愈(SelfHealLocator)。默认关闭,配 LLM_API_KEY 且开 ENABLED 才生效。 ──
+    SELFHEAL_ENABLED: bool = False
+    LLM_API_KEY: str = ""
+    LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    LLM_MODEL: str = "qwen-flash"
+    LLM_TIMEOUT: int = 15
+
     @property
     def retry_delays(self) -> list[int]:
         """把逗号分隔的重试计划字符串解析为秒数列表。"""
