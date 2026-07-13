@@ -9,6 +9,7 @@ from app.http import (
     accounts_rest,
     admin_rest,
     cookies_import,
+    cookies_rest,
     downloads,
     manifest,
     system,
@@ -20,6 +21,7 @@ ALL_ROUTERS = [
     accounts_rest.router,
     admin_rest.router,
     cookies_import.router,
+    cookies_rest.router,
     downloads.router,
 ]
 
@@ -29,4 +31,5 @@ ALL_MANIFEST_ENTRIES = [
     *accounts_rest.MANIFEST_ENTRIES,
     *admin_rest.MANIFEST_ENTRIES,
     *cookies_import.MANIFEST_ENTRIES,
+    *cookies_rest.MANIFEST_ENTRIES,
 ]
