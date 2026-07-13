@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.guards import assert_account_access, visible_account_ids
+from app.core.errors import NotFoundError
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.xhs_account import XhsAccount
 
@@ -64,18 +65,18 @@ async def list_accounts(
 async def get_account(
     session: AsyncSession, operator: Operator, account_id: int
 ) -> XhsAccount:
-    """鉴权后返回单个账号;无 access 抛 AccessDenied,账号不存在抛 ValueError。"""
+    """鉴权后返回单个账号;无 access 抛 AccessDenied,账号不存在抛 NotFoundError。"""
     await assert_account_access(operator, account_id, session)
     account = await session.get(XhsAccount, account_id)
     if account is None:
-        raise ValueError(f"账号 {account_id} 不存在")
+        raise NotFoundError(f"账号 {account_id} 不存在")
     return account
 
 
 async def update_account(
     session: AsyncSession, operator: Operator, account_id: int, **fields
 ) -> XhsAccount:
-    """鉴权后局部更新账号安全字段(当前仅 name);越界字段/不存在均抛 ValueError。
+    """鉴权后局部更新账号安全字段(当前仅 name);越界字段抛裸 ValueError,不存在抛 NotFoundError。
 
     fields 只允许 _UPDATABLE_FIELDS 内的键——传入 login_cookies/user_id 等敏感字段直接
     拒绝(ValueError),避免绕过 cookie_service 篡改登录态与身份。值为 None 的字段跳过不改。
@@ -86,7 +87,7 @@ async def update_account(
         raise ValueError(f"不允许更新字段: {', '.join(sorted(illegal))}")
     account = await session.get(XhsAccount, account_id)
     if account is None:
-        raise ValueError(f"账号 {account_id} 不存在")
+        raise NotFoundError(f"账号 {account_id} 不存在")
     for key, value in fields.items():
         if value is not None:
             setattr(account, key, value)
