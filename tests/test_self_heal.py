@@ -42,6 +42,41 @@ def test_passes_safety_input_intents():
     assert self_heal.passes_safety(_el(tag="button"), "title_input") is False
 
 
+def test_snapshot_collects_contenteditable():
+    # Fix 2:快照 JS 必须采集 contenteditable,否则富文本编辑器自愈永远 safety False。
+    # snapshot_interactive 依赖真 page 难单测,退而断言单一事实源常量 + 注入后的 JS。
+    assert "contenteditable" in self_heal._SNAPSHOT_ATTR_NAMES
+    assert "contenteditable" in self_heal._SNAPSHOT_JS
+
+
+def test_bbox_center_matches():
+    # Fix 1:中心点吻合(含 8px 内容差)→ True。
+    assert self_heal._bbox_center_matches(
+        {"x": 0, "y": 0, "width": 100, "height": 40},
+        {"x": 0, "y": 0, "width": 100, "height": 40},
+    ) is True
+    # 中心偏移 5px(< 8 容差)→ 仍视为同一元素。
+    assert self_heal._bbox_center_matches(
+        {"x": 0, "y": 0, "width": 100, "height": 40},
+        {"x": 5, "y": 3, "width": 100, "height": 40},
+    ) is True
+
+
+def test_bbox_center_mismatch():
+    # 中心点错位(退化选择器命中另一个同类元素)→ False。
+    assert self_heal._bbox_center_matches(
+        {"x": 0, "y": 0, "width": 100, "height": 40},
+        {"x": 500, "y": 300, "width": 100, "height": 40},
+    ) is False
+
+
+def test_bbox_center_none_inputs():
+    # bounding_box() 返回 None / 缺 bbox → 判不匹配,走坐标兜底不学坏选择器。
+    assert self_heal._bbox_center_matches(None, {"x": 0, "y": 0, "width": 10, "height": 10}) is False
+    assert self_heal._bbox_center_matches({"x": 0, "y": 0, "width": 10, "height": 10}, None) is False
+    assert self_heal._bbox_center_matches(None, None) is False
+
+
 def test_llm_locate_parses_ref(monkeypatch):
     class _Resp:
         def __init__(self, content):
