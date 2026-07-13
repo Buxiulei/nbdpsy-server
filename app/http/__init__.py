@@ -13,6 +13,7 @@ from app.http import (
     downloads,
     extension_rest,
     manifest,
+    publish_rest,
     system,
 )
 
@@ -24,6 +25,7 @@ ALL_ROUTERS = [
     cookies_import.router,
     cookies_rest.router,
     extension_rest.router,
+    publish_rest.router,
     downloads.router,
 ]
 
@@ -35,4 +37,5 @@ ALL_MANIFEST_ENTRIES = [
     *cookies_import.MANIFEST_ENTRIES,
     *cookies_rest.MANIFEST_ENTRIES,
     *extension_rest.MANIFEST_ENTRIES,
+    *publish_rest.MANIFEST_ENTRIES,
 ]
