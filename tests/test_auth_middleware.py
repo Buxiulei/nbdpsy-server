@@ -5,22 +5,20 @@ async_session 指向 tmp sqlite,并 patch settings.ROOT_ADMIN_APIKEY,用真实
 lifespan(app.router.lifespan_context)驱动 init_db + bootstrap_admin,绝不碰
 生产库 ./data/nbdpsy.db。
 
-lifespan 必须在测试协程体内 `async with`(而非 yielding async fixture):MCP
-StreamableHTTP session manager 内部用 anyio cancel scope,要求进入/退出在同一
-task;pytest-asyncio 会把 async fixture 的 setup/teardown 拆到不同 task,导致
-"Attempted to exit cancel scope in a different task"。故用 @asynccontextmanager
-helper,在测试体内单 task 内 enter/exit(与 test_server_health 的写法一致)。
+lifespan 必须在测试协程体内 `async with`(而非 yielding async fixture):lifespan
+内部用 anyio cancel scope,要求进入/退出在同一 task;pytest-asyncio 会把 async
+fixture 的 setup/teardown 拆到不同 task,导致 "Attempted to exit cancel scope in
+a different task"。故用 @asynccontextmanager helper,在测试体内单 task 内
+enter/exit(与 test_server_health 的写法一致)。
 
 覆盖(brief 必测):
 - 无 key 打受保护端点 → 401
 - 非法 key → 401
 - 带 ROOT_ADMIN_APIKEY → 200 且 whoami 返回 admin(REST 路由)
 - 白名单 /healthz 无 key 仍 200
-另加:X-API-Key 头、context.py 单测、bootstrap 幂等、以及关键风险实测——
-ContextVar 能否穿透到挂载在 /mcp 的 FastMCP 工具执行(见文末测试与断言注释)。
+另加:X-API-Key 头、context.py 单测、bootstrap 幂等。
 """
 
-import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -249,86 +247,6 @@ async def test_bootstrap_generates_when_key_empty(tmp_path, monkeypatch):
         assert op.name == "root"
         assert op.enabled is True
     await tmp_engine.dispose()
-
-
-# ---------------- 关键风险实测:ContextVar 是否穿透 /mcp 工具 ----------------
-
-
-def _sse_json(text: str):
-    """从 Streamable HTTP 的 SSE 响应体里取第一段 data: 的 JSON。"""
-    for line in text.splitlines():
-        if line.startswith("data:"):
-            return json.loads(line[len("data:") :].strip())
-    return None
-
-
-async def _mcp_call(c, sid, auth, method, params=None, msg_id=None):
-    """向 /mcp/ 发一条 JSON-RPC(带 session id 与鉴权头)。"""
-    body = {"jsonrpc": "2.0", "method": method}
-    if msg_id is not None:
-        body["id"] = msg_id
-    if params is not None:
-        body["params"] = params
-    headers = {**auth, "Accept": "application/json, text/event-stream"}
-    if sid:
-        headers["mcp-session-id"] = sid
-    return await c.post("/mcp/", json=body, headers=headers)
-
-
-async def test_contextvar_propagation_into_mcp_tool(tmp_path, monkeypatch):
-    """实测:中间件 set 的 Operator 上下文能否被 /mcp 的 whoami 工具读到。
-
-    完整 Streamable HTTP 握手:initialize(取 mcp-session-id)→ initialized 通知
-    → tools/call whoami。
-
-    实测结论(fastmcp 3.4.3 + starlette 1.3.1 + 进程内 ASGITransport):
-    **能穿透**。父 FastAPI 的 BaseHTTPMiddleware 在 dispatch 里 set 的 ContextVar,
-    经 call_next 的 copy_context() 被下游(含挂载在 /mcp 的工具执行)同 task 链继承,
-    whoami 返回 authenticated=True 且身份为 root/admin。故后续工具可直接用
-    current_operator() 取运营者(仍保留 get_http_headers() 作兜底,见 task 报告)。
-    """
-    async with isolated_client(tmp_path, monkeypatch) as (c, key):
-        auth = {"Authorization": f"Bearer {key}"}
-
-        init = await _mcp_call(
-            c,
-            None,
-            auth,
-            "initialize",
-            params={
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "t", "version": "0"},
-            },
-            msg_id=1,
-        )
-        assert init.status_code == 200
-        sid = init.headers.get("mcp-session-id")
-        assert sid, "initialize 未返回 mcp-session-id"
-
-        notified = await _mcp_call(c, sid, auth, "notifications/initialized")
-        assert notified.status_code in (200, 202)
-
-        called = await _mcp_call(
-            c,
-            sid,
-            auth,
-            "tools/call",
-            params={"name": "whoami", "arguments": {}},
-            msg_id=2,
-        )
-        assert called.status_code == 200
-        payload = _sse_json(called.text)
-        assert payload is not None, f"whoami 无法解析 SSE 响应: {called.text!r}"
-        result = payload["result"]
-        structured = result.get("structuredContent") or json.loads(
-            result["content"][0]["text"]
-        )
-
-    # 固化实测结论:ContextVar 穿透成功,身份正确。
-    assert structured["authenticated"] is True
-    assert structured["name"] == "root"
-    assert structured["role"] == "admin"
 
 
 # ---------------- app 级异常处理器(Task 1.2 附带) ----------------

@@ -291,6 +291,23 @@ async def test_list_jobs_access_filter(tmp_path, monkeypatch):
         assert got_admin == {j1, j2, j3}
 
 
+async def test_list_jobs_account_id_denied_403(tmp_path, monkeypatch):
+    """?account_id=<无 access 的号> → 403(显式鉴权,平移自已删的 test_publish_tools.py 同名断言)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc1 = await seed_account("号G1b", "uG1b", _COOKIES)
+        acc_other = await seed_account("号G3b", "uG3b", _COOKIES)
+        op_key = "op-publish-list-denied-01"
+        await _make_operator_with_access(acc1, key=op_key)  # 不授权 acc_other
+
+        r = await c.get(
+            "/api/publish-jobs",
+            params={"account_id": acc_other},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 403
+
+
 async def test_list_jobs_status_filter_and_bad_status_400(tmp_path, monkeypatch):
     """?status=pending 生效;?status=xx → 400。"""
     async with rest_client(tmp_path, monkeypatch) as c:

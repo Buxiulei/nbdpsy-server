@@ -1,11 +1,10 @@
 """Operator 认证上下文:基于 ContextVar 在单次请求内传递当前运营者。
 
-中间件校验 apikey 成功后 set_current_operator(op),受保护的路由/工具用
+中间件校验 apikey 成功后 set_current_operator(op),受保护的路由用
 current_operator() 读取;未认证时抛 AuthError(由上层转 401)。
 
 ContextVar 而非线程局部:异步单线程下天然按 task 隔离,且能被 asyncio
-task 创建时的 copy_context() 继承——这是本方案能穿透中间件→下游 app 的前提
-(是否穿透到挂载在 /mcp 的 FastMCP 工具执行,由 tests 实测,见 task 报告)。
+task 创建时的 copy_context() 继承——这是本方案能穿透中间件→下游路由的前提。
 """
 
 from contextvars import ContextVar, Token

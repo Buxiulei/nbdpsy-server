@@ -1,8 +1,8 @@
 """apikey 鉴权中间件:从请求头取 apikey,校验后写入 Operator 上下文。
 
-方案与 fastmcp 版本解耦:在父 FastAPI 上装 Starlette BaseHTTPMiddleware。
-命中白名单(/healthz、/downloads)直接放行;其余请求(含挂载在 /mcp 的子 app)
-必须携带有效 apikey(Authorization: Bearer <key> 或 X-API-Key),否则返回 401 JSON。
+在 FastAPI 上装 Starlette BaseHTTPMiddleware。命中白名单(/healthz、/downloads)
+直接放行;其余请求(含全部 /api/* 路由)必须携带有效 apikey(Authorization: Bearer
+<key> 或 X-API-Key),否则返回 401 JSON。
 
 校验成功后把命中的 Operator 写入 ContextVar(set_current_operator),受保护的
 REST 路由用 current_operator() 读取。BaseHTTPMiddleware 的 call_next 会以

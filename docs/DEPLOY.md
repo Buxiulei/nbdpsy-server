@@ -1,4 +1,4 @@
-# nbdpsy-mcp 上线 Checklist
+# nbdpsy-api 上线 Checklist
 
 配合 `README.md` 的部署叙述使用。本文件是**可勾选的操作清单 + 首跑验证 + 红线**。逐项打钩再上线。
 
@@ -14,10 +14,10 @@
 
 - [ ] **`SECRET_KEY`** 设为**非默认**的高熵值。**这是硬闸**：`DEBUG=False` 且 `SECRET_KEY` 仍是默认值 `change-me-...` 时进程启动即 fail-fast 退出（防止用源码公开的 key 加密全量 cookie）。**一旦设定不可再改**——换 key 会让存量 cookie 全部解不出且静默返空。
 - [ ] **`ROOT_ADMIN_APIKEY`** 设好（引导管理员的 apikey）。留空则启动时随机生成并在日志打印一次——生产建议显式设，别漏看日志。
-- [ ] **`PUBLIC_BASE_URL`** = 对外访问地址（插件下载 URL、`get_extension_download` 都用它）。
+- [ ] **`PUBLIC_BASE_URL`** = 对外访问地址（插件下载 URL、`GET /api/extension` 都用它）。
 - [ ] `DATABASE_URL`（默认 SQLite `./data/nbdpsy.db`）、`DATA_DIR`、`UPLOAD_DIR`、`API_HOST/API_PORT`、`XVFB_DISPLAY=:99`。
 - [ ] `PUBLISH_CONCURRENCY`（默认 2）、`PUBLISH_RETRY_SCHEDULE`（120,600,1800）、`PUBLISH_JOB_TIMEOUT`（600s）。
-- [ ] `COOKIE_CHECK_INTERVAL`：默认 `0`=关闭周期巡检（按需 on-demand `check_cookies`）；设正整数秒才起后台巡检。
+- [ ] `COOKIE_CHECK_INTERVAL`：默认 `0`=关闭周期巡检（按需 on-demand `POST /api/accounts/{id}/cookie-checks`）；设正整数秒才起后台巡检。
 - [ ] `DEBUG=False`（生产）。
 
 ## 2. 起服务
@@ -29,12 +29,14 @@
 
 ## 3. 首跑验证（**本 build 未对真 XHS 账号跑过，务必走一遍**）
 
-- [ ] **远程 agent 连通**：用某 operator 的 apikey（`Authorization: Bearer <key>`）连 `PUBLIC_BASE_URL/mcp/`（注意结尾斜杠），`initialize` + `tools/list` 应见 24 工具；`health`/`whoami` 通。
-- [ ] **建 operator + 授权**：admin apikey 调 `create_operator`（记下一次性明文 apikey）→ `grant_account_access`。
-- [ ] **装插件登录**：`get_extension_download` → 下载 → chrome://extensions 开发者模式加载已解压目录 → 填 `serverUrl`(=PUBLIC_BASE_URL) 与 operator apikey → **勾选"在无痕模式下启用"**（MV3 限制，manifest 声明不了）→ 隐身窗口人工完成登录+验证 → cookie 自动推回。
-- [ ] **验 cookie**：`check_cookies(account_id)` **异步**——立即返 `check_id`，随后用 `get_cookie_check(check_id)` 轮询到终态 `valid`/`invalid`/`captcha`/`error`。`valid` 附回填资料；`error` 是浏览器启动失败等基础设施故障（**不写回、保留原状态**，不等于 cookie 真失效——首跑盯一下）。
-- [ ] **试发一条**：`publish_note(...)` → 轮询 `get_publish_status(job_id)` 到 `published`。**盯发布确认**：成功页只停 ~3s，代码已做"确认即立即收口"防重复发帖——首跑确认不出现重复发帖。
-- [ ] **权限隔离**：换一个无该号 access 的 operator，确认 `publish_note`/`get_cookies` 对该号抛 403。
+- [ ] **远程 agent 连通**：用某 operator 的 apikey（`Authorization: Bearer <key>`）探 manifest:
+  `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $KEY" $PUBLIC_BASE_URL/api/manifest`
+  期望 `200`,响应体 `endpoints` 应有 24 条;`GET /healthz`/`GET /api/whoami` 通。
+- [ ] **建 operator + 授权**：admin apikey 调 `POST /api/operators`（记下一次性明文 apikey）→ `POST /api/operators/{id}/grants`。
+- [ ] **装插件登录**：`GET /api/extension` → 下载 → chrome://extensions 开发者模式加载已解压目录 → 填 `serverUrl`(=PUBLIC_BASE_URL) 与 operator apikey → **勾选"在无痕模式下启用"**（MV3 限制，manifest 声明不了）→ 隐身窗口人工完成登录+验证 → cookie 自动推回。
+- [ ] **验 cookie**：`POST /api/accounts/{id}/cookie-checks` **异步**——立即返 `check_id`，随后用 `GET /api/cookie-checks/{check_id}` 轮询到终态 `valid`/`invalid`/`captcha`/`error`。`valid` 附回填资料；`error` 是浏览器启动失败等基础设施故障（**不写回、保留原状态**，不等于 cookie 真失效——首跑盯一下）。
+- [ ] **试发一条**：`POST /api/publish-jobs` → 轮询 `GET /api/publish-jobs/{job_id}` 到 `published`。**盯发布确认**：成功页只停 ~3s，代码已做"确认即立即收口"防重复发帖——首跑确认不出现重复发帖。
+- [ ] **权限隔离**：换一个无该号 access 的 operator，确认 `POST /api/publish-jobs`/`GET /api/accounts/{id}/cookies` 对该号抛 403。
 
 ## 4. 运维红线 / 已知边界
 

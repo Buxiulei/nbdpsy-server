@@ -1,22 +1,22 @@
-# nbdpsy-mcp
+# nbdpsy-api
 
-小红书矩阵账号运营的**纯 MCP 后台服务**。远程 AI agent 通过 MCP 协议调用工具完成
+小红书矩阵账号运营的**纯 REST API 后台服务**。远程 AI agent 通过 HTTP 调用端点完成
 账号托管、cookie 共享、笔记发布;人不直接用 UI,登录只交给一个 chrome 插件。
 
 ---
 
 ## 架构总览
 
-一句话:**单进程 FastAPI + FastMCP(Streamable HTTP)服务,apikey 鉴权,把发布/
-账号/cookie 做成 MCP 工具,登录交给 chrome 插件,全服务只有一套 sync Camoufox 浏览器栈。**
+一句话:**单进程 FastAPI(REST)服务,apikey 鉴权,把发布/账号/cookie 做成 REST 端点,
+登录交给 chrome 插件,全服务只有一套 sync Camoufox 浏览器栈。**
 
 ```
-远程 agent ──(MCP over Streamable HTTP, Bearer apikey)──▶  /mcp/
-chrome 插件 ──(HTTP, Bearer apikey)──────────────────────▶  /cookies/import
+远程 agent ──(HTTP, Bearer apikey)───────────────────────▶  /api/*
+chrome 插件 ──(HTTP, Bearer apikey)──────────────────────▶  /api/cookies/import
                                         │
-                        单进程 FastAPI + FastMCP
+                              单进程 FastAPI
                         ├─ apikey 中间件(RBAC 上下文)
-                        ├─ MCP 工具面(账号/cookie/发布/插件/管理员)
+                        ├─ REST 端点面(账号/cookie/发布/插件/管理员/自描述)
                         ├─ 发布队列(asyncio.Queue + per-account 锁 + to_thread)
                         │     └─▶ sync Camoufox(Xvfb :99)── xiaohongshu.com
                         └─ 可选 cookie 周期巡检(COOKIE_CHECK_INTERVAL>0 才起)
@@ -40,13 +40,12 @@ chrome 插件 ──(HTTP, Bearer apikey)─────────────
 
 ```
 app/
-  server.py            # create_app():FastAPI + FastMCP 装配 + lifespan
+  server.py            # create_app():FastAPI 装配 + lifespan
   core/                # config(Settings) / db(async SQLAlchemy) / security(Fernet + apikey hash)
   auth/                # apikey 中间件 / ContextVar 运营者上下文 / RBAC guards / bootstrap root
   models/              # operator / operator_account_access / xhs_account / publish_job
   services/            # operator_service / account_service / cookie_service(纯业务层)
-  tools/               # MCP 工具:system / admin / accounts / cookies / publish / extension
-  http/                # REST:cookies_import(插件推 cookie) / downloads(插件包下载)
+  http/                # REST 端点:system / manifest / accounts / admin / cookies / publish / extension / downloads
   browser/             # sync_client(Camoufox 发布/检测) / profile_guard / fingerprint / cookie_checker
   publish/             # queue(asyncio 队列 + 锁) / scheduler(状态机 + 恢复) / runtime(调度器单例)
 alembic/               # DB 迁移
@@ -86,7 +85,7 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 .venv/bin/uvicorn app.server:create_app --factory --host 0.0.0.0 --port 8848
 ```
 
-服务起来后:健康探活 `GET /healthz`(免鉴权),MCP 端点 `POST /mcp/`(需 apikey)。
+服务起来后:健康探活 `GET /healthz`(免鉴权),自描述接口 `GET /api/manifest`(需 apikey)。
 
 ---
 
@@ -95,32 +94,33 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 - **首个 root 管理员**由 lifespan 的 `bootstrap_admin` 引导:
   - 配了 `ROOT_ADMIN_APIKEY`:用它建/对齐 root(幂等,重启同 key 不重复建)。
   - 没配:仅当库里还没 root 时,自动生成一把并在日志里**打印一次明文**(务必立即保存)。
-- 之后用 root 的 apikey 调 `create_operator` 建其它运营者,每次返回**一次性明文 apikey**
-  (库内只存 SHA256 hash,无法再次读取;忘了用 `rotate_operator_apikey` 重置)。
+- 之后用 root 的 apikey 调 `POST /api/operators` 建其它运营者,每次返回**一次性明文 apikey**
+  (库内只存 SHA256 hash,无法再次读取;忘了用 `POST /api/operators/{id}/rotate-apikey` 重置)。
 - 远程 agent / 插件带 apikey 的方式:HTTP 头 `Authorization: Bearer <apikey>`
   (或 `X-API-Key: <apikey>`)。
 
 ### 创建更多管理员
 
-用 root(或任一 admin)的 apikey 让 agent 调管理员工具:
+用 root(或任一 admin)的 apikey 调管理端点:
 
-- 新建 admin:`create_operator(name="小李", role="admin")` → 返回一次性明文 apikey。
-- 把已有运营者提权:`update_operator(operator_id=5, role="admin")`;停用:`update_operator(id, enabled=false)`。
-- 分配小红书账号使用权:`grant_account_access(operator_id, xhs_account_id)`;回收:`revoke_account_access(...)`。
-- 只有 admin 能调这些;普通 operator 调会被拒(AccessDenied / 403)。
+- 新建 admin:`POST /api/operators` `{"name":"小李","role":"admin"}` → 返回一次性明文 apikey。
+- 把已有运营者提权:`PATCH /api/operators/{id}` `{"role":"admin"}`;停用:`{"enabled":false}`。
+- 分配小红书账号使用权:`POST /api/operators/{id}/grants` `{"xhs_account_id":...}`;
+  回收:`DELETE /api/operators/{id}/grants/{xhs_account_id}`。
+- 只有 admin 能调这些;普通 operator 调会被拒(403)。
 
 ### 查看账号 / 运营者状态
 
-本服务无前端,查看都通过连了 **admin apikey** 的 agent 调工具:
+本服务无前端,查看都通过带 **admin apikey** 的请求调 REST 端点:
 
-- **所有小红书账号 + 登录状态**:`list_accounts()`(admin 全见)→ 每个含 `status` /
+- **所有小红书账号 + 登录状态**:`GET /api/accounts`(admin 全见)→ 每个含 `status` /
   `cookie_status`(valid/invalid/captcha/unknown)/ `last_check_at` / 昵称等(不含 cookie)。
-- **刷新某号实时活性**:`check_cookies(account_id)` **异步**——返回 `{check_id}` 后用
-  `get_cookie_check(check_id)` 轮询到 valid/invalid/captcha/error,把三态写回。
+- **刷新某号实时活性**:`POST /api/accounts/{id}/cookie-checks` **异步**——返回 `{check_id}` 后用
+  `GET /api/cookie-checks/{check_id}` 轮询到 valid/invalid/captcha/error,把三态写回。
   想自动周期巡检:设 `COOKIE_CHECK_INTERVAL`(秒,>0 才起,默认 0)。
-- **发布任务状态**:`list_publish_jobs(account_id?, status?)`。
-- **所有运营者**:`list_operators()` → id/name/role/enabled(不含 apikey);某人授权了哪些号:
-  `list_operator_grants(operator_id)`。
+- **发布任务状态**:`GET /api/publish-jobs?account_id=&status=`(均可选)。
+- **所有运营者**:`GET /api/operators` → id/name/role/enabled(不含 apikey);某人授权了哪些号:
+  `GET /api/operators/{id}/grants`。
 
 不经 agent 快速瞄一眼(直接查库):
 
@@ -132,177 +132,111 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 
 ## 插件配置
 
-1. 让 agent 调 `get_extension_download` 拿到 `download_url`(指向 `/downloads/extension.zip`,
+1. 带 apikey 调 `GET /api/extension` 拿到 `download_url`(指向 `/downloads/extension.zip`,
    免鉴权可直接下)、版本与安装步骤。
 2. 下载解压到固定目录 → `chrome://extensions` 开「开发者模式」→「加载已解压的扩展程序」。
 3. 在插件弹窗填 `serverUrl`(本服务地址,即 `PUBLIC_BASE_URL`)与 `apikey`(连接本服务的
    同一把 key)。
-4. 用户在 chrome 里登录好小红书后,插件把 cookie 推到 `/cookies/import`,服务端
+4. 用户在 chrome 里登录好小红书后,插件把 cookie 推到 `POST /api/cookies/import`,服务端
    sameSite 规范化 + Fernet 加密后 upsert 到该账号唯一一行。
 
 ---
 
-## MCP 工具清单
+## API 端点清单
 
-共 24 个工具,分 6 组。远程 agent 通过 MCP `tools/call` 调用;除白名单外均需 apikey,
-且按 RBAC 收窄到 caller 有权的账号(admin 全见)。
+共 24 个 REST 端点,分 6 组。除白名单(`/healthz`、`/downloads/*`)外均需 apikey,
+且按 RBAC 收窄到 caller 有权的账号(admin 全见)。**完整契约(含 params/returns/errors/notes)
+以 `GET /api/manifest` 为准**,下表只给概览。
 
 ### system(2)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `health` | `() -> {ok, version}` | 探活 + 版本 |
-| `whoami` | `() -> {authenticated, name?, role?}` | 回显当前运营者(诊断) |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `GET /api/whoami` | 回显当前运营者身份(诊断) |
+| `GET /api/manifest` | 服务自描述:全部端点契约 + 工作流叙事 + 错误契约 + caller 身份 |
 
 ### admin(8,仅管理员)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `create_operator` | `(name, role="operator") -> {id, name, role, enabled, apikey, note}` | 建运营者,返一次性明文 apikey |
-| `list_operators` | `() -> {operators: [...]}` | 列全部运营者(不含 apikey) |
-| `update_operator` | `(operator_id, role?, enabled?, name?) -> {id, name, role, enabled}` | 局部更新(留空不改) |
-| `delete_operator` | `(operator_id) -> {deleted}` | 删运营者并级联清授权 |
-| `rotate_operator_apikey` | `(operator_id) -> {id, apikey, note}` | 重置 apikey,旧 key 立即失效 |
-| `grant_account_access` | `(operator_id, xhs_account_id) -> {id, operator_id, xhs_account_id}` | 授权某号(幂等) |
-| `revoke_account_access` | `(operator_id, xhs_account_id) -> {operator_id, xhs_account_id, revoked}` | 回收授权(幂等) |
-| `list_operator_grants` | `(operator_id) -> {operator_id, xhs_account_ids}` | 列某运营者已授权的号 |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `POST /api/operators` | 建运营者,返一次性明文 apikey |
+| `GET /api/operators` | 列全部运营者(不含 apikey) |
+| `PATCH /api/operators/{operator_id}` | 局部更新 role/enabled/name(留空不改) |
+| `DELETE /api/operators/{operator_id}` | 删运营者并级联清授权 |
+| `POST /api/operators/{operator_id}/rotate-apikey` | 重置 apikey,旧 key 立即失效 |
+| `POST /api/operators/{operator_id}/grants` | 授权某号(幂等) |
+| `DELETE /api/operators/{operator_id}/grants/{xhs_account_id}` | 回收授权(幂等) |
+| `GET /api/operators/{operator_id}/grants` | 列某运营者已授权的号 |
 
-### accounts(5,RBAC 收窄)
+### accounts(6,RBAC 收窄)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `list_accounts` | `() -> {accounts: [...]}` | 列可见账号(不含 cookie) |
-| `get_account` | `(account_id) -> {account view}` | 查单个账号元信息 |
-| `update_account` | `(account_id, name?) -> {account view}` | 改内部展示名(安全字段) |
-| `delete_account` | `(account_id) -> {deleted}` | 删账号并清其授权 |
-| `poll_login` | `(since, account_id?) -> {done, accounts?/account?}` | 轮询登录完成信号(自 since 起有无新号/新登录) |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `GET /api/accounts` | 列可见账号(不含 cookie) |
+| `GET /api/accounts/{account_id}` | 查单个账号元信息 |
+| `PATCH /api/accounts/{account_id}` | 改内部展示名(安全字段) |
+| `DELETE /api/accounts/{account_id}` | 删账号并清其授权 |
+| `GET /api/accounts/{account_id}/cookies` | 解密回读该号 cookie(需 access) |
+| `GET /api/login/poll` | 轮询登录完成信号(自 since 起有无新号/新登录) |
 
-### cookies(4)
+### cookies(3)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `import_cookies` | `(account_name, cookies_json, user_info?) -> {account_id, created}` | 灌 cookie,upsert 唯一号 |
-| `get_cookies` | `(account_id) -> {account_id, cookies}` | 解密回读(需 access) |
-| `check_cookies` | `(account_id) -> {check_id, status}` | 异步起浏览器巡检,立即返 check_id |
-| `get_cookie_check` | `(check_id) -> {status, user_info?, reason?}` | 轮询 check_cookies 的检测结果 |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `POST /api/cookies/import` | 灌 cookie,upsert 唯一号 |
+| `POST /api/accounts/{account_id}/cookie-checks` | 异步起浏览器巡检,立即返 check_id |
+| `GET /api/cookie-checks/{check_id}` | 轮询巡检结果 |
 
 ### publish(4,RBAC 收窄)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `publish_note` | `(account_id, title, content, images, topics, schedule_time?) -> {job_id, status}` | 建发布任务并入队 |
-| `get_publish_status` | `(job_id) -> {status, note_id, note_url, error, retries}` | 查任务状态 |
-| `list_publish_jobs` | `(account_id?, status?) -> {jobs: [...]}` | 列任务(按可见账号过滤) |
-| `cancel_publish_job` | `(job_id) -> {ok}` | 取消(仅 pending 可取消) |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `POST /api/publish-jobs` | 建发布任务并入队 |
+| `GET /api/publish-jobs/{job_id}` | 查任务状态 |
+| `GET /api/publish-jobs` | 列任务(按可见账号过滤,可加 `?account_id=&status=`) |
+| `POST /api/publish-jobs/{job_id}/cancel` | 取消(仅 pending 可取消) |
 
-`publish_note` 的 `images` 每项为 http(s) URL / data URI / `{b64, ext}`;不传
+`POST /api/publish-jobs` 的 `images` 每项为 http(s) URL / data URI / `{b64, ext}`;不传
 `schedule_time` 立即入队,传 ISO8601 字符串则定时发布(调度器扫到期后自取)。图片在发布
-runner 里再物料化成本地文件,工具本身不碰浏览器。
+runner 里再物料化成本地文件,端点本身不碰浏览器。
 
 ### extension(1)
 
-| 工具 | 签名 | 说明 |
-|---|---|---|
-| `get_extension_download` | `() -> {download_url, version, apikey_hint, install_steps, server_time}` | 插件下载 + 安装引导 + poll_login 起点时间 |
+| 方法 + 路径 | 说明 |
+|---|---|
+| `GET /api/extension` | 插件下载地址 + 版本 + 安装引导 + `/api/login/poll` 起点时间 |
 
 ---
 
-## 安装 / 接入 MCP(远程 agent 如何连)
+## 接入(三步)
 
-MCP 传输为 **Streamable HTTP**,端点 `POST <公网地址>/mcp/`(**注意结尾斜杠**,无斜杠会
-307 重定向),鉴权头 `Authorization: Bearer <apikey>`。本部署的公网地址为
-**`https://mcp.nbdpsy.com`**(经 Cloudflare 隧道回源 `localhost:8848`),下文示例即用它;
-你自建部署时替换成自己的域名。
+远程 agent 接入本服务不需要装任何客户端 / 插件 / SDK——**公网地址 + 一把 operator apikey**
+即可,直接用 HTTP 调 REST 端点。本部署的公网地址为 **`https://mcp.nbdpsy.com`**(经反向代理
+回源 `localhost:8848`),下文示例即用它;你自建部署时替换成自己的域名。
 
-### 通过 Claude Code 插件 marketplace 安装(最简,推荐)
-
-本仓库同时是一个 Claude Code **插件 marketplace**。运营端两条命令装好,URL 已内置,只需填自己的
-apikey(安装时提示输入,存本地安全存储,**不写入配置文件/仓库**):
-
-```bash
-claude plugin marketplace add Buxiulei/nbdpsy-mcp
-claude plugin install nbdpsy-mcp@nbdpsy
-# 安装时提示输入 operator apikey → 填管理员发给你的那把
-```
-
-装完 nbdpsy-mcp 全部工具即可用;`claude plugin uninstall nbdpsy-mcp@nbdpsy` 卸载、
-`claude plugin marketplace update nbdpsy` 拉更新。插件内容见 `plugins/nbdpsy-mcp/`(MCP 端点定义
-+ 敏感 apikey userConfig)。
-
-### 从另一台机器连接(三步)
-
-别的机器上的 agent 接入本服务,只需要**公网地址 + 一把 operator apikey**(向管理员索取,见
-「apikey 与首个管理员」)——**不需要在那台机器上装本项目代码或 chrome 插件**(插件只在"登录
-小红书"时才用,且装在人工登录的那台真实浏览器上,与调用 MCP 的 agent 机器无关)。
-
-1. **确认可达**(在该机器上):
+1. **拿 apikey**:向管理员索取一把 operator apikey(见「apikey 与首个管理员」)。
+2. **确认可达**:
    ```bash
    curl https://mcp.nbdpsy.com/healthz          # 应返回 {"ok":true}
    ```
-2. **把 MCP 装进该机器的 agent 客户端**(见下方各客户端命令,把 `<你的-apikey>` 换成管理员发的 key)。
-3. **验证**:让 agent 调 `whoami`(返回你的 operator 身份)、`list_accounts`(看你有权操作的号)。
+3. **读 manifest 自解释**:
+   ```bash
+   curl -H "Authorization: Bearer <你的-apikey>" https://mcp.nbdpsy.com/api/manifest
+   ```
+   返回体一次性给全部端点契约(method/path/params/returns/errors/notes)、工作流叙事
+   (workflows)、约束(constraints)、错误契约(error_contract)与你的身份(caller)。
+   agent 读完这一个接口即可自解释地干活,不需要额外文档。
 
-> apikey 是密钥:别写进公开仓库 / 截图 / 聊天分享。泄露了让管理员用 `rotate_operator_apikey` 轮换。
-
-### 各客户端安装步骤
-
-前提:服务端已部署可达(见上)、你已拿到一把 operator apikey。把本 MCP 装进 agent 客户端:
-
-**Claude Code(命令行,推荐)**:
-```bash
-claude mcp add --transport http nbdpsy https://mcp.nbdpsy.com/mcp/ \
-  --header "Authorization: Bearer <你的-apikey>"
-```
-之后会话里即可用全部工具;`claude mcp list` 查看、`claude mcp remove nbdpsy` 卸载。
-
-**Claude Desktop / Cursor / Windsurf 等(改配置文件)**:在客户端的 MCP 配置里加一个
-`mcpServers` 条目:
-```json
-{
-  "mcpServers": {
-    "nbdpsy": {
-      "type": "http",
-      "url": "https://mcp.nbdpsy.com/mcp/",
-      "headers": { "Authorization": "Bearer <你的-apikey>" }
-    }
-  }
-}
-```
-
-**任意支持 Streamable HTTP 的客户端 / 自研 agent**:直接 `POST {PUBLIC_BASE_URL}/mcp/`
-(带结尾斜杠),头 `Authorization: Bearer <apikey>`,走标准 JSON-RPC。连上后 `tools/list`
-会带回本服务自述(server instructions)与每个工具的描述,agent 即可自解释地使用。
-
-握手请求(JSON-RPC `initialize`)需带 `Accept: application/json, text/event-stream`
-(Streamable HTTP 会以 SSE 帧返回)。
-
-### Agent 使用工作流
-
-连上后每个工具的描述会经 `tools/list` 自解释,下面给**全局编排顺序**(尤其两条容易踩的):
-
-1. **确认身份**:`whoami` → 看当前 operator 的 name/role(admin 才能用管理员工具)。
-2. **看有哪些号**:`list_accounts` → 你有权操作的小红书账号(admin 全见,不含 cookie)。
-3. **远程登录 = 没有"登录工具"**(重要):小红书登录及各种验证由**人 + chrome 插件**在真实
-   浏览器完成,agent **不自动化登录**。agent 调 `get_extension_download` 拿下载地址+安装步骤
-   + `server_time`(记为 poll_login 的 since 起点),交给操作者:装插件 → 填本 operator 的
-   apikey 与 serverUrl → 隐身窗口扫码登录;插件自动把 cookie(含 httpOnly)推回后台并 upsert
-   账号。新号导入后当前 operator 自动获得 access。**等登录完成**用 `poll_login(since=server_time
-   [, account_id])` 每 ~10s 轮询到 `done=true`(登新号不传 account_id,重登旧号传 account_id),
-   建议 5-10 分钟超时;别用 check_cookies 探登录。
-4. **验 cookie(异步)**:`check_cookies(account_id)` 返回 `{check_id}` → 轮询
-   `get_cookie_check(check_id)` 到 valid/invalid/captcha/error(error=浏览器基础设施失败,
-   不代表 cookie 真失效,别据此让人重登)。
-5. **发布 = 异步,必须轮询**(重要):`publish_note(account_id, title, content, images,
-   topics, schedule_time?)` 只返回 `{job_id}` → **轮询** `get_publish_status(job_id)` 到
-   `published`(取 note_url)或 `failed`。图片可直接传 http URL 或 base64,agent 在别的机器上
-   也能发。仅图文,无视频。
-6. **管理(admin)**:`create_operator` 发一次性 apikey、`grant_account_access` 分配账号权限、
-   `rotate_operator_apikey` 轮换、`list_operator_grants`/`revoke_account_access` 等。
+> apikey 是密钥:别写进公开仓库 / 截图 / 聊天分享。泄露了让管理员用
+> `POST /api/operators/{id}/rotate-apikey` 轮换。
 
 要点:
-- 除白名单(`/healthz`、`/downloads/`)外**所有调用都要带 operator 的 apikey**;访问不属于自己
-  的账号抛 `AccessDenied`(403)。
-- **别等 `publish_note` 直接返回结果**——它只给 job_id,结果靠 `get_publish_status` 轮询。
+- 除白名单(`/healthz`、`/downloads/*`)外**所有调用都要带 operator 的 apikey**
+  (`Authorization: Bearer <apikey>` 或 `X-API-Key: <apikey>`);访问不属于自己的账号 403。
+- **发布是异步的**:`POST /api/publish-jobs` 只返回 `{job_id}`,结果靠
+  `GET /api/publish-jobs/{job_id}` 轮询到 published/failed。
+- **登录没有 REST 端点**:小红书登录靠人 + chrome 插件在真实浏览器完成,登录完成判据是
+  `GET /api/login/poll`(细节见 manifest 的 workflows)。
 - **cookie 是共享的**:多个有 access 的 operator 共用同一份账号 cookie,谁更新写同一行。
 
 ---
@@ -310,7 +244,7 @@ claude mcp add --transport http nbdpsy https://mcp.nbdpsy.com/mcp/ \
 ## 部署
 
 - **反向代理**把 `PUBLIC_BASE_URL`(对外域名)代理到本机 `API_PORT`(FastAPI 监听)。
-  MCP 端点、插件推 cookie、插件包下载走同一入口。
+  REST 端点、插件推 cookie、插件包下载走同一入口。
 - 用 systemd 托管 `scripts/run.sh`(`exec uvicorn` 让信号/退出码直通)。
 - Xvfb 由 `scripts/run.sh` 内的 `xvfb.sh start` 确保;也可单独用 systemd 常驻。
 - **改 `.env` / `app/core/config.py` 后必须重启进程**——pydantic `BaseSettings` 在进程
@@ -345,7 +279,7 @@ claude mcp add --transport http nbdpsy https://mcp.nbdpsy.com/mcp/ \
 # 全量单测(不含需真号的 slow/e2e,CI 用这条)
 .venv/bin/pytest -m "not slow" -v
 
-# e2e 冒烟:RBAC 链默认跑(纯 DB/工具链);发布链需真 cookie,缺则自动 skip
+# e2e 冒烟:RBAC 链默认跑(纯 DB/REST 调用);发布链需真 cookie,缺则自动 skip
 .venv/bin/pytest tests/e2e -v
 # 手动跑发布链(需 Xvfb + 真 cookie):
 NBDPSY_E2E_COOKIES='[{"name":"...","value":"..."}]' \

@@ -1,12 +1,13 @@
-"""Task 4.2 测试:打包脚本 + 下载端点 + get_extension_download 工具。
+"""Task 4.2 测试:打包脚本 + 下载端点。
 
-三块契约各自独立验证,不碰生产库/生产 data 目录:
+两块契约各自独立验证,不碰生产库/生产 data 目录:
 - pack_extension.sh:跑完在 DATA_DIR 产出非空、可被 zipfile 打开、含 manifest.json 的 zip。
 - GET /downloads/extension.zip:白名单放行(带/不带 apikey 都 200)+ application/zip;
   zip 缺失 → 404。测试全程 monkeypatch settings.DATA_DIR 指向 tmp,且该端点白名单
   短路在 apikey 校验之前 → 不触发 DB,故无需跑 lifespan/隔离库。
-- get_extension_download:download_url 前缀 PUBLIC_BASE_URL、version=app 版本、
-  install_steps 非空,apikey_hint 是引导语而非明文 key。
+
+（get_extension_download 的等价覆盖已迁到 tests/test_extension_rest.py 的
+GET /api/extension REST 端点用例。）
 """
 
 import subprocess
@@ -15,7 +16,6 @@ from pathlib import Path
 
 from httpx import ASGITransport, AsyncClient
 
-from app import __version__
 from app.core import config as config_module
 from app.server import create_app
 
@@ -116,56 +116,3 @@ async def test_download_missing_zip_404(tmp_path, monkeypatch):
     ) as c:
         r = await c.get("/downloads/extension.zip")
         assert r.status_code == 404
-
-
-# ============ get_extension_download 工具 ============
-
-
-async def _call_tool() -> dict:
-    """构建裸 FastMCP、注册全部工具、调 get_extension_download,返回其结构化响应。"""
-    from fastmcp import FastMCP
-
-    from app.tools import register_all
-
-    mcp = FastMCP("test")
-    register_all(mcp)
-    result = await mcp.call_tool("get_extension_download", {})
-    return result.structured_content
-
-
-async def test_tool_registered_and_download_url(monkeypatch):
-    """download_url = PUBLIC_BASE_URL + /downloads/extension.zip;version = app 版本。"""
-    monkeypatch.setattr(
-        config_module.settings, "PUBLIC_BASE_URL", "https://xhs.example.com"
-    )
-    payload = await _call_tool()
-    # download_url 带 cache-buster 查询串(?t=<zip mtime>,绕 CDN 边缘缓存);断言基础路径,
-    # 并确认 cache-buster 存在。
-    download_url = payload["download_url"]
-    base, _, query = download_url.partition("?")
-    assert base == "https://xhs.example.com/downloads/extension.zip"
-    assert query.startswith("t=")
-    assert payload["version"] == __version__
-
-
-async def test_tool_install_steps_non_empty():
-    """install_steps 为非空的中文步骤数组。"""
-    payload = await _call_tool()
-    steps = payload["install_steps"]
-    assert isinstance(steps, list)
-    assert len(steps) > 0
-    assert all(isinstance(s, str) and s for s in steps)
-
-
-async def test_tool_apikey_hint_is_guidance_not_plaintext(monkeypatch):
-    """apikey_hint 是引导语(提到 apikey 与 rotate),绝不回传任何明文 key。"""
-    sentinel = "SENTINEL-PLAINTEXT-APIKEY-should-never-leak"
-    monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", sentinel)
-
-    payload = await _call_tool()
-    hint = payload["apikey_hint"]
-    assert isinstance(hint, str) and hint
-    assert "apikey" in hint
-    assert "rotate_operator_apikey" in hint
-    # 任何字段值都不得泄露明文 key。
-    assert sentinel not in repr(payload)
