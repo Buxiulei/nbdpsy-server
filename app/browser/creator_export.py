@@ -298,15 +298,18 @@ def export_notes(
         time.sleep(3)
 
         # 4) 点「导出数据」并等待下载,存到调用方指定路径。
+        #    先在 expect_download 之外定位按钮——expect_download 的计时从 __enter__ 起算,
+        #    若把定位(可能吃满 30s + 自愈)放进 with 体内,硬编码失效会先耗尽 download waiter,
+        #    自愈即便定位成功也已超时。故 with 体内只做 click。
         os.makedirs(download_dir, exist_ok=True)
         file_path = os.path.join(download_dir, f"export_{account_id}_{ts}.xlsx")
+        export_btn = _find_creator_element(
+            page, ['text=导出数据'],
+            "creator_export_button", "内容分析页「导出数据」按钮",
+        )
+        if export_btn is None:
+            raise CreatorExportError("export_button_not_found")
         with page.expect_download(timeout=30000) as download_info:
-            export_btn = _find_creator_element(
-                page, ['text=导出数据'],
-                "creator_export_button", "内容分析页「导出数据」按钮",
-            )
-            if export_btn is None:
-                raise CreatorExportError("export_button_not_found")
             export_btn.click(timeout=30000)
             time.sleep(1)
         download_info.value.save_as(file_path)
