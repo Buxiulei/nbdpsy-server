@@ -302,3 +302,60 @@ async def test_exception_handlers_and_unauth_whoami(tmp_path, monkeypatch):
                 assert rw.status_code == 401
     finally:
         await tmp_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_returns_json_500(tmp_path, monkeypatch):
+    """未预期异常 → 500 且响应体是 JSON {"error": ...},兑现 manifest error_contract。
+
+    没有广谱 Exception handler 时,意外异常落 Starlette 默认 text/plain
+    "Internal Server Error",让"照 manifest 统一 resp.json()['error']"的 agent 消费方
+    JSONDecodeError。同时验证:广谱兜底不吞掉精确类——NotFoundError 仍走 404(非 500)。
+
+    注:ServerErrorMiddleware 发完 500 响应后会重新抛原异常供服务端(uvicorn)日志,
+    httpx 默认 raise_app_exceptions=True 会把它传到测试;生产里客户端收到的是 500 JSON。
+    故此测试用 raise_app_exceptions=False 观察真实下发给客户端的响应。
+    """
+    tmp_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path}/e500.db", future=True
+    )
+    tmp_sessionmaker = async_sessionmaker(
+        tmp_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(db_module, "engine", tmp_engine)
+    monkeypatch.setattr(db_module, "async_session", tmp_sessionmaker)
+    monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", ADMIN_KEY)
+
+    from app.core.errors import NotFoundError
+
+    app = create_app()
+
+    @app.get("/api/_raise_unexpected")
+    async def _raise_unexpected() -> dict:
+        raise RuntimeError("kaboom-internal-secret")
+
+    @app.get("/api/_raise_notfound")
+    async def _raise_notfound() -> dict:
+        raise NotFoundError("没找到")
+
+    try:
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False),
+                base_url="http://t",
+            ) as c:
+                auth = {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+                r = await c.get("/api/_raise_unexpected", headers=auth)
+                assert r.status_code == 500
+                assert r.headers["content-type"].startswith("application/json")
+                assert r.json()["error"]  # 有 error 键且非空
+                # 不回显内部异常细节(不泄 str(exc))
+                assert "kaboom-internal-secret" not in r.text
+
+                # 广谱兜底不劣化精确分派:NotFoundError 仍 404,非 500
+                rn = await c.get("/api/_raise_notfound", headers=auth)
+                assert rn.status_code == 404
+                assert rn.json()["error"] == "没找到"
+    finally:
+        await tmp_engine.dispose()

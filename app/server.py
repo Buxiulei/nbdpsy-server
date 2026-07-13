@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from loguru import logger
 
 import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
@@ -83,6 +84,21 @@ def create_app() -> FastAPI:
     async def _handle_value_error(_request: Request, exc: ValueError) -> JSONResponse:
         """入参非法 → 400 JSON(NotFoundError 是其子类但按精确类优先走 404)。"""
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @app.exception_handler(Exception)
+    async def _handle_unexpected(_request: Request, exc: Exception) -> JSONResponse:
+        """未预期异常 → 500 JSON,兜底统一错误契约。
+
+        兑现 manifest error_contract 声明的 500 → {"error": ...}:没有这个 catch-all,
+        非上述精确类的意外异常(RuntimeError/KeyError/SQLAlchemyError 等)会落到 Starlette
+        默认的 text/plain "Internal Server Error",让"照 manifest 统一 resp.json()['error']"
+        的 agent 消费方在 500 路径 JSONDecodeError。此处按精确类优先仅作最末兜底,不影响
+        401/403/404/400 分派。返回通用文案不回显内部细节,真实异常落 loguru 供管理员排查。
+        """
+        logger.exception("未处理异常,返回 500")
+        return JSONResponse(
+            {"error": "服务器内部错误,请联系管理员查日志"}, status_code=500
+        )
 
     # 3. 明文探活 REST:鉴权白名单放行,便于健康检查。
     @app.get("/healthz")
