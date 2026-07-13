@@ -19,13 +19,17 @@ import json
 import re
 import time
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from playwright.sync_api import Page, ElementHandle
 from loguru import logger
 
+from app.core.config import settings
 from app.browser.text_formatter import get_display_length, truncate_by_display
+from app.browser.selector_registry import SelectorRegistry
+from app.browser.self_heal import SelfHealLocator
 
 # ── 小红书发布硬约束常量 ──
 XHS_MAX_TITLE_DISPLAY = 20   # 标题显示长度上限(get_display_length 度量)
@@ -116,6 +120,10 @@ class XHSPublishAtomicTasks:
         from app.browser.sync_human_actions import SyncHumanActions
         self.human = SyncHumanActions(page, profile="casual")
 
+        # 选择器自愈:learned 前置缓存 + LLM 兜底定位(默认关,SELFHEAL_ENABLED 才生效)
+        self._registry = SelectorRegistry()
+        self._locator = SelfHealLocator()
+
     def _take_screenshot(self, name: str) -> str:
         """保存截图(仅在调试模式下),返回路径或空串。"""
         if not self.enable_debug:
@@ -153,13 +161,28 @@ class XHSPublishAtomicTasks:
         self,
         selectors: List[str],
         timeout: int = 10,
-        must_be_visible: bool = True
+        must_be_visible: bool = True,
+        intent_key: Optional[str] = None,
+        intent_desc: Optional[str] = None,
     ) -> Optional[ElementHandle]:
         """用多个选择器查找元素,支持重试。
 
         新仓删除了旧仓的 SmartLocator lazy-import 兜底 —— 所有 CSS 选择器在
-        ``timeout`` 内均未命中即直接返回 None(降级为直接失败)。
+        ``timeout`` 内均未命中即降级失败。若传 ``intent_key``,叠加选择器自愈:
+        - learned 前置:把 registry 已学到的选择器插到候选最前(去重),空 registry
+          时 learned=[] 无影响,行为与改动前逐字节一致。
+        - LLM 兜底:硬编码选择器全失效 + ``SELFHEAL_ENABLED`` + ``LLM_API_KEY`` 时,
+          调 SelfHealLocator 快照定位并 learn。默认关时整条不触发。
         """
+        # learned 前置:已学到的选择器插到候选最前,去重保序。
+        if intent_key:
+            try:
+                learned = self._registry.get(intent_key)
+            except Exception:
+                learned = []
+            if learned:
+                selectors = learned + [s for s in selectors if s not in learned]
+
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -186,6 +209,28 @@ class XHSPublishAtomicTasks:
             self.human.wait(0.3, 0.6, context="查找元素间隔")
 
         logger.warning(f"未找到元素,尝试了 {len(selectors)} 个选择器")
+
+        # 自愈兜底:硬编码选择器全失效 + 开关开 + 配了 key → LLM 快照定位并 learn。
+        # locate 全程 try/except 不抛;learn 失败也不打断,始终返回 handle 或 None。
+        if intent_key and settings.SELFHEAL_ENABLED and settings.LLM_API_KEY:
+            try:
+                found = self._locator.locate(self.page, intent_key, intent_desc or intent_key)
+            except Exception as exc:
+                logger.warning(f"[self_heal] 定位兜底异常:{exc}")
+                found = None
+            if found:
+                handle, sel = found
+                if sel:
+                    try:
+                        self._registry.learn(
+                            intent_key, sel, intent_desc or intent_key,
+                            datetime.now(timezone.utc).isoformat(),
+                        )
+                    except Exception as exc:
+                        logger.warning(f"[self_heal] 学习选择器失败:{exc}")
+                logger.info(f"✓ 自愈定位成功: intent={intent_key} selector={sel}")
+                return handle
+
         return None
 
     # ==================== 步骤1: 打开发布页面 ====================
@@ -566,7 +611,8 @@ class XHSPublishAtomicTasks:
                 "input.upload-input",
             ]
             upload_input = self._find_element_with_retry(
-                upload_input_selectors, timeout=10, must_be_visible=False
+                upload_input_selectors, timeout=10, must_be_visible=False,
+                intent_key="upload_image_input", intent_desc="上传图片的 file input",
             )
             if not upload_input:
                 return {
@@ -589,7 +635,8 @@ class XHSPublishAtomicTasks:
                     logger.info(f"   上传第 {i+1}/{len(image_paths)} 张: {os.path.basename(img_path)}")
                     if i > 0:
                         upload_input = self._find_element_with_retry(
-                            upload_input_selectors, timeout=10, must_be_visible=False
+                            upload_input_selectors, timeout=10, must_be_visible=False,
+                            intent_key="upload_image_input", intent_desc="上传图片的 file input",
                         )
                         if not upload_input:
                             return {
@@ -644,7 +691,10 @@ class XHSPublishAtomicTasks:
                 "//button[contains(text(), '继续编辑')]",
                 "div[contenteditable='true']",
             ]
-            self._find_element_with_retry(edit_indicators, timeout=10)
+            self._find_element_with_retry(
+                edit_indicators, timeout=10,
+                intent_key="editor_ready", intent_desc="编辑器就绪的指示元素",
+            )
             self._take_screenshot("05_after_initial_wait")
 
             logger.info("3.2 检查页面状态...")
@@ -870,7 +920,10 @@ class XHSPublishAtomicTasks:
                 "input.title-input",
                 "input[type='text']",
             ]
-            title_input = self._find_element_with_retry(title_selectors, timeout=10)
+            title_input = self._find_element_with_retry(
+                title_selectors, timeout=10,
+                intent_key="title_input", intent_desc="笔记标题输入框",
+            )
             if not title_input:
                 return {
                     "success": False,
@@ -897,7 +950,10 @@ class XHSPublishAtomicTasks:
                 "div.c-input[contenteditable='true']",
                 "div[contenteditable='true']",
             ]
-            content_input = self._find_element_with_retry(content_selectors, timeout=10)
+            content_input = self._find_element_with_retry(
+                content_selectors, timeout=10,
+                intent_key="content_input", intent_desc="笔记正文输入框",
+            )
             if not content_input:
                 return {
                     "success": False,
@@ -958,7 +1014,10 @@ class XHSPublishAtomicTasks:
                     ".content-input",
                     "textarea[placeholder*='正文']",
                 ]
-                content_input = self._find_element_with_retry(content_input_selectors, timeout=5)
+                content_input = self._find_element_with_retry(
+                    content_input_selectors, timeout=5,
+                    intent_key="content_input", intent_desc="笔记正文输入框",
+                )
 
                 if content_input:
                     try:
@@ -1257,6 +1316,55 @@ class XHSPublishAtomicTasks:
                         publish_clicked = True
             except Exception as e:
                 logger.error(f"发布按钮探测/点击失败: {e}")
+
+            # 自愈兜底:上面所有硬策略(light/open-shadow/closed-shadow 像素/全页候选)都未点成,
+            # 返回失败前用 LLM 快照定位发布按钮点一次。命中经 SelfHealLocator 内部发布按钮安全校验
+            # (须含「发布/publish」文案 + button/a/role)。closed-shadow 情形快照看不见按钮 →
+            # locate 自然返回 None,维持上面像素兜底不动。默认关时整条不触发,行为逐字节等价。
+            if not publish_clicked and settings.SELFHEAL_ENABLED and settings.LLM_API_KEY:
+                try:
+                    found = self._locator.locate(
+                        self.page, "publish_button", "发布笔记的发布按钮"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[self_heal] 发布按钮定位兜底异常:{exc}")
+                    found = None
+                if found:
+                    handle, sel = found
+                    if sel:
+                        try:
+                            self._registry.learn(
+                                "publish_button", sel, "发布笔记的发布按钮",
+                                datetime.now(timezone.utc).isoformat(),
+                            )
+                        except Exception as exc:
+                            logger.warning(f"[self_heal] 学习发布按钮选择器失败:{exc}")
+                    try:
+                        self.human.click(handle, reason="自愈发布按钮")
+                        time.sleep(2.0)
+                        # 复用 closed-shadow 同款发布生效判定:离开发布页 / host 消失 / 成功文案
+                        confirmed = False
+                        try:
+                            if ("/publish/publish" not in self.page.url
+                                    or not self.page.query_selector("xhs-publish-btn")):
+                                confirmed = True
+                            else:
+                                bt = self.page.inner_text("body")[:400]
+                                confirmed = any(
+                                    k in bt for k in ("发布成功", "已发布", "发布完成"))
+                        except Exception:
+                            confirmed = False
+                        # 点击成功即进等待兜底(可能延迟跳转);确认生效才置 confirmed 走立即收口。
+                        publish_clicked = True
+                        if confirmed:
+                            publish_confirmed = True
+                            click_strategy = "自愈发布按钮"
+                            logger.info("✓ [自愈] 发布按钮点击生效")
+                        else:
+                            click_strategy = "自愈发布按钮(未确认)"
+                            logger.info("… [自愈] 发布按钮点击后页面未变,转入等待兜底")
+                    except Exception as exc:
+                        logger.warning(f"[self_heal] 发布按钮点击异常:{exc}")
 
             if not publish_clicked:
                 return {
