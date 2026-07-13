@@ -5,13 +5,21 @@ ALL_MANIFEST_ENTRIES 拼其 MANIFEST_ENTRIES(/api/* 之外的路由如 downloads
 漏接会被 tests/test_manifest.py 防漂移测试逮住。
 """
 
-from app.http import accounts_rest, cookies_import, downloads, manifest, system
+from app.http import (
+    accounts_rest,
+    cookies_import,
+    downloads,
+    manifest,
+    publish_rest,
+    system,
+)
 
 ALL_ROUTERS = [
     system.router,
     manifest.router,
     accounts_rest.router,
     cookies_import.router,
+    publish_rest.router,
     downloads.router,
 ]
 
@@ -20,4 +28,5 @@ ALL_MANIFEST_ENTRIES = [
     *manifest.MANIFEST_ENTRIES,
     *accounts_rest.MANIFEST_ENTRIES,
     *cookies_import.MANIFEST_ENTRIES,
+    *publish_rest.MANIFEST_ENTRIES,
 ]
