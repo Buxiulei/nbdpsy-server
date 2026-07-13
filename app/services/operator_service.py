@@ -12,6 +12,7 @@ RBAC 管理面的业务核心。约定:
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import NotFoundError
 from app.core.security import generate_apikey, hash_apikey
 from app.models.operator import Operator, OperatorAccountAccess
 
@@ -46,10 +47,10 @@ async def update_operator(
     enabled: bool | None = None,
     name: str | None = None,
 ) -> Operator:
-    """局部更新运营者 role/enabled/name(None 表示不改);运营者不存在抛 ValueError。"""
+    """局部更新运营者 role/enabled/name(None 表示不改);运营者不存在抛 NotFoundError。"""
     op = await session.get(Operator, id)
     if op is None:
-        raise ValueError(f"运营者 {id} 不存在")
+        raise NotFoundError(f"运营者 {id} 不存在")
     if role is not None:
         op.role = role
     if enabled is not None:
@@ -76,11 +77,11 @@ async def delete_operator(session: AsyncSession, id: int) -> None:
 async def rotate_apikey(session: AsyncSession, id: int) -> str:
     """重置运营者 apikey:生成新 key,更新 hash(旧 key 立即失效),返回一次性明文。
 
-    运营者不存在抛 ValueError。
+    运营者不存在抛 NotFoundError。
     """
     op = await session.get(Operator, id)
     if op is None:
-        raise ValueError(f"运营者 {id} 不存在")
+        raise NotFoundError(f"运营者 {id} 不存在")
     plain = generate_apikey()
     op.apikey_hash = hash_apikey(plain)
     await session.commit()
