@@ -53,9 +53,18 @@ def export_notes(page, account_id: int, download_dir: str) -> list[dict]:
 **自愈复用**(用户明确要):第 3 步的中文 `:has-text` 菜单/按钮选择器接进已有 `SelfHealLocator`——
 封装小 helper `_find_creator_element(page, selectors, intent_key, desc)`:先试硬编码 locator,
 失败且 `settings.SELFHEAL_ENABLED and settings.LLM_API_KEY` 时 fallback
-`SelfHealLocator().locate(page, intent_key, desc)` + learn 到共享 registry(intent_key:
+`SelfHealLocator().locate(page, intent_key, desc)` 取 handle 点击(intent_key:
 `creator_data_dashboard_menu` / `creator_content_analysis_menu` / `creator_export_button`)。
 默认关时行为与纯硬编码一致。
+
+**v1 决定:creator-center 自愈为"恢复即用",不 learn 持久化**。发布链的自愈会把学到的选择器
+写回 registry(高频场景值得自维护);creator-center 导出是手动低频操作,v1 只做"硬编码失效时
+LLM 兜底定位一次"(仍能扛改版),不接 learned-prepend + learn 全套,避免为低频路径引入额外
+状态。若后续高频化再补持久化。
+
+**定位与 expect_download 计时**:`creator_export_button` 的定位必须在 `with page.expect_download()`
+**之外**完成(expect_download 计时从 `__enter__` 起算,把可能吃满 30s + 自愈的定位放进 with 体内
+会先耗尽 download waiter),with 体内只做 click。
 
 时间戳注入:`export_notes` 的文件名时间戳与"注入时间"由调用方(service 层)传入,导出器不自取
 `datetime.now()`(便于测试)。
