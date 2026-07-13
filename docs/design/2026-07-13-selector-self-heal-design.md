@@ -53,11 +53,15 @@ def element_to_selector(el: dict) -> str | None:
     tag.首个class > tag。无可用锚点 → None(退回坐标点击)。"""
 
 class SelfHealLocator:
-    def locate(self, page, intent_key: str, intent_desc: str) -> ElementHandle | None:
+    def locate(self, page, intent_key: str, intent_desc: str) -> tuple[ElementHandle, str | None] | None:
         """收口:snapshot → build_text → llm_locate(得 ref)→ 在快照里取该 ref 元素 →
         安全校验(见下,不过 → None)→ 派生选择器;能派生则 page.query_selector 拿 handle,
-        不能则用 bbox 中心 elementFromPoint 拿 handle → 命中则 registry.learn(intent_key,
-        selector, meta) → 返回 handle。任一步失败 → None(不抛异常)。"""
+        不能则用 bbox 中心 elementFromPoint 拿 handle → 返回 (handle, selector)(selector 可
+        为 None,表示走的坐标点击、无稳定选择器可学)。任一步失败 → None(不抛异常)。
+
+        **不依赖 registry**:持久化学习由挂载点(_find_element_with_retry)在拿到 (handle,
+        selector) 后调 registry.learn 完成——self_heal 只管定位,registry 只管持久化,两者
+        解耦(可独立开发/测试)。"""
 ```
 
 **安全校验**(`locate` 内,防 LLM 指错元素在发布链误点):
@@ -111,10 +115,13 @@ def _find_element_with_retry(
             effective = learned + [s for s in selectors if s not in learned]
     # 2. 现有逻辑:timeout 内轮询 effective(wait_for_selector / query_selector_all 兜底)。
     ...
-    # 3. 全失败 + 有 intent_key + 启用 → 自愈 fallback。
+    # 3. 全失败 + 有 intent_key + 启用 → 自愈 fallback。命中则由本挂载点持久化学习(解耦)。
     if intent_key and settings.SELFHEAL_ENABLED and settings.LLM_API_KEY:
-        handle = self._locator.locate(self.page, intent_key, intent_desc or intent_key)
-        if handle:
+        found = self._locator.locate(self.page, intent_key, intent_desc or intent_key)
+        if found:
+            handle, selector = found
+            if selector:
+                self._registry.learn(intent_key, selector, intent_desc or intent_key)
             return handle
     return None
 ```
