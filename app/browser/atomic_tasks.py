@@ -28,7 +28,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.browser.text_formatter import get_display_length, truncate_by_display
-from app.browser.selector_registry import SelectorRegistry
+from app.browser.selector_registry import get_default_registry
 from app.browser.self_heal import SelfHealLocator
 
 # ── 小红书发布硬约束常量 ──
@@ -120,8 +120,9 @@ class XHSPublishAtomicTasks:
         from app.browser.sync_human_actions import SyncHumanActions
         self.human = SyncHumanActions(page, profile="casual")
 
-        # 选择器自愈:learned 前置缓存 + LLM 兜底定位(默认关,SELFHEAL_ENABLED 才生效)
-        self._registry = SelectorRegistry()
+        # 选择器自愈:learned 前置缓存 + LLM 兜底定位(默认关,SELFHEAL_ENABLED 才生效)。
+        # 用进程级单例复用同一 registry + 同一把锁,消除并发发布跨实例写同一 JSON 的竞争。
+        self._registry = get_default_registry()
         self._locator = SelfHealLocator()
 
     def _take_screenshot(self, name: str) -> str:
@@ -169,13 +170,15 @@ class XHSPublishAtomicTasks:
 
         新仓删除了旧仓的 SmartLocator lazy-import 兜底 —— 所有 CSS 选择器在
         ``timeout`` 内均未命中即降级失败。若传 ``intent_key``,叠加选择器自愈:
-        - learned 前置:把 registry 已学到的选择器插到候选最前(去重),空 registry
-          时 learned=[] 无影响,行为与改动前逐字节一致。
+        - learned 前置:``SELFHEAL_ENABLED`` 开时把 registry 已学到的选择器插到候选
+          最前(去重);默认关时整段不触发,与硬编码分支逐字节一致(与下面 LLM 兜底
+          同一开关口径,避免"学过再关开关仍前置"的非等价)。
         - LLM 兜底:硬编码选择器全失效 + ``SELFHEAL_ENABLED`` + ``LLM_API_KEY`` 时,
           调 SelfHealLocator 快照定位并 learn。默认关时整条不触发。
         """
-        # learned 前置:已学到的选择器插到候选最前,去重保序。
-        if intent_key:
+        # learned 前置:已学到的选择器插到候选最前,去重保序。仅在自愈开关开时生效,
+        # 与下面 LLM 兜底同口径 —— 关闭后即使 registry 有 learned 也不前置,严格字节等价。
+        if intent_key and settings.SELFHEAL_ENABLED:
             try:
                 learned = self._registry.get(intent_key)
             except Exception:
@@ -1330,15 +1333,10 @@ class XHSPublishAtomicTasks:
                     logger.warning(f"[self_heal] 发布按钮定位兜底异常:{exc}")
                     found = None
                 if found:
-                    handle, sel = found
-                    if sel:
-                        try:
-                            self._registry.learn(
-                                "publish_button", sel, "发布笔记的发布按钮",
-                                datetime.now(timezone.utc).isoformat(),
-                            )
-                        except Exception as exc:
-                            logger.warning(f"[self_heal] 学习发布按钮选择器失败:{exc}")
+                    # 发布按钮定位走 shadow-DOM 诊断 JS,不经 _find_element_with_retry,
+                    # registry.get("publish_button") 全仓无消费点 —— 故这里只用 handle 点击,
+                    # 不 learn(学了没人读,且点击生效前 learn 会污染 registry)。
+                    handle, _ = found
                     try:
                         self.human.click(handle, reason="自愈发布按钮")
                         time.sleep(2.0)

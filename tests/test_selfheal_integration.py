@@ -51,11 +51,23 @@ def test_selfheal_enabled_triggers_and_learns(monkeypatch, tmp_path):
     assert tasks._registry.get("title_input") == ["input.learned"]
 
 
-def test_learned_selector_prepended(monkeypatch, tmp_path):
-    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", False)
+def test_learned_selector_prepended_when_enabled(monkeypatch, tmp_path):
+    # 开关开:learned 前置到候选最前(LLM_API_KEY 空 → 只验前置不触发 LLM 兜底)。
+    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", True)
     monkeypatch.setattr(atomic_mod.settings, "LLM_API_KEY", "")
     tasks = _make_tasks(tmp_path)
     tasks._registry.learn("title_input", "input.learned", "标题", "2026-07-13T00:00:00+00:00")
     tasks._find_element_with_retry(["input.hardcoded"], timeout=1, intent_key="title_input")
     assert tasks.page.tried[0] == "input.learned"  # learned 先试
     assert "input.hardcoded" in tasks.page.tried
+
+
+def test_learned_selector_not_prepended_when_disabled(monkeypatch, tmp_path):
+    # 开关关(F1):即使 registry 有 learned,也不前置 —— 只试硬编码选择器,严格字节等价。
+    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", False)
+    monkeypatch.setattr(atomic_mod.settings, "LLM_API_KEY", "")
+    tasks = _make_tasks(tmp_path)
+    tasks._registry.learn("title_input", "input.learned", "标题", "2026-07-13T00:00:00+00:00")
+    tasks._find_element_with_retry(["input.hardcoded"], timeout=1, intent_key="title_input")
+    assert tasks.page.tried[0] == "input.hardcoded"  # 硬编码先试
+    assert "input.learned" not in tasks.page.tried  # learned 完全不前置
