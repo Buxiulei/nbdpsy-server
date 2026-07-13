@@ -1,5 +1,5 @@
 [Unit]
-Description=nbdpsy-mcp Xvfb 虚拟显示 :99(发布/检测用 Camoufox 需要)
+Description=nbdpsy-server Xvfb 虚拟显示 :99(发布/检测用 Camoufox 需要)
 After=network.target
 
 [Service]
