@@ -4,7 +4,10 @@ sqlalchemy>=2.0
 aiosqlite>=0.19
 alembic>=1.13
 camoufox==0.4.11
-playwright>=1.48
+# 必须 pin 1.60.0:playwright 1.61 给 Browser.setDefaultViewport 的 viewport 加了 isMobile 字段,
+# camoufox 0.4.11 打包的 Juggler schema 只认 viewportSize/deviceScaleFactor → 启浏览器协议报错
+# (camoufox#653)。camoufox 已是最新升无可升,故锁 playwright 到兼容版。别放开上界。
+playwright==1.60.0
 httpx>=0.27
 Pillow>=10.0
 cryptography>=42.0
