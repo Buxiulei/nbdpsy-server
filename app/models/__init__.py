@@ -7,6 +7,7 @@
 from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.publish_job import PublishJob
+from app.models.upload_batch import UploadBatch
 from app.models.xhs_account import XhsAccount
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "PublishJob",
     "NoteMetric",
     "NoteMetricDaily",
+    "UploadBatch",
 ]

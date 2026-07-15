@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # 数据/上传目录
     DATA_DIR: str = "./data"
     UPLOAD_DIR: str = "./data/uploads"
+    # 图片上传:单张大小上限(MB)与批次保留天数(懒清理据此判过期)
+    UPLOAD_MAX_MB: int = 10
+    UPLOAD_TTL_DAYS: int = 7
 
     # 浏览器自动化
     XVFB_DISPLAY: str = ":99"
