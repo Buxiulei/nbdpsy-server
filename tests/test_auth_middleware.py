@@ -141,6 +141,34 @@ async def test_whoami_bad_key_401(tmp_path, monkeypatch):
         assert r.status_code == 401
 
 
+# ---------------- 上传白名单边界回归(Task 1 M1 补漏,锁死 Critical 级免鉴权) ----------------
+
+
+@pytest.mark.parametrize(
+    "method,path,expect",
+    [
+        # /upload 上传页:精确白名单 → 免 key 直接 200
+        ("GET", "/upload", 200),
+        # /uploads/ 前缀:免 key 放行(无此文件故 404,但绝不 401)
+        ("GET", "/uploads/some-batch/01.png", "pass"),
+        # /api/uploads/* 带 /api 前缀,不匹配 /uploads 前缀 → 必须走鉴权 401
+        ("POST", "/api/uploads/images", 401),
+        ("GET", "/api/uploads", 401),
+        # 借前缀绕过:/uploadsX、/uploads-evil 无斜杠边界 → 不误放,仍 401
+        ("GET", "/uploadsX", 401),
+        ("GET", "/uploads-evil", 401),
+    ],
+)
+async def test_uploads_whitelist_boundary(tmp_path, monkeypatch, method, path, expect):
+    """上传相关路径的白名单边界:免鉴权页/静态放行,/api/* 与借前缀路径必须走鉴权。"""
+    async with isolated_client(tmp_path, monkeypatch) as (c, _):
+        r = await c.request(method, path)
+        if expect == "pass":
+            assert r.status_code != 401, f"{method} {path} 应放行但被 401 拦"
+        else:
+            assert r.status_code == expect, f"{method} {path} 期望 {expect} 实得 {r.status_code}"
+
+
 async def test_whoami_admin_key_200(tmp_path, monkeypatch):
     """带 ROOT_ADMIN_APIKEY(Bearer)→ 200 且返回 admin/root。"""
     async with isolated_client(tmp_path, monkeypatch) as (c, key):
