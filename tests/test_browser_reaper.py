@@ -22,7 +22,14 @@ from sqlalchemy.ext.asyncio import (
 import app.core.db as db_module
 import app.server as server_mod
 from app.browser import browser_reaper as reaper_mod
-from app.browser.browser_reaper import reap_once, should_reap
+from app.browser.browser_reaper import (
+    _account_id_from_argv,
+    _proc_age_seconds,
+    reap_once,
+    should_reap,
+)
+from app.browser.profile_guard import browser_profiles_root
+from app.core.config import settings
 
 
 # ---------------- 假件:控制锁状态,避免用真 asyncio.Lock 与跨测泄漏 ----------------
@@ -140,6 +147,69 @@ def test_reap_kill_exception_safe(monkeypatch):
 
     assert reap_once() == 1  # 222 成功,111 失败被吞
     assert killed == [222]
+
+
+# ---------------- 纯函数:_account_id_from_argv(误杀防线命根) ----------------
+
+
+def _root(monkeypatch, tmp_path):
+    """把 DATA_DIR 指到 tmp,返回 browser_profiles_root() 的真实绝对前缀。"""
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    return browser_profiles_root()
+
+
+def test_account_id_prefix_trap(monkeypatch, tmp_path):
+    """profile 子文件路径 account_20/prefs.js → 解析 20,绝不截成 2。"""
+    root = _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", "-profile", str(root / "account_20" / "prefs.js")]
+    assert _account_id_from_argv(argv) == 20
+
+
+def test_account_id_exact_dir(monkeypatch, tmp_path):
+    """argv token 恰为 profile 目录本身 → 解析该 id。"""
+    root = _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", "-profile", str(root / "account_3")]
+    assert _account_id_from_argv(argv) == 3
+
+
+def test_account_id_not_our_root(monkeypatch, tmp_path):
+    """含 account_ 但不在 browser_profiles_root 下 → None(不误认他人路径)。"""
+    _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", "-profile", "/home/x/account_5/foo"]
+    assert _account_id_from_argv(argv) is None
+
+
+def test_account_id_non_digit_suffix(monkeypatch, tmp_path):
+    """account_ 后缀非数字 → None。"""
+    root = _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", "-profile", str(root / "account_abc" / "x")]
+    assert _account_id_from_argv(argv) is None
+
+
+def test_account_id_concatenated_token_not_matched(monkeypatch, tmp_path):
+    """``--profile=<root>/account_7`` 整体作一个 token(不以 root 前缀开头)→ None。
+
+    与 ``_argv_targets_profile`` 逐 token 语义一致:真实 camoufox 把 profile 作独立
+    token 传,故拼接形式为预期不命中。
+    """
+    root = _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", f"--profile={root}/account_7"]
+    assert _account_id_from_argv(argv) is None
+
+
+def test_account_id_no_profile_token(monkeypatch, tmp_path):
+    """argv 里没有任何 profile token → None。"""
+    _root(monkeypatch, tmp_path)
+    argv = ["camoufox-bin", "--headless", "--foo=bar"]
+    assert _account_id_from_argv(argv) is None
+
+
+# ---------------- 纯函数:_proc_age_seconds(解析失败保守视为很新) ----------------
+
+
+def test_proc_age_nonexistent_pid_returns_zero():
+    """不存在的 pid → 读 /proc 失败返回 0.0(视作很新,不被超龄命中 → 保守不杀)。"""
+    assert _proc_age_seconds(999999999, boot_time=0.0, now=1e9) == 0.0
 
 
 # ---------------- lifespan 开关(类比 cookie_checker) ----------------

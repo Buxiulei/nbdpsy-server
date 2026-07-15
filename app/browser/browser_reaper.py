@@ -20,11 +20,11 @@ import asyncio
 import os
 import signal
 import time
-from pathlib import Path
 
 from loguru import logger
 
 from app.browser.account_locks import account_locks
+from app.browser.profile_guard import browser_profiles_root, iter_camoufox_procs
 from app.core.config import settings
 
 
@@ -69,12 +69,16 @@ def _proc_age_seconds(pid: int, boot_time: float, now: float) -> float:
 
 
 def _account_id_from_argv(argv: list[str]) -> int | None:
-    """从 argv 中锚定 ``DATA_DIR/browser`` 下的 profile 路径,反解 account_id。
+    """从 argv 中锚定 ``browser_profiles_root()`` 下的 profile 路径,反解 account_id。
 
-    精确锚定到 ``DATA_DIR/browser/`` 前缀再取下一段 ``account_{id}``,避免误命中
-    argv 里其它含 ``account_`` 的无关路径。解析不出返回 None(调用方据此保守不杀)。
+    路径约定唯一 owner 为 ``profile_guard.browser_profiles_root()``,精确锚定到
+    ``DATA_DIR/browser/`` 前缀再取下一段 ``account_{id}``,避免误命中 argv 里其它含
+    ``account_`` 的无关路径。解析不出返回 None(调用方据此保守不杀)。
+
+    路径前缀锚定复用 ``browser_profiles_root()``;因 id 由 argv 中的 profile 路径反解,
+    等价于 ``_argv_targets_profile`` 的精确匹配,故不再重复回验。
     """
-    base = str((Path(settings.DATA_DIR) / "browser").resolve())
+    base = str(browser_profiles_root())
     prefix = base + os.sep
     for tok in argv:
         norm = os.path.normpath(str(tok))
@@ -91,25 +95,13 @@ def _account_id_from_argv(argv: list[str]) -> int | None:
 def _scan_processes() -> list[tuple[int, bool, int | None, float]]:
     """扫 ``/proc``,返回 camoufox 进程的 ``(pid, is_camoufox, account_id, age_seconds)``。
 
-    仅收 camoufox 进程(argv[0] 含 ``camoufox``);account_id 由 profile 路径反解(解析
-    不出为 None);age 由 starttime 换算。单个 pid 读取失败(进程已退/无权限)跳过不中断。
+    枚举复用 ``profile_guard.iter_camoufox_procs``(/proc 迭代 + camoufox 判定为唯一真相);
+    account_id 由 profile 路径反解(解析不出为 None);age 由 starttime 换算。
     """
     results: list[tuple[int, bool, int | None, float]] = []
     boot_time = _boot_time()
     now = time.time()
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            continue
-        if not raw:
-            continue
-        argv = raw.decode("utf-8", "replace").split("\x00")
-        if "camoufox" not in argv[0]:
-            continue
-        pid = int(entry.name)
+    for pid, argv in iter_camoufox_procs():
         account_id = _account_id_from_argv(argv)
         age = _proc_age_seconds(pid, boot_time, now)
         results.append((pid, True, account_id, age))

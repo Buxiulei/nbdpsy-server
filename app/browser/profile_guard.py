@@ -18,7 +18,7 @@
 import os
 import signal
 from pathlib import Path
-from typing import List, Union
+from typing import Iterator, List, Union
 
 from loguru import logger
 
@@ -28,6 +28,15 @@ from app.core.config import settings
 _LOCK_FILES = ("lock", ".parentlock")
 # 需一并清理的 cookie 数据库及其 WAL/SHM 边车(否则 WAL 可回放出旧 cookie)
 _COOKIE_FILES = ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm")
+
+
+def browser_profiles_root() -> Path:
+    """所有账号 profile 的根目录 ``DATA_DIR/browser`` 的**绝对路径**(约定唯一 owner)。
+
+    ``profile_dir`` 与孤儿回收 reaper 都从此派生,避免 ``DATA_DIR/browser`` 约定出现
+    多份真相导致漂移。``.resolve()`` 理由同 ``profile_dir``(argv 里是绝对路径)。
+    """
+    return (Path(settings.DATA_DIR) / "browser").resolve()
 
 
 def profile_dir(account_id: int) -> Path:
@@ -40,8 +49,11 @@ def profile_dir(account_id: int) -> Path:
     ``/proc/<pid>/cmdline`` 里存的是绝对路径。若此处返回相对路径,``kill_orphans``
     拿它去比 argv 会永不匹配 → 僵死 profile 锁清理静默失效。``.resolve()`` 对不
     存在的路径也安全(strict 默认 False),不创建目录,保持"谁落盘谁建"语义不变。
+
+    根目录 ``.resolve()`` 后再拼 ``account_{id}`` 普通段,与旧写法整段 ``.resolve()``
+    在真实场景逐字节等价(账号段无符号链接)。
     """
-    return (Path(settings.DATA_DIR) / "browser" / f"account_{account_id}").resolve()
+    return browser_profiles_root() / f"account_{account_id}"
 
 
 def clean_locks(profile_dir: Path) -> None:
@@ -119,15 +131,13 @@ def _argv_targets_profile(argv: Union[str, List[str]], profile_dir: Path) -> boo
     return False
 
 
-def kill_orphans(profile_dir: Path) -> None:
-    """精确杀占用该 profile 的 camoufox-bin 孤儿进程。
+def iter_camoufox_procs() -> Iterator[tuple[int, list[str]]]:
+    """遍历 ``/proc``,yield 每个 camoufox 进程的 ``(pid, argv列表)``。
 
-    扫描 ``/proc/<pid>/cmdline``,仅当进程是 camoufox 且其 argv 经
-    ``_argv_targets_profile`` 精确命中本 profile 时才 SIGKILL。逐 token
-    精确匹配,杜绝 ``account_2`` 误杀 ``account_20`` 的前缀陷阱。
+    仅 yield argv[0] 含 ``camoufox`` 的进程;单个 pid 读取失败(已退/无权限/空 cmdline)跳过。
+    ``kill_orphans`` 与孤儿回收 reaper 共用此枚举,避免 /proc 迭代与 camoufox 判定出现两份真相。
     """
-    proc_root = Path("/proc")
-    for entry in proc_root.iterdir():
+    for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         try:
@@ -140,9 +150,19 @@ def kill_orphans(profile_dir: Path) -> None:
         # 仅针对 camoufox-bin 进程(argv[0] 为可执行路径)
         if "camoufox" not in argv[0]:
             continue
+        yield int(entry.name), argv
+
+
+def kill_orphans(profile_dir: Path) -> None:
+    """精确杀占用该 profile 的 camoufox-bin 孤儿进程。
+
+    扫描 ``/proc/<pid>/cmdline``(经 ``iter_camoufox_procs`` 共享枚举),仅当进程是
+    camoufox 且其 argv 经 ``_argv_targets_profile`` 精确命中本 profile 时才 SIGKILL。
+    逐 token 精确匹配,杜绝 ``account_2`` 误杀 ``account_20`` 的前缀陷阱。
+    """
+    for pid, argv in iter_camoufox_procs():
         if not _argv_targets_profile(argv, profile_dir):
             continue
-        pid = int(entry.name)
         try:
             os.kill(pid, signal.SIGKILL)
             logger.info(f"[profile_guard] 已强杀 camoufox 孤儿进程 PID={pid} (profile={profile_dir})")
