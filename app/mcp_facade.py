@@ -94,8 +94,9 @@ async def publish_note(
     """向小红书公开平台发布一条真实图文笔记(写操作)。
 
     这是对外公开发布真实内容的写操作,调用前必须先向用户确认发布意图与文案,不要擅自发布。
-    图片只接受可访问的 http(s) URL 列表(image_urls),**绝不接受 base64**——先把图片传成 URL
-    再调本工具。异步语义:本工具入队后立即返回 {job_id, status:"pending"},不代表已发布成功;
+    图片只接受可访问的 http(s) URL 列表(image_urls),**绝不接受 base64**——用户可在本服务的
+    /upload 网页(如 https://mcp.nbdpsy.com/upload)拖图上传,拿到一批图片 URL 后再传给本工具。
+    异步语义:本工具入队后立即返回 {job_id, status:"pending"},不代表已发布成功;
     拿到 job_id 后请轮询 get_publish_status(job_id) 直到 published/failed,不要干等。topics 是
     话题标签列表(可选),schedule_time 是定时发布时刻的 ISO8601 串(可选,建议带时区偏移;
     不传即立即入队)。
