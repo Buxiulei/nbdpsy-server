@@ -128,10 +128,19 @@ class SyncClient:
     同一线程且 profile 独占(见 §6.4 坑#7)。cookie 由构造参数注入,不读 DB。
     """
 
-    def __init__(self, account_id: int, cookies: List[Dict[str, Any]], headless: bool = True):
+    def __init__(
+        self,
+        account_id: int,
+        cookies: List[Dict[str, Any]],
+        headless: bool = True,
+        block_images: bool = False,
+    ):
         self.account_id = account_id
         self.cookies = cookies or []
         self.headless = headless
+        # 瘦身开关:只读路径(cookie-check/note-export)传 True 拦图省内存;
+        # 发布路径保持 False,保留发布页完整渲染(避免图元素缺失影响上传/发布按钮定位)。
+        self.block_images = block_images
 
         self.playwright = None
         self.context = None
@@ -168,6 +177,8 @@ class SyncClient:
                 headless=self.headless,
                 humanize=True,
                 block_webrtc=True,
+                block_webgl=True,  # 无头场景禁 WebGL 省 GPU/内存,恒开
+                block_images=self.block_images,  # 只读路径拦图省内存;发布路径为 False 保真
                 locale=fp.locale or "zh-CN",
                 os=target_os,
                 i_know_what_im_doing=True,
@@ -422,8 +433,10 @@ def check_login_once(account_id: int, cookies: List[Dict[str, Any]]) -> Dict[str
         真实登录判定(``invalid`` = 页面加载正常但未登录,cookie 真失效);
       - ``error``:浏览器基础设施失败(启动失败/页面超时/异常),带 ``reason`` 说明,**与 cookie
         失效严格区分**——调用方据此保留原状态,不把好号误标失效。
+
+    登录检测纯只读,故 ``block_images=True`` 瘦身(拦图省内存,不影响登录判定)。
     """
-    client = SyncClient(account_id, cookies)
+    client = SyncClient(account_id, cookies, block_images=True)
     try:
         start = client.start()
         if not start.get("success"):

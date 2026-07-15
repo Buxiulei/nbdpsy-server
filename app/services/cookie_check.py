@@ -22,6 +22,7 @@ from loguru import logger
 
 from app.browser import sync_client
 from app.browser.account_locks import account_locks
+from app.browser.browser_gate import browser_slot
 from app.core.db import get_session
 from app.models.xhs_account import XhsAccount
 
@@ -85,9 +86,11 @@ async def _run_check(check_id: str, account_id: int, cookies: list[dict]) -> Non
     try:
         # 与发布链共用同一把 per-account 锁:同号发布/检测串行,避免 kill_orphans 互杀。
         async with account_locks.get(account_id):
-            result = await asyncio.to_thread(
-                sync_client.check_login_once, account_id, cookies
-            )
+            # 全局浏览器并发闸:封顶总 camoufox 数,超出排队(仅罩浏览器段,不含写回)。
+            async with browser_slot():
+                result = await asyncio.to_thread(
+                    sync_client.check_login_once, account_id, cookies
+                )
             status = result.get("status", "invalid")
             user_info = result.get("user_info")
             reason = result.get("reason")

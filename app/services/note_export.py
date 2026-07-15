@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from loguru import logger
 
 from app.browser.account_locks import account_locks
+from app.browser.browser_gate import browser_slot
 from app.browser.creator_export import CreatorExportError, export_notes
 from app.browser.sync_client import SyncClient
 from app.core.config import settings
@@ -87,7 +88,7 @@ def _export_sync(
     start 失败或导出失败均抛 CreatorExportError(reason 说明),由上层收成 error 台账。
     stop 在 finally 收尾:即便导出抛异常也关闭浏览器,不泄漏 camoufox 进程。
     """
-    client = SyncClient(account_id, cookies)
+    client = SyncClient(account_id, cookies, block_images=True)  # 导出纯只读,拦图省内存
     try:
         start = client.start()
         if not start.get("success"):
@@ -112,9 +113,11 @@ async def _run_export(export_id: str, account_id: int, cookies: list[dict]) -> N
     try:
         # 与发布/cookie 检测共用同一把 per-account 锁:同号浏览器操作串行,避免 kill_orphans 互杀。
         async with account_locks.get(account_id):
-            rows = await asyncio.to_thread(
-                _export_sync, account_id, cookies, download_dir, ts
-            )
+            # 全局浏览器并发闸:封顶总 camoufox 数,超出排队(仅罩浏览器段,不含落库)。
+            async with browser_slot():
+                rows = await asyncio.to_thread(
+                    _export_sync, account_id, cookies, download_dir, ts
+                )
             # 导出成功才落库:用 get_session()(测试对 async_session monkeypatch 生效)。
             async with get_session() as session:
                 count = await upsert_notes(

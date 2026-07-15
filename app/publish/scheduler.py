@@ -25,6 +25,7 @@ from loguru import logger
 from sqlalchemy import or_, select, update
 
 from app.browser import sync_client
+from app.browser.browser_gate import browser_slot
 from app.browser.images import materialize_images
 from app.core.config import settings
 from app.core.security import decrypt_cookies
@@ -93,17 +94,19 @@ def make_publish_runner(
             paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
             image_paths = [str(p) for p in paths]
 
-            # 2c. per-account 锁串行 + 线程内跑 sync 发布(禁同号并发)
+            # 2c. per-account 锁串行 + 全局浏览器并发闸 + 线程内跑 sync 发布(禁同号并发)
+            #     browser_slot 封顶总 camoufox 数,超出排队;publish 不 block_images(保发布保真)。
             async with account_locks.get(account_id):
-                result = await asyncio.to_thread(
-                    sync_client.publish_once,
-                    account_id,
-                    cookies,
-                    title,
-                    content,
-                    image_paths,
-                    topics,
-                )
+                async with browser_slot():
+                    result = await asyncio.to_thread(
+                        sync_client.publish_once,
+                        account_id,
+                        cookies,
+                        title,
+                        content,
+                        image_paths,
+                        topics,
+                    )
 
             # 2d. 落状态机(成功→published;失败→重试排期或 failed)
             await scheduler.finish(job_id, result)

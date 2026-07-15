@@ -35,6 +35,8 @@ class Settings(BaseSettings):
 
     # 浏览器自动化
     XVFB_DISPLAY: str = ":99"
+    # 全局浏览器并发闸:同时运行的 camoufox 数上限(publish/cookie-check/note-export 统一套闸)
+    BROWSER_CONCURRENCY: int = 6
 
     # 发布队列
     PUBLISH_CONCURRENCY: int = 2
