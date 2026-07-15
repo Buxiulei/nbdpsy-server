@@ -21,6 +21,9 @@ class Settings(BaseSettings):
 
     # 数据库
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/nbdpsy.db"
+    # SQLite 忙等超时(秒):并发写锁竞争时最多等待此秒数而非立即报 database is locked。
+    # 同时作为 aiosqlite connect timeout 与 PRAGMA busy_timeout(*1000 毫秒)。仅 sqlite 生效。
+    SQLITE_BUSY_TIMEOUT: int = 30
 
     # 安全
     SECRET_KEY: str = DEFAULT_SECRET_KEY
