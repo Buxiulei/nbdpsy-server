@@ -86,10 +86,14 @@ async def list_uploads() -> dict:
 async def serve_upload(batch_id: str, name: str) -> FileResponse:
     """取回落盘图片(白名单免鉴权)。正则白名单挡路径穿越,非文件 404。"""
     # 请求时读 settings.DATA_DIR(而非 import 期绑定),使测试对 DATA_DIR 的 monkeypatch 生效。
-    if not _BATCH_RE.match(batch_id) or not _NAME_RE.match(name):
+    # fullmatch(非 match+$):match+$ 容忍尾随换行("01.png\n" 会通过),虽不构成穿越但
+    # 会让 ext 带 "\n" 撞 _MEDIA_TYPES KeyError→500;fullmatch 收成真正的全串白名单。
+    if not _BATCH_RE.fullmatch(batch_id) or not _NAME_RE.fullmatch(name):
         raise HTTPException(status_code=404, detail="资源不存在")
-    file_path = Path(settings.DATA_DIR) / "uploads" / batch_id / name
-    if not file_path.is_file():
+    uploads_root = (Path(settings.DATA_DIR) / "uploads").resolve()
+    file_path = (uploads_root / batch_id / name).resolve()
+    # 纵深防御:正则已结构性排除逃逸字符,这里再确认最终路径确在 uploads 根内(双保险)。
+    if not file_path.is_relative_to(uploads_root) or not file_path.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")
     ext = name.rsplit(".", 1)[1].lower()
     return FileResponse(file_path, media_type=_MEDIA_TYPES[ext])

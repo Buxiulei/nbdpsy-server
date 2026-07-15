@@ -158,6 +158,22 @@ async def test_serve_bad_name_shape_404(tmp_path, monkeypatch):
         assert r.status_code == 404
 
 
+async def test_serve_encoded_traversal_404(tmp_path, monkeypatch):
+    """编码穿越(..%2F / %0A 尾随换行)必 404,把'编码穿越挡死'锁进回归。
+
+    ..%2F 解码成多段不匹配单段路由;%0A 由 fullmatch(非 match+$)拒绝——防未来正则被放松。
+    """
+    _patch_data_dir(tmp_path, monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        for path in (
+            "/uploads/AAAA/..%2F..%2Fetc%2Fpasswd",
+            "/uploads/..%2F..%2Fetc/01.png",
+            "/uploads/AAAA/01.png%0a",
+        ):
+            r = await client.get(path)
+            assert r.status_code == 404, f"{path} 应 404,得 {r.status_code}"
+
+
 async def test_serve_bad_batch_id_404(tmp_path, monkeypatch):
     """batch_id 含非 token_urlsafe 字符(点号)→ 正则不匹配 → 404。"""
     _patch_data_dir(tmp_path, monkeypatch)
