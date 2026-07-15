@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.auth.context import current_operator
 from app.auth.guards import assert_account_access, visible_account_ids
@@ -122,6 +122,24 @@ MANIFEST_ENTRIES = [
         "errors": "403=无该账号 access;404=job 不存在",
         "notes": "",
     },
+    {
+        "method": "PATCH", "path": "/api/publish-jobs/{job_id}",
+        "summary": "原地修改待发(pending)定时任务:改时间/标题/正文/图片/话题",
+        "admin_only": False,
+        "params": {
+            "job_id": "path,int",
+            "title": "body,str|None(省略=不改)",
+            "content": "body,str|None(省略=不改)",
+            "images": "body,list|None(省略=不改;传则 1-18 项,越界 400)",
+            "topics": "body,list[str]|None(省略=不改)",
+            "schedule_time": "body,str|None(省略=不改;显式 null=清空转立即发;"
+                              "ISO8601 带时区如 2026-01-01T09:00:00+08:00)",
+        },
+        "returns": "{ok:true, job:<同 GET 单条视图>} 改成功;{ok:false, status:<当前态>} 非 pending 改不了",
+        "errors": "400=images 越界;403=无该账号 access;404=job 不存在",
+        "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
+                 "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。",
+    },
 ]
 
 
@@ -219,3 +237,71 @@ async def cancel_publish_job_endpoint(job_id: int) -> dict:
         job.status = "canceled"
         await session.commit()
         return {"ok": True}
+
+
+class PublishJobPatchRequest(BaseModel):
+    """PATCH 部分更新入参:字段全可选,只有请求体里显式出现的字段才落库(model_fields_set)。"""
+
+    title: str | None = None
+    content: str | None = None
+    images: list | None = None
+    topics: list[str] | None = None
+    schedule_time: str | None = None
+
+
+@router.patch("/api/publish-jobs/{job_id}")
+async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchRequest) -> dict:
+    """原地修改待发(pending)任务:改 schedule_time / title / content / images / topics。
+
+    仅 pending 可改;非 pending 返回 {ok:false,status}。PATCH 部分更新:只改请求体里显式出现
+    的字段(model_fields_set);schedule_time 显式 null=清空转立即发并 submit。条件更新
+    WHERE status='pending' 防与 scan_once 抢占的竞态,rowcount=0 视为已被抢走。
+    """
+    operator = current_operator()
+    async with get_session() as session:
+        job = await session.get(PublishJob, job_id)
+        if job is None:
+            raise NotFoundError(f"发布任务 {job_id} 不存在")
+        await assert_account_access(operator, job.account_id, session)
+        if job.status != "pending":
+            return {"ok": False, "status": job.status}
+
+        # 只取请求体里显式出现的字段,避免把默认 None 误当成"清空"。
+        fields = payload.model_fields_set
+        changes: dict = {}
+        if "title" in fields:
+            changes["title"] = payload.title
+        if "content" in fields:
+            changes["content"] = payload.content
+        if "images" in fields:
+            imgs = payload.images or []
+            if not imgs:
+                raise ValueError("图文笔记至少需要 1 张图片")
+            if len(imgs) > _MAX_IMAGES:
+                raise ValueError(f"最多 {_MAX_IMAGES} 张图片")
+            changes["images_json"] = json.dumps(imgs, ensure_ascii=False)
+        if "topics" in fields:
+            changes["topics_json"] = json.dumps(payload.topics or [], ensure_ascii=False)
+        schedule_cleared = False
+        if "schedule_time" in fields:
+            parsed = _parse_schedule_time(payload.schedule_time)
+            changes["schedule_time"] = parsed
+            schedule_cleared = parsed is None
+
+        if not changes:
+            return {"ok": True, "job": _job_view(job)}
+
+        # 条件更新:仅当仍为 pending 才落库,防与 scan_once 的 mark_publishing 抢占。
+        result = await session.execute(
+            update(PublishJob)
+            .where(PublishJob.id == job_id, PublishJob.status == "pending")
+            .values(**changes)
+        )
+        await session.commit()
+        if result.rowcount == 0:
+            fresh = await session.get(PublishJob, job_id)
+            return {"ok": False, "status": fresh.status if fresh else "unknown"}
+        if schedule_cleared:
+            get_active_scheduler().submit(job_id)
+        await session.refresh(job)
+        return {"ok": True, "job": _job_view(job)}

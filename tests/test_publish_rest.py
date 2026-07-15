@@ -384,3 +384,109 @@ async def test_cancel_only_pending(tmp_path, monkeypatch):
             "/api/publish-jobs/9999/cancel", headers=bearer(ADMIN_KEY)
         )
         assert r3.status_code == 404
+
+
+# ---------------- PATCH /api/publish-jobs/{job_id} ----------------
+
+
+async def test_patch_pending_updates_schedule_and_content(tmp_path, monkeypatch):
+    """pending 任务改 schedule_time + title → 持久化,返回 ok:true + 更新后视图。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PA", "uPA", _COOKIES)
+        op_key = "opkey-patch-1"
+        await _make_operator_with_access(acc, key=op_key)
+        # _make_job 返回 job_id(int),非 ORM 对象
+        job_id = await _make_job(acc, status="pending", title="旧标题")
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": "新标题", "schedule_time": "2026-09-09T09:00:00+08:00"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["job"]["title"] == "新标题"
+        assert body["job"]["schedule_time"] == "2026-09-09T01:00:00"  # +08:00 → naive UTC
+
+
+async def test_patch_clear_schedule_enqueues(tmp_path, monkeypatch):
+    """schedule_time 显式 null → 转立即发,submit 被调用。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        fake = _install_fake_scheduler()
+        acc = await seed_account("号PB", "uPB", _COOKIES)
+        op_key = "opkey-patch-2"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(
+            acc, status="pending", schedule_time=datetime(2026, 9, 9, 1, 0, 0)
+        )
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"schedule_time": None},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert job_id in fake.submitted  # 假调度器记录 submit
+
+
+async def test_patch_non_pending_no_change(tmp_path, monkeypatch):
+    """非 pending(published)改 → ok:false + 当前态,DB 不变。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PC", "uPC", _COOKIES)
+        op_key = "opkey-patch-3"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(acc, status="published", title="定稿")
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": "想改"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"ok": False, "status": "published"}
+
+
+async def test_patch_rejects_empty_and_over_images(tmp_path, monkeypatch):
+    """images 传空 → 400;传 19 张 → 400。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PD", "uPD", _COOKIES)
+        op_key = "opkey-patch-4"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(acc, status="pending")
+        r0 = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"images": []},
+            headers=bearer(op_key),
+        )
+        assert r0.status_code == 400, r0.text
+        r1 = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"images": ["u"] * 19},
+            headers=bearer(op_key),
+        )
+        assert r1.status_code == 400, r1.text
+
+
+async def test_patch_404_and_403(tmp_path, monkeypatch):
+    """job 不存在 → 404;无 access → 403。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PE", "uPE", _COOKIES)
+        owner_key, intruder_key = "opkey-owner", "opkey-intruder"
+        await _make_operator_with_access(acc, key=owner_key)
+        await make_operator(intruder_key)  # 未授权
+        job_id = await _make_job(acc, status="pending")
+        r404 = await c.patch(
+            "/api/publish-jobs/999999",
+            json={"title": "x"},
+            headers=bearer(owner_key),
+        )
+        assert r404.status_code == 404
+        r403 = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": "x"},
+            headers=bearer(intruder_key),
+        )
+        assert r403.status_code == 403
