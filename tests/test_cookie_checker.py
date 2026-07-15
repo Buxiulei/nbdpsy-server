@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import (
 import app.core.db as db_module
 import app.server as server_mod
 from app.browser import cookie_checker as checker_mod
+from app.browser.account_locks import account_locks
 from app.browser.cookie_checker import CookieChecker
 from app.core.security import encrypt_cookies
 from app.models.xhs_account import XhsAccount
@@ -89,6 +90,26 @@ async def test_check_once_only_valid_and_writes_back(smk, monkeypatch):
         assert v.user_id == "u1"
         iv = await s.get(XhsAccount, invalid_id)
         assert iv.cookie_status == "invalid"  # 未被巡检,保持原状
+
+
+async def test_check_account_holds_lock_during_browser(smk, monkeypatch):
+    """周期巡检持账号锁跑浏览器段:check_login_once 被调时同号锁必须已持有,
+    使孤儿回收 reaper 视其"有主"不误杀,且与同号 publish/手动检测/导出串行防 profile 争用。"""
+    acc_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
+    locked_at_call: dict = {}
+
+    def fake_check(account_id, cookies):
+        # 浏览器段在线程内跑,此刻事件循环侧应已持有该号账号锁(locked() 读 bool,跨线程读安全)。
+        locked_at_call["v"] = account_locks.get(account_id).locked()
+        return {"status": "valid"}
+
+    monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    await checker.check_once()
+
+    assert locked_at_call["v"] is True  # 浏览器段内账号锁已持有(reaper 不会误杀)
+    assert account_locks.get(acc_id).locked() is False  # 检测结束锁归还,不泄漏
 
 
 async def test_check_once_error_preserves_status(smk, monkeypatch):
