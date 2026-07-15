@@ -17,6 +17,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.browser import sync_client
+from app.browser.browser_gate import browser_slot
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
 
@@ -106,10 +107,12 @@ class CookieChecker:
         if not cookies:
             return False  # 无 cookie 可检,跳过(不误改状态)
 
-        # 阻塞的 sync 浏览器调用下沉到线程,避免卡事件循环
-        result = await asyncio.to_thread(
-            sync_client.check_login_once, account_id, cookies
-        )
+        # 阻塞的 sync 浏览器调用下沉到线程,避免卡事件循环;套全局浏览器闸,使周期巡检的
+        # camoufox 也计入总并发上限(否则它绕过闸,让"全局"上限被击穿)。
+        async with browser_slot():
+            result = await asyncio.to_thread(
+                sync_client.check_login_once, account_id, cookies
+            )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")
 
