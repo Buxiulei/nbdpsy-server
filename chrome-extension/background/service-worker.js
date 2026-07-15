@@ -94,26 +94,6 @@ async function pushCookies({ accountName, cookies, userInfo }) {
     return { success: true, accountId: result.account_id, created: result.created };
 }
 
-// 采集当前会话的小红书 Cookies（chrome.cookies API 含 httpOnly）。
-async function collectXHSCookies() {
-    const cookies = await chrome.cookies.getAll({ domain: '.xiaohongshu.com' });
-    console.log(`[NBDpsy] 采集到 ${cookies.length} 个 Cookies`);
-    return cookies.map(formatCookie);
-}
-
-// 检查是否已登录小红书（关键 cookie 判断）。
-async function checkLoginStatus() {
-    const cookies = await collectXHSCookies();
-    const hasA1 = cookies.some(c => c.name === 'a1');
-    const hasWebSession = cookies.some(c => c.name === 'web_session');
-    const hasWebId = cookies.some(c => c.name === 'webId');
-    return {
-        isLoggedIn: hasA1 && hasWebId,
-        hasSession: hasWebSession,
-        cookieCount: cookies.length
-    };
-}
-
 // ── Set-Cookie 响应头解析（捕获 chrome.cookies API 可能漏掉的 httpOnly cookie，如 web_session）──
 function parseSetCookieHeader(headerValue) {
     try {
@@ -617,28 +597,6 @@ async function openAccountSession(accountId) {
     return { success: true, injected, failed, windowId, accountId };
 }
 
-// 采集当前会话 cookie + 活动标签页用户信息后推送后台（快速同步路径）。
-async function syncCurrentSession() {
-    const cookies = await collectXHSCookies();
-    if (cookies.length === 0) {
-        return { success: false, error: '未采集到小红书 Cookies，请先登录' };
-    }
-
-    // 从当前活动标签页尝试读取用户信息（失败不阻断，用户信息可选）
-    let userInfo = null;
-    try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab && tab.url && tab.url.includes('xiaohongshu.com')) {
-            const resp = await chrome.tabs.sendMessage(tab.id, { action: 'getUserInfo' });
-            if (resp && resp.success) userInfo = resp.userInfo;
-        }
-    } catch (e) { /* 用户信息可选 */ }
-
-    const accountName = userInfo?.nickname
-        || (userInfo?.user_id ? `xhs_${userInfo.user_id}` : `xhs_account_${Date.now()}`);
-    return pushCookies({ accountName, cookies, userInfo });
-}
-
 // 远程采集是最长 5 分钟的流程，而点击后 popup 会因新窗口聚焦立即销毁、消息回调随之断裂。
 // 因此结果不走 sendResponse，改写入 storage + 打扩展徽标；popup 下次打开时读取并展示。
 async function finishRemoteLogin(result) {
@@ -664,18 +622,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('[NBDpsy] 收到消息:', request.action);
 
     switch (request.action) {
-        case 'collectCookies':
-            collectXHSCookies()
-                .then(cookies => sendResponse({ success: true, cookies }))
-                .catch(error => sendResponse({ success: false, error: error.message }));
-            return true;
-
-        case 'checkLogin':
-            checkLoginStatus()
-                .then(status => sendResponse({ success: true, status }))
-                .catch(error => sendResponse({ success: false, error: error.message }));
-            return true;
-
         case 'getConfig':
             getConfig().then(cfg => sendResponse({ success: true, ...cfg }));
             return true;
@@ -685,12 +631,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 { serverUrl: request.serverUrl, apikey: request.apikey },
                 () => sendResponse({ success: true })
             );
-            return true;
-
-        case 'syncCurrentSession':
-            syncCurrentSession()
-                .then(result => sendResponse(result))
-                .catch(error => sendResponse({ success: false, error: error.message }));
             return true;
 
         case 'startRemoteLogin':

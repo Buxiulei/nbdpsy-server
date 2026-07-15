@@ -19,37 +19,20 @@
       <div class="version"></div>
     </header>
 
-    <!-- 状态区域 -->
-    <div class="status-section">
-      <div id="status-indicator" class="status-indicator status-checking">
-        <span class="status-dot"></span>
-        <span class="status-text">检测中...</span>
-      </div>
-      <div id="cookie-count" class="cookie-count"></div>
-    </div>
-
-    <!-- 用户信息区域 -->
-    <div id="user-info-section" class="user-info-section" style="display: none;">
-      <div class="user-avatar">
-        <img id="user-avatar" src="" alt="头像">
-      </div>
-      <div class="user-details">
-        <div id="user-nickname" class="user-nickname">-</div>
-        <div id="user-id" class="user-id">-</div>
-      </div>
-    </div>
-
-    <!-- 服务器配置 -->
+    <!-- 服务器配置：apikey 主区常驻，服务器地址折叠进高级设置 -->
     <div class="server-section">
-      <label class="label">后台服务器地址</label>
-      <div class="input-group">
-        <input type="text" id="server-url" class="input" placeholder="https://mcp.nbdpsy.com">
-      </div>
-      <label class="label" style="margin-top: 10px;">Operator API Key</label>
+      <label class="label">Operator API Key</label>
       <div class="input-group">
         <input type="password" id="apikey" class="input" placeholder="运营者 apikey">
         <button id="btn-save-config" class="btn btn-small">保存</button>
       </div>
+      <details class="advanced-settings">
+        <summary>高级设置</summary>
+        <label class="label" style="margin-top: 10px;">后台服务器地址</label>
+        <div class="input-group">
+          <input type="text" id="server-url" class="input" placeholder="https://mcp.nbdpsy.com">
+        </div>
+      </details>
       <div id="server-status" class="server-status"></div>
     </div>
 
@@ -64,20 +47,9 @@
       </div>
     </div>
 
-    <!-- 操作按钮 -->
+    <!-- 操作按钮：无痕窗口人工登录采集（加/换号唯一入口） -->
     <div class="action-section">
-      <button id="btn-sync" class="btn btn-primary btn-large" disabled>
-        <span class="btn-icon" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-            <polyline points="21 3 21 9 15 9" />
-          </svg>
-        </span>
-        <span class="btn-text">同步当前账号到后台</span>
-      </button>
-
-      <button id="btn-remote-login" class="btn btn-secondary">
+      <button id="btn-remote-login" class="btn btn-primary btn-large">
         <span class="btn-icon" aria-hidden="true">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
@@ -86,19 +58,7 @@
             <path d="M12 18v3" />
           </svg>
         </span>
-        <span class="btn-text">远程登录采集（无痕窗口）</span>
-      </button>
-
-      <button id="btn-open-xhs" class="btn btn-secondary">
-        <span class="btn-icon" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M2 12h20" />
-            <path d="M12 2a15.3 15.3 0 0 1 0 20a15.3 15.3 0 0 1 0-20z" />
-          </svg>
-        </span>
-        <span class="btn-text">打开小红书</span>
+        <span class="btn-text">打开隐私窗口登录（加/换号）</span>
       </button>
     </div>
 
