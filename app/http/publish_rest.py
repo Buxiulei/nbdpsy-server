@@ -138,7 +138,8 @@ MANIFEST_ENTRIES = [
         "returns": "{ok:true, job:<同 GET 单条视图>} 改成功;{ok:false, status:<当前态>} 非 pending 改不了",
         "errors": "400=images 越界;403=无该账号 access;404=job 不存在",
         "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
-                 "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。",
+                 "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。空请求体 {} 为 no-op "
+                 "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。",
     },
 ]
 
@@ -270,8 +271,15 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
         fields = payload.model_fields_set
         changes: dict = {}
         if "title" in fields:
+            # 显式传 null 无法表达"不改"(省略才是),且 title 列 NOT NULL 落库会 IntegrityError→500;
+            # 这里拒绝 null 给清晰 400。
+            if payload.title is None:
+                raise ValueError("title 不可为 null(不改请省略该字段)")
             changes["title"] = payload.title
         if "content" in fields:
+            # 同上:content 列 NOT NULL,显式 null 拒绝并给 400。
+            if payload.content is None:
+                raise ValueError("content 不可为 null(不改请省略该字段)")
             changes["content"] = payload.content
         if "images" in fields:
             imgs = payload.images or []
@@ -299,7 +307,10 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
         )
         await session.commit()
         if result.rowcount == 0:
-            fresh = await session.get(PublishJob, job_id)
+            # rowcount=0 说明状态已被 scan_once 抢走(不再 pending)。expire_on_commit=False 下
+            # 普通 get 命中身份映射不发 SQL,会返回函数开头的陈旧 pending 对象;populate_existing=True
+            # 强制从 DB 重载,拿到真实当前态。
+            fresh = await session.get(PublishJob, job_id, populate_existing=True)
             return {"ok": False, "status": fresh.status if fresh else "unknown"}
         if schedule_cleared:
             get_active_scheduler().submit(job_id)

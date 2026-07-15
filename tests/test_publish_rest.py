@@ -446,6 +446,11 @@ async def test_patch_non_pending_no_change(tmp_path, monkeypatch):
         assert r.status_code == 200
         assert r.json() == {"ok": False, "status": "published"}
 
+        # DB 复核:非 pending 分支不落任何 UPDATE,标题仍是 seed 的"定稿"。
+        r_get = await c.get(f"/api/publish-jobs/{job_id}", headers=bearer(op_key))
+        assert r_get.status_code == 200, r_get.text
+        assert r_get.json()["title"] == "定稿"
+
 
 async def test_patch_rejects_empty_and_over_images(tmp_path, monkeypatch):
     """images 传空 → 400;传 19 张 → 400。"""
@@ -490,3 +495,88 @@ async def test_patch_404_and_403(tmp_path, monkeypatch):
             headers=bearer(intruder_key),
         )
         assert r403.status_code == 403
+
+
+async def test_patch_omitted_fields_unchanged(tmp_path, monkeypatch):
+    """只传 schedule_time,未传的 title 保持原值(省略=不改,不被默认 None 误清)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PF", "uPF", _COOKIES)
+        op_key = "opkey-patch-omit"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(
+            acc, status="pending", title="原标题", content="原正文"
+        )
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"schedule_time": "2026-09-09T09:00:00+08:00"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+
+        # GET 复核:未传的 title 仍是原值(content 不在视图,由"未报错 + title 不变"间接覆盖)。
+        r_get = await c.get(f"/api/publish-jobs/{job_id}", headers=bearer(op_key))
+        assert r_get.status_code == 200, r_get.text
+        assert r_get.json()["title"] == "原标题"
+
+
+async def test_patch_preempted_by_scan_returns_real_status(tmp_path, monkeypatch):
+    """竞态:fast-path 之后 job 被 scan 翻 publishing → 条件更新 rowcount=0,返回真实 publishing。
+
+    用 monkeypatch 把 assert_account_access(在 session.get 之后、条件更新之前调用)包成一个钩子:
+    先用独立 session(同一隔离库工厂)把该 job 翻成 publishing 并 commit,再放行。这样端点内的
+    ORM 对象仍是陈旧 pending(expire_on_commit=False 不过期)→ fast-path 放行 → 条件更新
+    WHERE status='pending' 命中 0 行。断言返回的 status 是 DB 真实态 publishing 而非陈旧 pending
+    (坐实 Fix 1 的 populate_existing=True 强制重载)。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PG", "uPG", _COOKIES)
+        op_key = "opkey-patch-preempt"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(acc, status="pending", title="原标题")
+
+        async def _preempt(operator, account_id, session):
+            # 独立 session 复用同一隔离库工厂,在窗口内把状态翻成 publishing 模拟 scan 抢占。
+            async with db_module.async_session() as s2:
+                j = await s2.get(PublishJob, job_id)
+                j.status = "publishing"
+                await s2.commit()
+            return None
+
+        monkeypatch.setattr(
+            "app.http.publish_rest.assert_account_access", _preempt
+        )
+
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": "想改"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": False, "status": "publishing"}
+
+
+async def test_patch_explicit_null_title_or_content_400(tmp_path, monkeypatch):
+    """显式传 title/content = null → 400(NOT NULL 列不落 IntegrityError,不改请省略字段)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号PH", "uPH", _COOKIES)
+        op_key = "opkey-patch-null"
+        await _make_operator_with_access(acc, key=op_key)
+        job_id = await _make_job(acc, status="pending")
+
+        r_title = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": None},
+            headers=bearer(op_key),
+        )
+        assert r_title.status_code == 400, r_title.text
+
+        r_content = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"content": None},
+            headers=bearer(op_key),
+        )
+        assert r_content.status_code == 400, r_content.text
