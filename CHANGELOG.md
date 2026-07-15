@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 (2026-07-15)
+
+claude.ai 网页/手机 App 接入:图片上传端点 + 薄 MCP facade。让不能装 Claude Desktop 的运营
+在 claude.ai 聊天里也能发小红书(claude.ai 沙箱够不到 API、web_fetch 不能带 header,MCP 连接器是唯一官方通道)。
+
+- **图片上传**:`POST /api/uploads/images`(apikey,multipart,1–18 张,Pillow 真解验证)→ 落盘
+  `data/uploads/{batch_id}/` + 返回图片 URL(顺序即页序);`GET /uploads/{batch}/{n}`(免鉴权取图,
+  随机 batch_id + fullmatch 白名单 + resolve 前缀双层防穿越);`/upload` 拖拽上传页(页内填 apikey);
+  `upload_batches` 表 + 7 天懒清理。解决"base64 塞不进 MCP 工具参数"——图变 URL 后复用发布链零改。
+- **薄 MCP facade**:`/mcp`(Streamable HTTP,host_origin_protection=False,combine_lifespans)7 工具
+  (whoami/list_accounts/publish_note/get_publish_status/list_publish_jobs/check_cookie/get_extension_info)
+  httpx 自转发本机 REST,apikey 从 MCP 请求头透传(static_headers 鉴权),facade 零业务逻辑、REST 是唯一真源。
+  publish_note 只收 image_urls 绝不收 base64。新增依赖 `fastmcp`。
+- **部署**:走 `systemctl restart`(ExecStartPre 自动 `alembic upgrade head` 建 upload_batches,先于 uvicorn,
+  规避 create_all 抢建表)。claude.ai 侧需 static_headers 连接器 beta(向 mcp-review@anthropic.com 申请)。
+
 ## 0.3.0 (2026-07-13)
 
 两个新特性:发布流程选择器自愈、账号笔记数据采集。
