@@ -70,8 +70,10 @@ async function loadConfig() {
 // 采集是长流程，点击后本 popup 会被新窗口聚焦而关闭，故这里只"点火"，
 // 结果由 SW 写入 storage，popup 下次打开或仍在时经 onChanged 展示（见 DOMContentLoaded）。
 async function remoteLogin() {
-    if (!elements.apikey.value.trim()) {
-        showMessage('error', '请先填写并保存 apikey');
+    // 只认已保存到 storage 的 savedApikey，不认输入框裸值——否则「填了没点保存」时
+    // popup 放行、SW 侧 storage 却无 key，会白走完整个登录流程到推送才失败。
+    if (!savedApikey) {
+        showMessage('error', '请先填写并保存 apikey（需点保存）');
         return;
     }
     await chrome.storage.local.remove('remoteLoginResult');

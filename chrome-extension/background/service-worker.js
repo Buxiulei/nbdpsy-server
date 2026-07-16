@@ -56,6 +56,9 @@ function formatCookie(c) {
 }
 
 // 统一推送 cookie 到后台。account_name 是后台必填字段（Pydantic）。
+// 契约：本函数**永不 throw**——任何情况（含 fetch 网络层异常 DNS/连接/超时）都返回
+// { success, ... } 形状的结果。调用方（startRemoteLogin 后半程）据此判定终态，
+// 不必再兜 pushCookies 的抛出（历史 bug：fetch 直接抛 → promise 永不 resolve → 永卡）。
 async function pushCookies({ accountName, cookies, userInfo }) {
     const { serverUrl, apikey } = await getConfig();
     if (!apikey) {
@@ -68,30 +71,36 @@ async function pushCookies({ accountName, cookies, userInfo }) {
         user_info: userInfo || null
     };
 
-    const response = await fetch(`${serverUrl}/api/cookies/import`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apikey}`
-        },
-        body: JSON.stringify(body)
-    });
-
-    let result = {};
     try {
-        result = await response.json();
-    } catch (e) {
-        result = {};
-    }
+        const response = await fetch(`${serverUrl}/api/cookies/import`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apikey}`
+            },
+            body: JSON.stringify(body)
+        });
 
-    if (!response.ok) {
-        return {
-            success: false,
-            error: result.detail || result.error || `HTTP ${response.status}`
-        };
+        let result = {};
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = {};
+        }
+
+        if (!response.ok) {
+            return {
+                success: false,
+                error: result.detail || result.error || `HTTP ${response.status}`
+            };
+        }
+        // 后台返回 {account_id, created}
+        return { success: true, accountId: result.account_id, created: result.created };
+    } catch (e) {
+        // fetch 网络层异常（DNS 解析失败 / 连接被拒 / 超时）：不抛出，返回失败态，
+        // 保证调用方永远拿到结果、能关窗 + 写 storage 反馈，而非静默永卡。
+        return { success: false, error: `推送后台失败(网络): ${e.message}` };
     }
-    // 后台返回 {account_id, created}
-    return { success: true, accountId: result.account_id, created: result.created };
 }
 
 // ── Set-Cookie 响应头解析（捕获 chrome.cookies API 可能漏掉的 httpOnly cookie，如 web_session）──
@@ -145,6 +154,14 @@ function parseSetCookieHeader(headerValue) {
 // 登录成功后跨所有 cookieStore + Set-Cookie 响应头采集 Cookies 与用户信息，推送后台。
 async function startRemoteLogin() {
     console.log('[NBDpsy] 开始远程登录采集流程...');
+
+    // 快速失败预检：storage 无 apikey 时直接返回，别白走完整个登录流程到最后推送才失败。
+    // 场景：用户在弹窗「填了 apikey 但没点保存」——输入框有值但 storage 无 key，
+    // 若不预检会一路开窗、登录、采集，到 pushCookies 才报错，浪费几分钟。这里 3 秒内给明确指引。
+    const { apikey } = await getConfig();
+    if (!apikey) {
+        return { success: false, error: '请先在扩展弹窗填写并保存 apikey（点保存按钮）' };
+    }
 
     // 启动 Set-Cookie 响应头拦截器（捕获 chrome.cookies API 看不到的 httpOnly cookies）
     const interceptedCookies = new Map();  // key: name@domain
@@ -274,149 +291,161 @@ async function startRemoteLogin() {
                         loginDetected = true;
                         cleanup();
 
-                        await new Promise(r => setTimeout(r, 2000));
-
-                        // 2. 进入个人主页采集用户信息
-                        const targetUrl = profileUrl || 'https://www.xiaohongshu.com/user/profile/me';
-                        console.log(`[NBDpsy] 进入个人主页: ${targetUrl}`);
-                        await chrome.tabs.update(tabId, { url: targetUrl });
-                        await new Promise(r => setTimeout(r, 5000));
-
-                        let userInfo = null;
-                        let profileAttempts = 0;
-                        const maxProfileAttempts = 60; // 最多约 2 分钟
-
-                        while (profileAttempts < maxProfileAttempts && !userInfo?.nickname) {
-                            profileAttempts++;
+                        // 登录检测成功后 interval 已 cleanup、loginDetected=true：后半程（进主页→采 userInfo→采
+                        // cookies→推送后台→关窗→resolve）必须整体兜异常。任何一步抛异常（tabs.update 在 tab 被用户
+                        // 动过时抛、pushCookies 网络错等）若不兜，promise 永不 resolve、窗口永不关、finishRemoteLogin
+                        // 永不写 storage——运营端表现为「卡在主页永不回报、不关窗、不入库」。
+                        try {
                             await new Promise(r => setTimeout(r, 2000));
 
-                            let currentTab;
-                            try {
-                                currentTab = await chrome.tabs.get(tabId);
-                            } catch (e) {
-                                break;
-                            }
-                            const currentUrl = currentTab.url || '';
+                            // 2. 进入个人主页采集用户信息
+                            const targetUrl = profileUrl || 'https://www.xiaohongshu.com/user/profile/me';
+                            console.log(`[NBDpsy] 进入个人主页: ${targetUrl}`);
+                            await chrome.tabs.update(tabId, { url: targetUrl });
+                            await new Promise(r => setTimeout(r, 5000));
 
-                            // 遇到验证码 / 未到主页：继续等待人工处理
-                            if (currentUrl.includes('captcha') || currentUrl.includes('verify')) {
-                                continue;
-                            }
-                            if (!currentUrl.includes('/user/profile/')) {
-                                continue;
+                            let userInfo = null;
+                            let profileAttempts = 0;
+                            const maxProfileAttempts = 60; // 最多约 2 分钟
+
+                            while (profileAttempts < maxProfileAttempts && !userInfo?.nickname) {
+                                profileAttempts++;
+                                await new Promise(r => setTimeout(r, 2000));
+
+                                let currentTab;
+                                try {
+                                    currentTab = await chrome.tabs.get(tabId);
+                                } catch (e) {
+                                    break;
+                                }
+                                const currentUrl = currentTab.url || '';
+
+                                // 遇到验证码 / 未到主页：继续等待人工处理
+                                if (currentUrl.includes('captcha') || currentUrl.includes('verify')) {
+                                    continue;
+                                }
+                                if (!currentUrl.includes('/user/profile/')) {
+                                    continue;
+                                }
+
+                                try {
+                                    const info = await chrome.tabs.sendMessage(tabId, { action: 'getUserInfo' });
+                                    if (info && info.success && info.userInfo) {
+                                        userInfo = info.userInfo;
+                                        if (userInfo.nickname) {
+                                            console.log('[NBDpsy] 成功采集到用户信息:', userInfo.nickname);
+                                            break;
+                                        }
+                                    }
+                                } catch (e) {
+                                    // content script 尚未就绪，继续等待
+                                }
                             }
 
+                            if (!userInfo?.nickname) {
+                                console.warn('[NBDpsy] 未能采集到用户信息（可能验证码未完成或超时）');
+                            }
+
+                            // 3. 采集 Cookies（跨所有 cookieStore + Set-Cookie 拦截）
+                            console.log('[NBDpsy] 等待最终 Cookie 写入...');
+                            await new Promise(r => setTimeout(r, 3000));
+
+                            const cookieMap = new Map();
+                            const addCookies = (cookies, source) => {
+                                let added = 0;
+                                for (const c of cookies) {
+                                    const key = `${c.name}@${c.domain}`;
+                                    if (!cookieMap.has(key)) {
+                                        cookieMap.set(key, c);
+                                        added++;
+                                    }
+                                }
+                                if (added > 0) {
+                                    console.log(`[NBDpsy] 从 ${source} 添加了 ${added} 个新 Cookie`);
+                                }
+                            };
+
+                            // 遍历所有 cookieStore（无痕窗口有独立 store），主站 + creator 子域全量采集
+                            const stores = await chrome.cookies.getAllCookieStores();
+                            for (const store of stores) {
+                                try {
+                                    const xhsCookies = (await chrome.cookies.getAll({ storeId: store.id }))
+                                        .filter(c => c.domain.includes('xiaohongshu.com'));
+                                    addCookies(xhsCookies, `store[${store.id}]`);
+                                } catch (e) { /* 忽略无权限 store */ }
+                            }
+
+                            // 通过页面 JS 读取 document.cookie（补采非 httpOnly cookie）
                             try {
-                                const info = await chrome.tabs.sendMessage(tabId, { action: 'getUserInfo' });
-                                if (info && info.success && info.userInfo) {
-                                    userInfo = info.userInfo;
-                                    if (userInfo.nickname) {
-                                        console.log('[NBDpsy] 成功采集到用户信息:', userInfo.nickname);
-                                        break;
+                                const jsResults = await chrome.scripting.executeScript({
+                                    target: { tabId: tabId },
+                                    func: () => document.cookie
+                                });
+                                const docCookieStr = jsResults?.[0]?.result || '';
+                                for (const pair of docCookieStr.split(';').map(s => s.trim()).filter(Boolean)) {
+                                    const eqIdx = pair.indexOf('=');
+                                    if (eqIdx > 0) {
+                                        const name = pair.substring(0, eqIdx).trim();
+                                        const value = pair.substring(eqIdx + 1).trim();
+                                        const jsKey = `${name}@.xiaohongshu.com`;
+                                        if (!cookieMap.has(jsKey)) {
+                                            cookieMap.set(jsKey, {
+                                                name, value,
+                                                domain: '.xiaohongshu.com',
+                                                path: '/', httpOnly: false, secure: true, sameSite: 'Lax'
+                                            });
+                                        }
                                     }
                                 }
                             } catch (e) {
-                                // content script 尚未就绪，继续等待
+                                console.warn('[NBDpsy] document.cookie 采集失败:', e.message);
                             }
-                        }
 
-                        if (!userInfo?.nickname) {
-                            console.warn('[NBDpsy] 未能采集到用户信息（可能验证码未完成或超时）');
-                        }
-
-                        // 3. 采集 Cookies（跨所有 cookieStore + Set-Cookie 拦截）
-                        console.log('[NBDpsy] 等待最终 Cookie 写入...');
-                        await new Promise(r => setTimeout(r, 3000));
-
-                        const cookieMap = new Map();
-                        const addCookies = (cookies, source) => {
-                            let added = 0;
-                            for (const c of cookies) {
-                                const key = `${c.name}@${c.domain}`;
-                                if (!cookieMap.has(key)) {
-                                    cookieMap.set(key, c);
-                                    added++;
+                            // 合并 Set-Cookie 响应头拦截到的 cookies（httpOnly 关键路径）
+                            if (interceptedCookies.size > 0) {
+                                for (const [key, c] of interceptedCookies) {
+                                    if (!cookieMap.has(key)) cookieMap.set(key, c);
                                 }
+                                console.log(`[NBDpsy] 从 Set-Cookie 响应头合并 ${interceptedCookies.size} 个 Cookie`);
                             }
-                            if (added > 0) {
-                                console.log(`[NBDpsy] 从 ${source} 添加了 ${added} 个新 Cookie`);
-                            }
-                        };
 
-                        // 遍历所有 cookieStore（无痕窗口有独立 store），主站 + creator 子域全量采集
-                        const stores = await chrome.cookies.getAllCookieStores();
-                        for (const store of stores) {
                             try {
-                                const xhsCookies = (await chrome.cookies.getAll({ storeId: store.id }))
-                                    .filter(c => c.domain.includes('xiaohongshu.com'));
-                                addCookies(xhsCookies, `store[${store.id}]`);
-                            } catch (e) { /* 忽略无权限 store */ }
-                        }
+                                chrome.webRequest.onHeadersReceived.removeListener(headerListener);
+                            } catch (e) { /* 忽略 */ }
 
-                        // 通过页面 JS 读取 document.cookie（补采非 httpOnly cookie）
-                        try {
-                            const jsResults = await chrome.scripting.executeScript({
-                                target: { tabId: tabId },
-                                func: () => document.cookie
-                            });
-                            const docCookieStr = jsResults?.[0]?.result || '';
-                            for (const pair of docCookieStr.split(';').map(s => s.trim()).filter(Boolean)) {
-                                const eqIdx = pair.indexOf('=');
-                                if (eqIdx > 0) {
-                                    const name = pair.substring(0, eqIdx).trim();
-                                    const value = pair.substring(eqIdx + 1).trim();
-                                    const jsKey = `${name}@.xiaohongshu.com`;
-                                    if (!cookieMap.has(jsKey)) {
-                                        cookieMap.set(jsKey, {
-                                            name, value,
-                                            domain: '.xiaohongshu.com',
-                                            path: '/', httpOnly: false, secure: true, sameSite: 'Lax'
-                                        });
-                                    }
-                                }
+                            const allCookies = Array.from(cookieMap.values());
+                            console.log(`[NBDpsy] 最终采集到 ${allCookies.length} 个 Cookies`);
+
+                            // 4. 推送后台（account_name 用昵称 / 用户 ID / 时间戳兜底）
+                            const accountName = userInfo?.nickname
+                                || (userInfo?.user_id ? `xhs_${userInfo.user_id}` : `xhs_account_${Date.now()}`);
+                            const pushResult = await pushCookies({ accountName, cookies: allCookies, userInfo });
+                            console.log('[NBDpsy] 后台响应:', pushResult);
+
+                            try {
+                                await chrome.windows.remove(windowId);
+                            } catch (e) { /* 忽略 */ }
+
+                            if (pushResult.success) {
+                                resolve({
+                                    success: true,
+                                    cookiesCollected: allCookies.length,
+                                    accountId: pushResult.accountId,
+                                    created: pushResult.created,
+                                    userInfo: userInfo,
+                                    message: userInfo?.nickname
+                                        ? `登录成功！欢迎 ${userInfo.nickname}`
+                                        : '登录成功，Cookies 已保存'
+                                });
+                            } else {
+                                resolve({ success: false, error: pushResult.error });
                             }
                         } catch (e) {
-                            console.warn('[NBDpsy] document.cookie 采集失败:', e.message);
-                        }
-
-                        // 合并 Set-Cookie 响应头拦截到的 cookies（httpOnly 关键路径）
-                        if (interceptedCookies.size > 0) {
-                            for (const [key, c] of interceptedCookies) {
-                                if (!cookieMap.has(key)) cookieMap.set(key, c);
-                            }
-                            console.log(`[NBDpsy] 从 Set-Cookie 响应头合并 ${interceptedCookies.size} 个 Cookie`);
-                        }
-
-                        try {
-                            chrome.webRequest.onHeadersReceived.removeListener(headerListener);
-                        } catch (e) { /* 忽略 */ }
-
-                        const allCookies = Array.from(cookieMap.values());
-                        console.log(`[NBDpsy] 最终采集到 ${allCookies.length} 个 Cookies`);
-
-                        // 4. 推送后台（account_name 用昵称 / 用户 ID / 时间戳兜底）
-                        const accountName = userInfo?.nickname
-                            || (userInfo?.user_id ? `xhs_${userInfo.user_id}` : `xhs_account_${Date.now()}`);
-                        const pushResult = await pushCookies({ accountName, cookies: allCookies, userInfo });
-                        console.log('[NBDpsy] 后台响应:', pushResult);
-
-                        try {
-                            await chrome.windows.remove(windowId);
-                        } catch (e) { /* 忽略 */ }
-
-                        if (pushResult.success) {
-                            resolve({
-                                success: true,
-                                cookiesCollected: allCookies.length,
-                                accountId: pushResult.accountId,
-                                created: pushResult.created,
-                                userInfo: userInfo,
-                                message: userInfo?.nickname
-                                    ? `登录成功！欢迎 ${userInfo.nickname}`
-                                    : '登录成功，Cookies 已保存'
-                            });
-                        } else {
-                            resolve({ success: false, error: pushResult.error });
+                            // 兜底：无论后半程哪一步抛异常，都必然关窗 + 摘 webRequest listener + resolve 终态，
+                            // 让调用方（finishRemoteLogin）写 storage，popup 能展示「采集失败: 采集中断: ...」而非永卡。
+                            try { await chrome.windows.remove(windowId); } catch (e2) { /* 窗口可能已关，忽略 */ }
+                            try { chrome.webRequest.onHeadersReceived.removeListener(headerListener); } catch (e3) { /* 忽略 */ }
+                            resolve({ success: false, error: `采集中断: ${e.message}` });
                         }
                     } else if (checkCount % 10 === 0) {
                         console.log(`[NBDpsy] 等待用户登录... (${checkCount * 2}秒)`);

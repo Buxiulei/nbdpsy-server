@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.1 (2026-07-16)
+
+修插件「打开隐私窗口登录」采集新号后**永久卡死**的生产 bug（登录检测成功、窗口进主页后不关窗 /
+不入库 / popup 无结果，服务端零 `/api/cookies/import`）。
+
+- **根因·后半程异常被静默吞掉**：`startRemoteLogin` 登录检测成功后先 `cleanup()` 清掉 interval，
+  再串行跑「进主页→采 userInfo→采 cookies→推送→关窗→resolve」。这段任一步抛异常（`chrome.tabs.update`
+  在 tab 被用户动过时抛、`pushCookies` 的 `fetch` 网络错等）只被外层 `console.warn` 吞掉——此时 interval
+  已清、`loginDetected=true`，promise 永不 resolve、窗口永不关、`finishRemoteLogin` 永不写 storage。
+  修复：把整个后半程包进 try/catch，catch 里**必然**关窗 + 摘 webRequest listener + `resolve({success:false})`，
+  调用方拿到终态写 storage，popup 稳定显示「采集失败: 采集中断: ...」。
+- **`pushCookies` 网络异常不再抛**：`fetch` + 响应处理包进 try/catch，网络层异常返回
+  `{success:false, error:'推送后台失败(网络): ...'}`。函数契约收敛为「永不 throw，总返回 {success,...}」。
+- **apikey 未保存快速失败**：`startRemoteLogin` 开窗前预检 storage apikey（无则 3 秒内返回指引），
+  popup 侧 `remoteLogin` 改判 `savedApikey`（已存 key）而非输入框裸值，杜绝「填了没点保存」白走全流程。
+- 插件版本 `2.1.0 → 2.1.1`（bugfix）。
+
 ## 0.6.0 (2026-07-15)
 
 两个功能:发布计划原地修改(定时发布收口)+ chrome 插件交互精简为账号管理器。

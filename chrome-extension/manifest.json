@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "NBDpsy 小红书账号助手",
-    "version": "2.1.0",
+    "version": "2.1.1",
     "description": "在真实浏览器人工登录小红书，一键把账号 Cookie 推送到 NBDpsy 后台（远程登录唯一入口）",
     "permissions": [
         "cookies",
