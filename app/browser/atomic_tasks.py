@@ -605,10 +605,22 @@ class XHSPublishAtomicTasks:
                     "screenshot": self._take_screenshot("03_00_tab_not_found"),
                 }
 
-            # 2.3 查找文件上传 input 元素
+            # 2.2b 校验真进图文模式(坐标点击可能没生效、停留在视频 tab)。
+            # 不校验会把图片塞进视频 file input 还误报成功 → 下游 step3/5 才暴露。
+            if not self._ensure_image_mode():
+                return {
+                    "success": False,
+                    "error": "点击'上传图文'后未进入图文模式(疑似停留在视频tab)",
+                    "screenshot": self._take_screenshot("03_02_not_image_mode"),
+                }
+            logger.info("✓ 已确认处于图文上传模式")
+
+            # 2.3 查找文件上传 input 元素(优先图片入口，绝不回退到视频 file input)
             logger.info("2.3 查找文件上传input元素...")
             upload_input_selectors = [
                 "input[type='file'][accept*='image']",
+                "input[type='file'][accept*='png']",
+                "input[type='file'][accept*='jpg']",
                 "input[type='file']",
                 ".upload-input",
                 "input.upload-input",
@@ -765,18 +777,23 @@ class XHSPublishAtomicTasks:
             }
 
     def _check_edit_page_loaded(self) -> bool:
-        """检查编辑界面是否已加载(标题框或内容框可见)。"""
-        title_selectors = [
+        """检查图文笔记编辑界面是否已加载。
+
+        以**标题输入框**为图文编辑器的唯一标志 —— 不再接受宽松的裸
+        ``div[contenteditable='true']``：视频 tab / 其它页面也可能有 contenteditable，
+        会把"停留在视频 tab"误判成"编辑器已加载"(step3 假阳性根源，实测据此漏判)。
+        另收带明确"正文/内容"占位的输入框作为辅助信号。
+        """
+        strict_selectors = [
             "input[placeholder*='标题']",
             "input[placeholder*='填写标题']",
             "input[placeholder*='添加标题']",
-        ]
-        content_selectors = [
-            "div[contenteditable='true']",
             "textarea[placeholder*='正文']",
             "textarea[placeholder*='内容']",
+            "div[contenteditable='true'][placeholder*='正文']",
+            "div[contenteditable='true'][placeholder*='内容']",
         ]
-        for selector in title_selectors + content_selectors:
+        for selector in strict_selectors:
             try:
                 for elem in self.page.query_selector_all(selector):
                     if elem.is_visible():
@@ -784,6 +801,73 @@ class XHSPublishAtomicTasks:
             except Exception:
                 continue
         return False
+
+    def _image_mode_ready(self) -> bool:
+        """是否已进入「上传图文」模式(而非默认「上传视频」)。
+
+        可靠信号:出现 ``accept`` 含 image 的 file input(图文上传入口)——视频 tab 的
+        file input accept 是视频，据此区分，避免把图片塞进视频入口还误报成功。
+        辅助:标题框已出现(上传后编辑器)。
+        """
+        try:
+            if self.page.evaluate(
+                "() => !!document.querySelector(\"input[type='file'][accept*='image']\")"
+            ):
+                return True
+        except Exception:
+            pass
+        return self._check_edit_page_loaded()
+
+    def _click_image_text_tab(self) -> bool:
+        """定位并坐标点击顶部「上传图文」tab，返回是否点击成功。"""
+        try:
+            tab = self.page.evaluate("""
+                () => {
+                    const cands = Array.from(document.querySelectorAll('span, div, a, li'))
+                        .filter(el => {
+                            if (el.textContent.trim() !== '上传图文') return false;
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && r.top < 200 && r.top > 0;
+                        });
+                    if (!cands.length) return { found: false };
+                    const r = cands[0].getBoundingClientRect();
+                    return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+                }
+            """)
+        except Exception:
+            return False
+        if tab and tab.get("found"):
+            self.human.click((tab["x"], tab["y"]), reason="上传图文 tab(校验重试)")
+            return True
+        return False
+
+    def _ensure_image_mode(self, tries: int = 4) -> bool:
+        """确保处于图文模式；未进入则重试点 tab + URL 兜底，直到出现图文上传入口。
+
+        坑：坐标点击「上传图文」偶发不生效(实测三次跑里一次卡在视频 tab、一次编辑器
+        没渲染)，只查 input[type=file] 存在会误判(视频 tab 也有)。这里以图片上传入口
+        /标题框为准反复校验，配 URL ``?type=normal`` 兜底。
+        """
+        for attempt in range(1, tries + 1):
+            if self._image_mode_ready():
+                if attempt > 1:
+                    logger.info(f"✓ 已确认进入图文模式(第 {attempt} 次校验)")
+                return True
+            logger.warning(f"⚠️ 尚未进入图文模式(第 {attempt}/{tries} 次)，重试切换...")
+            self._click_image_text_tab()
+            if attempt >= 2:
+                # URL 兜底直切图文
+                try:
+                    cur = self.page.url
+                    if "publish" in cur:
+                        self.page.goto(
+                            cur.split("?")[0] + "?source=official&type=normal",
+                            wait_until="domcontentloaded", timeout=10000,
+                        )
+                except Exception as e:
+                    logger.warning(f"URL 兜底失败: {e}")
+            self.human.wait(1.2, 2.0, context="等图文模式渲染")
+        return self._image_mode_ready()
 
     def _find_continue_edit_button(self) -> Optional[ElementHandle]:
         """查找'继续编辑'按钮。"""
