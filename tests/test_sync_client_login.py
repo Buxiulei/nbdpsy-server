@@ -78,3 +78,50 @@ def test_check_login_once_valid_passthrough(monkeypatch):
     res = sync_client.check_login_once(1, _COOKIES)
     assert res["status"] == "valid"
     assert res["user_info"]["nickname"] == "小蓝"
+
+
+# ── check_login 官方 API 地面真值优先(修 DOM 启发式假阳性)单测 ──
+# 背景:DETECT_LOGIN_JS 在登出的 explore 页仍会因笔记内容渲染而误判"已登录",
+# 导致过期 cookie 被标 valid、发布静默失败。check_login 现以 API 判定为准。
+
+def _client():
+    return SyncClient(1, _COOKIES)
+
+
+def test_check_login_api_expired_overrides_dom(monkeypatch):
+    """API 明确"登录已过期" → invalid，即便 DOM 启发式(假阳性)说已登录。"""
+    cli = _client()
+    monkeypatch.setattr(SyncClient, "_is_captcha", lambda self: False)
+    monkeypatch.setattr(SyncClient, "_api_login_status", lambda self: False)
+    # DOM 假阳性:说登录了,但必须被 API 的 False 否决
+    monkeypatch.setattr(SyncClient, "_detect_login", lambda self: {"is_logged_in": True})
+    assert cli.check_login()["status"] == "invalid"
+
+
+def test_check_login_api_valid_overrides_dom_false_negative(monkeypatch):
+    """API 明确已登录 → valid，即便 DOM 假阴性说未登录(不被误杀)。"""
+    cli = _client()
+    monkeypatch.setattr(SyncClient, "_is_captcha", lambda self: False)
+    monkeypatch.setattr(SyncClient, "_api_login_status", lambda self: True)
+    monkeypatch.setattr(SyncClient, "_detect_login", lambda self: {"is_logged_in": False, "profile_url": None})
+    monkeypatch.setattr(SyncClient, "_get_user_info", lambda self, url: {"nickname": "x"})
+    assert cli.check_login()["status"] == "valid"
+
+
+def test_check_login_api_unreachable_falls_back_to_dom_invalid(monkeypatch):
+    """API 不可达(None) → 降级 DOM;DOM 说未登录 → invalid。"""
+    cli = _client()
+    monkeypatch.setattr(SyncClient, "_is_captcha", lambda self: False)
+    monkeypatch.setattr(SyncClient, "_api_login_status", lambda self: None)
+    monkeypatch.setattr(SyncClient, "_detect_login", lambda self: {"is_logged_in": False})
+    assert cli.check_login()["status"] == "invalid"
+
+
+def test_check_login_api_unreachable_falls_back_to_dom_valid(monkeypatch):
+    """API 不可达(None) → 降级 DOM;DOM 说已登录 → valid(保留原行为不误杀)。"""
+    cli = _client()
+    monkeypatch.setattr(SyncClient, "_is_captcha", lambda self: False)
+    monkeypatch.setattr(SyncClient, "_api_login_status", lambda self: None)
+    monkeypatch.setattr(SyncClient, "_detect_login", lambda self: {"is_logged_in": True, "profile_url": "u"})
+    monkeypatch.setattr(SyncClient, "_get_user_info", lambda self, url: {"nickname": "y"})
+    assert cli.check_login()["status"] == "valid"

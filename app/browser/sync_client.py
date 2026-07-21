@@ -270,16 +270,57 @@ class SyncClient:
             logger.warning(f"[SyncClient] 获取用户信息失败: {e}")
             return None
 
+    def _api_login_status(self) -> Optional[bool]:
+        """用小红书官方 API 权威判定登录态（在浏览器页内 fetch，用真实会话 cookie）。
+
+        返回 ``True``=已登录 / ``False``=登录已过期 / ``None``=不可达(降级 DOM 启发式)。
+
+        为什么需要它：``DETECT_LOGIN_JS`` 是 DOM 启发式，explore 页登出态下仍会渲染
+        笔记内容，容易把"未登录"误判成"已登录"(假阳性)—— 实测过期 cookie 也被判 valid，
+        导致 cookie_status 说谎、发布静默失败。这里直接问 ``/user/me`` 拿地面真值。
+        check_login 在 start() 后调用，此时 self.page 已在 www.xiaohongshu.com，
+        fetch 同站子域 edith.xiaohongshu.com 合法(小红书自家前端亦如此调用)。
+        """
+        js = """async () => {
+          try {
+            const r = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me',
+                                  {credentials: 'include'});
+            const j = await r.json();
+            if (j && j.success && j.data && j.data.guest === false) return 'valid';
+            if (j && (j.code === -100 || String(j.msg || '').indexOf('登录已过期') >= 0)) return 'expired';
+            return 'unknown';
+          } catch (e) { return 'error'; }
+        }"""
+        try:
+            res = self.page.evaluate(js)
+        except Exception as e:
+            logger.warning(f"[api_login] 验活 API 调用异常，降级 DOM 启发式: {e}")
+            return None
+        if res == "valid":
+            return True
+        if res == "expired":
+            return False
+        logger.warning(f"[api_login] 验活 API 未决(res={res})，降级 DOM 启发式")
+        return None
+
     def check_login(self) -> Dict[str, Any]:
         """检查登录态,返回 ``{status, user_info}``。
 
         status: 'valid'(已登录,附 user_info)| 'invalid'(未登录)| 'captcha'(验证码拦截)。
+
+        判定优先级：官方 API 地面真值 > DOM 启发式。API 明确过期 → 直接 invalid；
+        API 明确登录 → valid；API 不可达才回落到原 DOM 启发式(避免 API 抖动误杀好号)。
         """
         if self._is_captcha():
             return {"status": "captcha", "user_info": None}
 
+        api = self._api_login_status()
+        if api is False:
+            return {"status": "invalid", "user_info": None}
+
         detect = self._last_detect or self._detect_login()
-        if not detect.get("is_logged_in"):
+        # API 不可达时才用 DOM 结论把关；API 明确登录(True)则不被 DOM 假阴性否决。
+        if api is None and not detect.get("is_logged_in"):
             return {"status": "invalid", "user_info": None}
 
         user_info = self._get_user_info(detect.get("profile_url"))
