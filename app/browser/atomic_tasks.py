@@ -1150,110 +1150,49 @@ class XHSPublishAtomicTasks:
             if tags and len(tags) > 0:
                 # 去重 + 截断 ≤10(纯函数)
                 tags = dedupe_topics(tags)
-                logger.info(f"6.1 添加话题标签: {tags}")
-
-                content_input_selectors = [
-                    "div[contenteditable='true']",
-                    "div[data-placeholder*='正文']",
-                    ".content-input",
-                    "textarea[placeholder*='正文']",
-                ]
-                content_input = self._find_element_with_retry(
-                    content_input_selectors, timeout=5,
-                    intent_key="content_input", intent_desc="笔记正文输入框",
+                # 用 JS 把话题作为纯 #标签快速追加到正文末尾(不 click / 不等下拉 /
+                # 不走慢速自愈)。坑:旧版逐个 click+type+等下拉+回删要几十秒,而小红书
+                # 编辑器只驻留几十秒就自动存草稿+重置回视频 tab —— 慢 step6 会让后续 step7
+                # 点发布落到已重置的页面(实测发布超时)。故这里瞬时追加,保住发布窗口。
+                # 纯文本 #tag 不是下拉精选话题,但足以发布;精选话题为次要,让位于"能发出去"。
+                tag_str = " " + " ".join(
+                    (t if str(t).startswith("#") else f"#{str(t).lstrip('#')}")
+                    for t in tags
                 )
-
-                if content_input:
-                    try:
-                        self.human.click(content_input, reason="聚焦内容框添加标签")
-                        self.human.press_key("Control+End", reason="移到内容最底部")
-                        self.human.press_key("Enter", reason="换行")
-
-                        for tag_idx, tag in enumerate(tags):
-                            tag_text = tag if tag.startswith("#") else f"#{tag}"
-                            tag_name = tag.lstrip("#")
-                            self.human.type_text(None, tag_text, click_first=False)
-                            logger.info(f"   [{tag_idx+1}/{len(tags)}] 输入标签: {tag_text}")
-                            self.human.wait(1.5, 2.5, context="等待话题下拉")
-                            if tag_idx == 0:
-                                self._take_screenshot(f"06_tag_dropdown_{tag_idx+1}")
-
-                            # JS 定位下拉选项坐标(精确/完整前缀匹配),再用真实鼠标点击
-                            option_pos = self.page.evaluate("""
-                                (tagName) => {
-                                    const allElements = document.querySelectorAll('*');
-                                    const candidates = [];
-                                    for (const el of allElements) {
-                                        const style = window.getComputedStyle(el);
-                                        const pos = style.position;
-                                        if (pos !== 'absolute' && pos !== 'fixed') continue;
-                                        if (style.display === 'none' || style.visibility === 'hidden') continue;
-                                        if (el.closest('[contenteditable]')) continue;
-                                        const rect = el.getBoundingClientRect();
-                                        if (rect.width > 800 || rect.height > 600) continue;
-                                        if (rect.width < 10 || rect.height < 10) continue;
-                                        const text = el.innerText || '';
-                                        if (text.includes(tagName) || text.includes('#' + tagName)) {
-                                            candidates.push({ el, text: text.substring(0, 100), area: rect.width * rect.height });
-                                        }
-                                    }
-                                    if (candidates.length === 0) return {success: false, reason: 'no_floating_layer'};
-                                    candidates.sort((a, b) => a.area - b.area);
-                                    const target = candidates[0];
-                                    const items = target.el.querySelectorAll('div, li, a, span, p');
-                                    const okRect = (it) => { const r = it.getBoundingClientRect();
-                                        return (r.width > 5 && r.height > 5 && r.height < 80)
-                                            ? {x: r.x + r.width/2, y: r.y + r.height/2} : null; };
-                                    // 第一轮:精确相等优先
-                                    for (const item of items) {
-                                        const itemText = (item.innerText || '').trim();
-                                        if (!itemText || itemText.length > 50) continue;
-                                        const cleanText = itemText.replace(/^#/, '').trim();
-                                        if (cleanText === tagName) {
-                                            const c = okRect(item);
-                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
-                                        }
-                                    }
-                                    // 第二轮:选项以完整 tagName 开头(剩余应是统计文案,非汉字延展)
-                                    for (const item of items) {
-                                        const itemText = (item.innerText || '').trim();
-                                        if (!itemText || itemText.length > 50) continue;
-                                        const cleanText = itemText.replace(/^#/, '').trim();
-                                        if (cleanText.startsWith(tagName) && cleanText.length > tagName.length) {
-                                            const rest = cleanText.slice(tagName.length);
-                                            if (/^[一-龥]/.test(rest)) continue;
-                                            const c = okRect(item);
-                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
-                                        }
-                                    }
-                                    return {success: false, reason: 'no_exact_match'};
-                                }
-                            """, tag_name)
-
-                            if option_pos and option_pos.get("success"):
-                                ox, oy = option_pos["x"], option_pos["y"]
-                                matched = option_pos.get("matched", "")
-                                self.human.click((ox, oy), reason=f"点击话题选项: {matched[:20]}")
-                                logger.info(f"   ✓ 话题下拉列表点击成功: '{matched}'")
-                                logger.info(f"   ✓ 标签完成: {tag_text}")
-                            else:
-                                # 无精确匹配:删掉刚输入的 "#tagname",绝不留残缺文本
-                                reason = option_pos.get("reason", "unknown") if option_pos else "error"
-                                logger.info(f"   下拉无精确匹配({reason}),回删该标签不插入")
-                                try:
-                                    self.page.keyboard.press("Escape")
-                                    for _ in range(len(tag_text)):
-                                        self.page.keyboard.press("Backspace")
-                                except Exception as _be:
-                                    logger.info(f"   回删标签异常: {_be}")
-
-                            self.human.wait(0.8, 1.5, context="标签处理")
-
+                logger.info(f"6.1 JS 快速追加话题标签: {tag_str.strip()}")
+                try:
+                    ok = self.page.evaluate(r"""(args) => {
+                        const [sels, suffix] = args;
+                        for (const sel of sels) {
+                            const el = document.querySelector(sel);
+                            if (!el) continue;
+                            if (el.tagName.toLowerCase() === 'textarea') {
+                                const setter = Object.getOwnPropertyDescriptor(
+                                    window.HTMLTextAreaElement.prototype, 'value').set;
+                                setter.call(el, (el.value || '') + suffix);
+                            } else {
+                                el.focus();
+                                el.textContent = (el.textContent || '') + suffix;
+                            }
+                            el.dispatchEvent(new InputEvent('input', {bubbles: true, data: suffix, inputType: 'insertText'}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            return true;
+                        }
+                        return false;
+                    }""", [
+                        ["div[contenteditable='true'][data-placeholder*='正文']",
+                         "div[contenteditable='true'][placeholder*='正文']",
+                         "textarea[placeholder*='正文']",
+                         "div[contenteditable='true']"],
+                        tag_str,
+                    ])
+                    if ok:
+                        logger.info("✓ 话题标签已快速追加(纯文本 #tag)")
                         options_set.append("tags")
-                    except Exception as e:
-                        logger.warning(f"添加标签失败: {e}")
-                else:
-                    logger.warning("未找到内容输入框,无法添加标签")
+                    else:
+                        logger.warning("未找到正文框,跳过话题(不阻断发布)")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"JS 追加话题失败({e}),跳过话题不阻断发布")
 
             if location:
                 logger.info(f"6.2 设置地点: {location}")
