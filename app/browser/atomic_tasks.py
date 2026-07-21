@@ -625,44 +625,43 @@ class XHSPublishAtomicTasks:
                 ".upload-input",
                 "input.upload-input",
             ]
-            upload_input = self._find_element_with_retry(
-                upload_input_selectors, timeout=10, must_be_visible=False,
-                intent_key="upload_image_input", intent_desc="上传图片的 file input",
-            )
-            if not upload_input:
-                return {
-                    "success": False,
-                    "error": "未找到文件上传input元素",
-                    "screenshot": self._take_screenshot("03_02_no_upload_input"),
-                }
+            # 2.4 上传文件:优先点「上传图片」按钮走 file_chooser。
+            # 坑:新版编辑器直接 set_input_files 到隐藏 input 只存草稿 + 页面重置回视频
+            # tab、编辑器不驻留;而点按钮触发的 file_chooser 会正常进入并停留在图文编辑器
+            # (标题框 placeholder「填写标题会有更多赞哦」出现)。失败再回退 set_input_files。
+            logger.info(f"2.4 点「上传图片」按钮上传 {len(image_paths)} 张(file_chooser)...")
+            uploaded_ok = False
+            try:
+                with self.page.expect_file_chooser(timeout=8000) as fc_info:
+                    clicked = False
+                    for sel in ["button:has-text('上传图片')", "text=上传图片"]:
+                        try:
+                            self.page.click(sel, timeout=4000)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        raise RuntimeError("未找到「上传图片」按钮")
+                fc_info.value.set_files(image_paths)
+                logger.info("✓ file_chooser 已设置全部图片")
+                uploaded_ok = True
+            except Exception as e:
+                logger.warning(f"file_chooser 上传失败({e}),回退 set_input_files 到隐藏 input")
 
-            # 2.4 上传文件(input 可能不带 multiple → 逐张上传)
-            logger.info(f"2.4 上传 {len(image_paths)} 张图片...")
-            has_multiple = self.page.evaluate("(el) => el.hasAttribute('multiple')", upload_input)
-
-            if has_multiple:
-                logger.info("✓ input 支持 multiple,一次性上传所有图片")
+            if not uploaded_ok:
+                upload_input = self._find_element_with_retry(
+                    upload_input_selectors, timeout=10, must_be_visible=False,
+                    intent_key="upload_image_input", intent_desc="上传图片的 file input",
+                )
+                if not upload_input:
+                    return {
+                        "success": False,
+                        "error": "未找到文件上传input元素",
+                        "screenshot": self._take_screenshot("03_02_no_upload_input"),
+                    }
                 upload_input.set_input_files(image_paths)
-                logger.info("✓ 所有文件已设置到 input 元素")
-            else:
-                logger.info("⚠️ input 不支持 multiple,改为逐张上传")
-                for i, img_path in enumerate(image_paths):
-                    logger.info(f"   上传第 {i+1}/{len(image_paths)} 张: {os.path.basename(img_path)}")
-                    if i > 0:
-                        upload_input = self._find_element_with_retry(
-                            upload_input_selectors, timeout=10, must_be_visible=False,
-                            intent_key="upload_image_input", intent_desc="上传图片的 file input",
-                        )
-                        if not upload_input:
-                            return {
-                                "success": False,
-                                "error": f"上传第 {i+1} 张图片时未找到 file input",
-                                "screenshot": self._take_screenshot(f"04_no_input_img{i+1}"),
-                            }
-                    upload_input.set_input_files(img_path)
-                    logger.info(f"   ✓ 第 {i+1} 张已上传")
-                    self.human.wait(1.5, 2.5, context="图片上传间隔")
-                logger.info(f"✓ 全部 {len(image_paths)} 张图片上传完成")
+                logger.info("✓ (回退)set_input_files 完成")
 
             self.page.wait_for_load_state("domcontentloaded", timeout=10000)
             self.human.wait(1.5, 2.5, context="上传完成")
@@ -699,6 +698,15 @@ class XHSPublishAtomicTasks:
         logger.info("=" * 60)
 
         try:
+            # 新版 file_chooser 上传后编辑器即时加载 —— 先快速检测，命中直接成功。
+            # 关键:小红书会在编辑器打开几十秒后自动存草稿 + 重置回视频 tab，慢速
+            # _find_element_with_retry(自愈 LLM)期间会错过窗口(实测 step2 结束时
+            # 编辑器在、step3 慢检时已重置)。故这里抢先快速判定。
+            if self._check_edit_page_loaded():
+                logger.info("✓ 编辑器已即时加载(file_chooser 上传后),直接进入编辑")
+                self._take_screenshot("05_editor_ready_fast")
+                return {"success": True, "edit_page_loaded": True}
+
             logger.info("3.1 等待编辑界面加载...")
             edit_indicators = [
                 "input[placeholder*='标题']",
@@ -777,30 +785,26 @@ class XHSPublishAtomicTasks:
             }
 
     def _check_edit_page_loaded(self) -> bool:
-        """检查图文笔记编辑界面是否已加载。
+        """检查图文笔记编辑界面是否已加载(快速 DOM 检测)。
 
-        以**标题输入框**为图文编辑器的唯一标志 —— 不再接受宽松的裸
-        ``div[contenteditable='true']``：视频 tab / 其它页面也可能有 contenteditable，
-        会把"停留在视频 tab"误判成"编辑器已加载"(step3 假阳性根源，实测据此漏判)。
-        另收带明确"正文/内容"占位的输入框作为辅助信号。
+        以**标题输入框**为图文编辑器唯一标志(新版占位「填写标题会有更多赞哦」，
+        旧版「添加标题」等)。不接受宽松裸 ``contenteditable``(视频 tab 也有 → 假阳性)。
+        用 page.evaluate 一次性 DOM 存在性判定(不逐个 wait/self-heal，抢在小红书自动
+        存草稿+重置回视频 tab 之前命中——实测编辑器驻留窗口只有几十秒)。
         """
-        strict_selectors = [
-            "input[placeholder*='标题']",
-            "input[placeholder*='填写标题']",
-            "input[placeholder*='添加标题']",
-            "textarea[placeholder*='正文']",
-            "textarea[placeholder*='内容']",
-            "div[contenteditable='true'][placeholder*='正文']",
-            "div[contenteditable='true'][placeholder*='内容']",
-        ]
-        for selector in strict_selectors:
-            try:
-                for elem in self.page.query_selector_all(selector):
-                    if elem.is_visible():
-                        return True
-            except Exception:
-                continue
-        return False
+        try:
+            return bool(self.page.evaluate("""() => {
+                const q = s => document.querySelector(s);
+                const title = q("input[placeholder*='标题']") || q("textarea[placeholder*='标题']");
+                const body = q("[contenteditable='true'][data-placeholder*='正文']")
+                    || q("[contenteditable='true'][placeholder*='正文']")
+                    || q("textarea[placeholder*='正文']")
+                    || q("div[contenteditable='true']");
+                // 标题框是图文编辑器的确定标志；正文框作为辅助
+                return !!title || (!!body && document.body.innerText.includes('填写标题'));
+            }"""))
+        except Exception:
+            return False
 
     def _image_mode_ready(self) -> bool:
         """是否已进入「上传图文」模式(而非默认「上传视频」)。
@@ -990,31 +994,48 @@ class XHSPublishAtomicTasks:
         实测复现均死在此）。故**每次尝试都重新定位取新句柄**；命中脱离异常则短暂等待
         （等编辑器渲染稳定）后重定位重试，而非死抱一个已脱离的旧句柄。
         """
+        css_selectors = [s for s in selectors if not s.startswith("//")]
+        # 根治办法:JS 原生 value setter + 触发 input/change 事件,不 click/focus。
+        # click/focus 才会触发小红书 React 编辑器重渲染把 input 从 DOM 脱离
+        # (locator.fill/type_text 都因此超时),而 JS 赋值同步瞬时完成、无脱离窗口,
+        # React 靠 input 事件感知受控值。input/textarea 用 value setter;
+        # contenteditable 正文框用 textContent + input 事件。
+        js = r"""(args) => {
+            const [sels, val] = args;
+            for (const sel of sels) {
+                const el = document.querySelector(sel);
+                if (!el) continue;
+                const tag = el.tagName.toLowerCase();
+                if (tag === 'input' || tag === 'textarea') {
+                    const proto = tag === 'input'
+                        ? window.HTMLInputElement.prototype
+                        : window.HTMLTextAreaElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                    setter.call(el, val);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return sel;
+                } else {
+                    el.focus();
+                    el.textContent = val;
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: val, inputType: 'insertText'}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return sel;
+                }
+            }
+            return null;
+        }"""
         last_err: Optional[str] = None
         for attempt in range(1, tries + 1):
-            el = self._find_element_with_retry(
-                selectors, timeout=10, intent_key=intent_key, intent_desc=intent_desc,
-            )
-            if not el:
-                return False, f"未找到{intent_desc or '输入框'}"
             try:
-                self.human.type_text(el, value, clear_first=True)
-                return True, None
+                hit = self.page.evaluate(js, [css_selectors, value])
+                if hit:
+                    logger.info(f"[{intent_key}] JS 填入成功 selector={hit}")
+                    return True, None
+                last_err = f"未找到{intent_desc or '输入框'}"
             except Exception as e:  # noqa: BLE001
                 last_err = str(e)
-                detached = "not attached" in last_err.lower()
-                logger.warning(
-                    f"[{intent_key}] 填入失败(第 {attempt}/{tries} 次)"
-                    f"{'[DOM脱离,重定位重试]' if detached else ''}: {e}"
-                )
-                if not detached:
-                    # 非脱离异常：同句柄降级 fill 兜底一次(句柄可能仍有效)
-                    try:
-                        el.fill(value)
-                        return True, None
-                    except Exception as e2:  # noqa: BLE001
-                        last_err = str(e2)
-                self.human.wait(0.6, 1.2, context="填入重试")
+            self.human.wait(0.4, 0.8, context="填入重试")
         return False, last_err
 
     def step5_fill_content(self, title: str, content: str) -> Dict[str, Any]:
