@@ -634,9 +634,18 @@ class XHSPublishAtomicTasks:
             try:
                 with self.page.expect_file_chooser(timeout=8000) as fc_info:
                     clicked = False
+                    # 合规:拟人化点「上传图片」按钮(定位坐标 → human.click 真实按压),
+                    # 真实用户手势才能触发原生 file_chooser,禁裸 page.click。
                     for sel in ["button:has-text('上传图片')", "text=上传图片"]:
                         try:
-                            self.page.click(sel, timeout=4000)
+                            bb = self.page.locator(sel).first.bounding_box(timeout=4000)
+                            if not bb:
+                                continue
+                            self.human.click(
+                                (bb["x"] + bb["width"] * 0.5,
+                                 bb["y"] + bb["height"] * 0.5),
+                                reason="上传图片按钮",
+                            )
                             clicked = True
                             break
                         except Exception:
@@ -995,32 +1004,19 @@ class XHSPublishAtomicTasks:
         （等编辑器渲染稳定）后重定位重试，而非死抱一个已脱离的旧句柄。
         """
         css_selectors = [s for s in selectors if not s.startswith("//")]
-        # 根治办法:JS 原生 value setter + 触发 input/change 事件,不 click/focus。
-        # click/focus 才会触发小红书 React 编辑器重渲染把 input 从 DOM 脱离
-        # (locator.fill/type_text 都因此超时),而 JS 赋值同步瞬时完成、无脱离窗口,
-        # React 靠 input 事件感知受控值。input/textarea 用 value setter;
-        # contenteditable 正文框用 textContent + input 事件。
-        js = r"""(args) => {
-            const [sels, val] = args;
+        # 拟人化输入(合规硬要求:发布链路所有交互必须走 SyncHumanActions,禁止 JS 注入
+        # 赋值/dispatchEvent —— JS 直填是"AI 托管"检测的典型信号,曾致账号被判违规禁发)。
+        # 做法:只**读取**输入框坐标(不持 ElementHandle,规避 React 聚焦重渲染导致的旧句柄
+        # "not attached" 脱离),用 human.click(坐标) 拟人聚焦(贝塞尔移动+悬停+真实按压),
+        # 再 human.type_text 逐字键盘输入(随机延迟/偶尔打错退格/标点稍慢)。真人点击即触发的
+        # 重渲染由 React 自身保留焦点到新节点,键盘输入照常落入 —— 与真人打字不可区分。
+        box_js = r"""(sels) => {
             for (const sel of sels) {
                 const el = document.querySelector(sel);
                 if (!el) continue;
-                const tag = el.tagName.toLowerCase();
-                if (tag === 'input' || tag === 'textarea') {
-                    const proto = tag === 'input'
-                        ? window.HTMLInputElement.prototype
-                        : window.HTMLTextAreaElement.prototype;
-                    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                    setter.call(el, val);
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return sel;
-                } else {
-                    el.focus();
-                    el.textContent = val;
-                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: val, inputType: 'insertText'}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return sel;
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                    return {x: r.x, y: r.y, w: r.width, h: r.height, sel: sel};
                 }
             }
             return null;
@@ -1028,14 +1024,23 @@ class XHSPublishAtomicTasks:
         last_err: Optional[str] = None
         for attempt in range(1, tries + 1):
             try:
-                hit = self.page.evaluate(js, [css_selectors, value])
-                if hit:
-                    logger.info(f"[{intent_key}] JS 填入成功 selector={hit}")
-                    return True, None
-                last_err = f"未找到{intent_desc or '输入框'}"
+                box = self.page.evaluate(box_js, css_selectors)
+                if not box:
+                    last_err = f"未找到{intent_desc or '输入框'}"
+                    self.human.wait(0.4, 0.8, context="定位输入框重试")
+                    continue
+                cx = box["x"] + box["w"] * 0.5
+                cy = box["y"] + box["h"] * 0.5
+                # 拟人化聚焦:坐标点击(不碰句柄,规避脱离),而非 element.click()/focus()
+                self.human.click((cx, cy), reason=f"聚焦{intent_desc or intent_key}")
+                self.human.wait(0.2, 0.5, context="聚焦后停顿")
+                # 拟人化逐字键盘输入(已聚焦,不再重复 click)
+                self.human.type_text(None, value, click_first=False)
+                logger.info(f"[{intent_key}] 拟人输入成功 selector={box['sel']}({len(value)}字)")
+                return True, None
             except Exception as e:  # noqa: BLE001
                 last_err = str(e)
-            self.human.wait(0.4, 0.8, context="填入重试")
+            self.human.wait(0.5, 1.0, context="填入重试")
         return False, last_err
 
     def step5_fill_content(self, title: str, content: str) -> Dict[str, Any]:
@@ -1159,40 +1164,39 @@ class XHSPublishAtomicTasks:
                     (t if str(t).startswith("#") else f"#{str(t).lstrip('#')}")
                     for t in tags
                 )
-                logger.info(f"6.1 JS 快速追加话题标签: {tag_str.strip()}")
+                logger.info(f"6.1 拟人化追加话题标签: {tag_str.strip()}")
+                # 合规:走 SyncHumanActions,禁 JS 注入。定位正文框坐标(只读)→ 拟人点击聚焦
+                # → Ctrl+End 移到正文末尾 → 逐字键盘输入 #标签(纯文本 tag,足以发布)。
                 try:
-                    ok = self.page.evaluate(r"""(args) => {
-                        const [sels, suffix] = args;
+                    box = self.page.evaluate(r"""(sels) => {
                         for (const sel of sels) {
                             const el = document.querySelector(sel);
                             if (!el) continue;
-                            if (el.tagName.toLowerCase() === 'textarea') {
-                                const setter = Object.getOwnPropertyDescriptor(
-                                    window.HTMLTextAreaElement.prototype, 'value').set;
-                                setter.call(el, (el.value || '') + suffix);
-                            } else {
-                                el.focus();
-                                el.textContent = (el.textContent || '') + suffix;
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                return {x: r.x, y: r.y, w: r.width, h: r.height};
                             }
-                            el.dispatchEvent(new InputEvent('input', {bubbles: true, data: suffix, inputType: 'insertText'}));
-                            el.dispatchEvent(new Event('change', {bubbles: true}));
-                            return true;
                         }
-                        return false;
+                        return null;
                     }""", [
-                        ["div[contenteditable='true'][data-placeholder*='正文']",
-                         "div[contenteditable='true'][placeholder*='正文']",
-                         "textarea[placeholder*='正文']",
-                         "div[contenteditable='true']"],
-                        tag_str,
+                        "div[contenteditable='true'][data-placeholder*='正文']",
+                        "div[contenteditable='true'][placeholder*='正文']",
+                        "textarea[placeholder*='正文']",
+                        "div[contenteditable='true']",
                     ])
-                    if ok:
-                        logger.info("✓ 话题标签已快速追加(纯文本 #tag)")
+                    if box:
+                        cx = box["x"] + box["w"] * 0.5
+                        cy = box["y"] + box["h"] * 0.5
+                        self.human.click((cx, cy), reason="聚焦正文框(追加话题)")
+                        self.human.wait(0.2, 0.5, context="聚焦后停顿")
+                        self.human.press_key("Control+End", reason="光标移到正文末尾")
+                        self.human.type_text(None, tag_str, click_first=False)
+                        logger.info("✓ 话题标签已拟人化追加(纯文本 #tag)")
                         options_set.append("tags")
                     else:
                         logger.warning("未找到正文框,跳过话题(不阻断发布)")
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"JS 追加话题失败({e}),跳过话题不阻断发布")
+                    logger.warning(f"拟人化追加话题失败({e}),跳过话题不阻断发布")
 
             if location:
                 logger.info(f"6.2 设置地点: {location}")
@@ -1292,10 +1296,9 @@ class XHSPublishAtomicTasks:
                     cx = target['x'] + target['w'] / 2
                     cy = target['y'] + target['h'] / 2
                     self.human.wait(0.3, 0.8, context="确认发布内容")
-                    self.page.mouse.move(cx, cy)
-                    time.sleep(0.2)
-                    self.page.mouse.click(cx, cy)
-                    logger.info(f"✓ [{click_strategy}] 鼠标点击 ({cx:.0f},{cy:.0f})")
+                    # 拟人化点击(贝塞尔移动+悬停+真实按压),禁裸 mouse.click
+                    self.human.click((cx, cy), reason=f"发布按钮({click_strategy})")
+                    logger.info(f"✓ [{click_strategy}] 拟人点击 ({cx:.0f},{cy:.0f})")
                     publish_clicked = True
                 elif diag.get('hostFound') and diag.get('host', {}).get('w', 0) > 0:
                     # closed shadow:playwright/JS 都拿不到内部按钮坐标。
@@ -1363,20 +1366,16 @@ class XHSPublishAtomicTasks:
                     locate = "颜色定位" if rc else "0.59回退"
                     logger.info(f"[closed shadow] 发布按钮目标=({tx:.0f},{ty:.0f}) [{locate}]")
 
+                    # 合规:闭合 shadow 发布按钮也全部走拟人化点击(贝塞尔移动+悬停+真实按压),
+                    # 禁裸 mouse.click / JS dispatchEvent(合成事件是 AI 检测信号)。实测拟人点击
+                    # 能被按钮识别(点后弹出 XHS 回执 toast),多次拟人点击不同落点作兜底。
                     attempts = [
-                        ("mouse.click", lambda: (self.page.mouse.move(tx, ty),
-                            time.sleep(0.2), self.page.mouse.click(tx, ty))),
-                        ("mouse.down/up", lambda: (self.page.mouse.move(tx, ty),
-                            self.page.mouse.down(), time.sleep(0.12), self.page.mouse.up())),
-                        ("dblclick", lambda: self.page.mouse.dblclick(tx, ty)),
-                        ("0.59坐标click", lambda: self.page.mouse.click(fx, fy)),
-                        ("JS host dispatch", lambda: self.page.evaluate(
-                            "([x,y])=>{const ho=document.querySelector('xhs-publish-btn');"
-                            "if(!ho)return;try{ho.click()}catch(e){}"
-                            "for(const t of ['pointerdown','mousedown','pointerup',"
-                            "'mouseup','click']){ho.dispatchEvent(new MouseEvent(t,"
-                            "{bubbles:true,composed:true,clientX:x,clientY:y}));}}",
-                            [tx, ty])),
+                        ("拟人点击", lambda: self.human.click(
+                            (tx, ty), reason="发布(closed shadow)")),
+                        ("拟人点击-重试", lambda: self.human.click(
+                            (tx, ty), reason="发布(closed shadow 重试)")),
+                        ("拟人点击-0.59", lambda: self.human.click(
+                            (fx, fy), reason="发布(closed shadow 0.59)")),
                     ]
                     for name, act in attempts:
                         try:
