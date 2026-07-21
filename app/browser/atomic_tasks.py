@@ -805,17 +805,23 @@ class XHSPublishAtomicTasks:
     def _image_mode_ready(self) -> bool:
         """是否已进入「上传图文」模式(而非默认「上传视频」)。
 
-        可靠信号:出现 ``accept`` 含 image 的 file input(图文上传入口)——视频 tab 的
-        file input accept 是视频，据此区分，避免把图片塞进视频入口还误报成功。
-        辅助:标题框已出现(上传后编辑器)。
+        用**页面文本标志**判定(小红书图文上传区是按钮触发、file input 隐藏且不带
+        accept=image，靠 input 选择器判不出，实测会假阴性把已切好的图文模式误判成
+        未切、白重试到驱动崩溃)。图文模式独有文案:"上传图片/文字配图/写文字生成图片
+        /图片格式/图片分辨率"；已进编辑器(标题框)也算。反向:仍以"拖拽视频到此"为主 = 视频模式。
         """
         try:
-            if self.page.evaluate(
-                "() => !!document.querySelector(\"input[type='file'][accept*='image']\")"
-            ):
-                return True
+            body = self.page.inner_text("body")
         except Exception:
-            pass
+            body = ""
+        image_signals = (
+            "写文字生成图片" in body
+            or "文字配图" in body
+            or ("图片格式" in body and "图片分辨率" in body)
+            or ("上传图片" in body and "拖拽视频到此" not in body)
+        )
+        if image_signals:
+            return True
         return self._check_edit_page_loaded()
 
     def _click_image_text_tab(self) -> bool:
