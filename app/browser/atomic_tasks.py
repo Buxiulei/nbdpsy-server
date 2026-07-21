@@ -883,6 +883,50 @@ class XHSPublishAtomicTasks:
 
     # ==================== 步骤5: 填写标题和内容 ====================
 
+    def _type_into_robust(
+        self,
+        selectors: List[str],
+        value: str,
+        *,
+        intent_key: Optional[str] = None,
+        intent_desc: Optional[str] = None,
+        tries: int = 3,
+    ) -> tuple:
+        """定位并填入文本，抗 DOM 脱离。返回 ``(ok: bool, err: Optional[str])``。
+
+        坑：小红书创作页编辑器一聚焦即 React 重渲染，把先前 ``_find_element_with_retry``
+        拿到的 ElementHandle 指向的节点从 DOM 脱离——此后旧句柄无论 ``type_text`` 还是
+        降级 ``fill`` 都抛 ``Element is not attached to the DOM``（历史 job2、account1
+        实测复现均死在此）。故**每次尝试都重新定位取新句柄**；命中脱离异常则短暂等待
+        （等编辑器渲染稳定）后重定位重试，而非死抱一个已脱离的旧句柄。
+        """
+        last_err: Optional[str] = None
+        for attempt in range(1, tries + 1):
+            el = self._find_element_with_retry(
+                selectors, timeout=10, intent_key=intent_key, intent_desc=intent_desc,
+            )
+            if not el:
+                return False, f"未找到{intent_desc or '输入框'}"
+            try:
+                self.human.type_text(el, value, clear_first=True)
+                return True, None
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                detached = "not attached" in last_err.lower()
+                logger.warning(
+                    f"[{intent_key}] 填入失败(第 {attempt}/{tries} 次)"
+                    f"{'[DOM脱离,重定位重试]' if detached else ''}: {e}"
+                )
+                if not detached:
+                    # 非脱离异常：同句柄降级 fill 兜底一次(句柄可能仍有效)
+                    try:
+                        el.fill(value)
+                        return True, None
+                    except Exception as e2:  # noqa: BLE001
+                        last_err = str(e2)
+                self.human.wait(0.6, 1.2, context="填入重试")
+        return False, last_err
+
     def step5_fill_content(self, title: str, content: str) -> Dict[str, Any]:
         """步骤5: 填写标题和内容。
 
@@ -915,7 +959,6 @@ class XHSPublishAtomicTasks:
             logger.warning(f"标题显示长度超 {XHS_MAX_TITLE_DISPLAY},硬截断: '{_title_before}' -> '{title}'")
 
         try:
-            logger.info("5.1 查找标题输入框...")
             title_selectors = [
                 "input[placeholder*='标题']",
                 "input[placeholder*='填写标题']",
@@ -923,27 +966,20 @@ class XHSPublishAtomicTasks:
                 "input.title-input",
                 "input[type='text']",
             ]
-            title_input = self._find_element_with_retry(
-                title_selectors, timeout=10,
+            logger.info(f"5.1 填写标题: {title} ({len(title)}字符)")
+            ok, err = self._type_into_robust(
+                title_selectors, title,
                 intent_key="title_input", intent_desc="笔记标题输入框",
             )
-            if not title_input:
+            if not ok:
                 return {
                     "success": False,
-                    "error": "未找到标题输入框",
-                    "screenshot": self._take_screenshot("09_no_title_input"),
+                    "error": f"填写标题失败: {err}",
+                    "screenshot": self._take_screenshot("09_title_fill_failed"),
                 }
-
-            logger.info(f"5.2 填写标题: {title} ({len(title)}字符)")
-            try:
-                self.human.type_text(title_input, title, clear_first=True)
-            except Exception as e:
-                logger.error(f"拟人化标题输入失败: {e},降级 fill")
-                title_input.fill(title)
             self._take_screenshot("09_title_filled")
             logger.info(f"✓ 标题已填写 ({len(title)}字符)")
 
-            logger.info("5.3 查找内容输入框...")
             content_selectors = [
                 "div[contenteditable='true'][placeholder*='正文']",
                 "div[contenteditable='true'][placeholder*='添加']",
@@ -953,23 +989,17 @@ class XHSPublishAtomicTasks:
                 "div.c-input[contenteditable='true']",
                 "div[contenteditable='true']",
             ]
-            content_input = self._find_element_with_retry(
-                content_selectors, timeout=10,
+            logger.info(f"5.2 填写内容({len(content)}字符)...")
+            ok, err = self._type_into_robust(
+                content_selectors, content,
                 intent_key="content_input", intent_desc="笔记正文输入框",
             )
-            if not content_input:
+            if not ok:
                 return {
                     "success": False,
-                    "error": "未找到内容输入框",
-                    "screenshot": self._take_screenshot("10_no_content_input"),
+                    "error": f"填写内容失败: {err}",
+                    "screenshot": self._take_screenshot("10_content_fill_failed"),
                 }
-
-            logger.info(f"5.4 填写内容({len(content)}字符)...")
-            try:
-                self.human.type_text(content_input, content, clear_first=True)
-            except Exception as e:
-                logger.error(f"拟人化内容输入失败: {e},降级 fill")
-                content_input.fill(content)
             self._take_screenshot("10_content_filled")
             logger.info("✓ 内容已填写")
 
