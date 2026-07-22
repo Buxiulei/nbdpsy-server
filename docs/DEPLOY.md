@@ -12,7 +12,7 @@
 - [ ] **视频 still_image 渲染复用宿主 Playwright chromium**（`playwright==1.60.0` 已在 requirements）：首次 `.venv/bin/python -m playwright install chromium`（remake 的标题/文字卡截图用；不开 remake 可不装）。
 - [ ] 反向代理已就绪，能把 `PUBLIC_BASE_URL` 代到本机 `API_PORT`。
 
-## 1. 配置 `.env`（照 `.env.example` 全部字段，现 44 项）
+## 1. 配置 `.env`（照 `.env.example` 全部字段，现 53 项）
 
 - [ ] **`SECRET_KEY`** 设为**非默认**的高熵值。**这是硬闸**：`DEBUG=False` 且 `SECRET_KEY` 仍是默认值 `change-me-...` 时进程启动即 fail-fast 退出（防止用源码公开的 key 加密全量 cookie）。**一旦设定不可再改**——换 key 会让存量 cookie 全部解不出且静默返空。
 - [ ] **`ROOT_ADMIN_APIKEY`** 设好（引导管理员的 apikey）。留空则启动时随机生成并在日志打印一次——生产建议显式设，别漏看日志。
