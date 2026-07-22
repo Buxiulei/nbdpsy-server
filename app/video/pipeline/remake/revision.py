@@ -1,7 +1,7 @@
 """成片修订能力 v1 纯逻辑层（spec §B）：自然语言意见 → EditOp 清单 → 应用到台词/参数覆盖。
 
 本模块只做纯逻辑，不碰 job_store / tasks / api（B4 接线由集成任务做）。三件产物：
-  1. parse_instructions —— 走 get_llm("video_remake") 把自然语言意见解析成 EditOp dict 列表；
+  1. parse_instructions —— 走 llm_chat 把自然语言意见解析成 EditOp dict 列表；
   2. validate_edit_plan —— 校验 EditOp 清单（op type / index 越界 / scene_id / 未知键）；
   3. apply_edits（B2）—— 纯函数把 EditOp 作用到 rewritten 副本 + 写参数覆盖结构。
 
@@ -124,7 +124,7 @@ def _extract_json_array(content: str):
 
 async def parse_instructions(instructions: str, rewritten: list[dict],
                              storyboard: dict) -> list[dict]:
-    """自然语言修改意见 → EditOp dict 列表（走 get_llm("video_remake")）。
+    """自然语言修改意见 → EditOp dict 列表（走 llm_chat）。
 
     LLM 输出一个 JSON 数组。解析失败（无数组/非法 JSON/非数组）或空清单 → raise EditPlanError，
     .detail 为 LLM 原始说明（API 层据此返 400，见 spec §B2）。本函数只负责解析结构，
