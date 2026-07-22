@@ -8,7 +8,7 @@
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.context import AccessDenied
 from app.core.security import decrypt_cookies, hash_apikey
 from app.models import Operator, OperatorAccountAccess, XhsAccount
-from app.services import cookie_service
+from app.services import account_service, cookie_service
 
 
 async def _make_operator(
@@ -99,7 +99,7 @@ async def test_import_creates_account_and_access(db: AsyncSession):
     cookies = [
         {"name": "a1", "value": "x", "domain": ".xiaohongshu.com", "sameSite": "lax"}
     ]
-    acc, created = await cookie_service.import_cookies(
+    acc, created, _ = await cookie_service.import_cookies(
         db, op, "号1", cookies, {"nickname": "N", "user_id": "u1"}
     )
     assert created is True
@@ -129,12 +129,12 @@ async def test_import_creates_account_and_access(db: AsyncSession):
 async def test_import_idempotent_by_user_id(db: AsyncSession):
     """同 user_id 二次 import → created=False、同一行 id、cookie 被更新、不新增号。"""
     op = await _make_operator(db)
-    acc, created = await cookie_service.import_cookies(
+    acc, created, _ = await cookie_service.import_cookies(
         db, op, "号1", [{"name": "a1", "value": "old"}], {"user_id": "u1", "nickname": "N"}
     )
     assert created is True
 
-    acc2, created2 = await cookie_service.import_cookies(
+    acc2, created2, _ = await cookie_service.import_cookies(
         db, op, "号1改名", [{"name": "a1", "value": "new"}], {"user_id": "u1"}
     )
     assert created2 is False
@@ -154,7 +154,7 @@ async def test_import_idempotent_by_user_id(db: AsyncSession):
 async def test_import_update_refreshes_last_login_at(db: AsyncSession):
     """更新既有号(二次 import)也刷新 last_login_at —— 重登旧号 poll_login 才检测得到。"""
     op = await _make_operator(db)
-    acc, created = await cookie_service.import_cookies(
+    acc, created, _ = await cookie_service.import_cookies(
         db, op, "号1", [{"name": "a1", "value": "old"}], {"user_id": "u1"}
     )
     assert created is True
@@ -166,7 +166,7 @@ async def test_import_update_refreshes_last_login_at(db: AsyncSession):
     await db.commit()
 
     # 二次 import 走更新路径,应把 last_login_at 刷新到 old_time 之后
-    acc2, created2 = await cookie_service.import_cookies(
+    acc2, created2, _ = await cookie_service.import_cookies(
         db, op, "号1", [{"name": "a1", "value": "new"}], {"user_id": "u1"}
     )
     assert created2 is False
@@ -178,12 +178,12 @@ async def test_import_update_refreshes_last_login_at(db: AsyncSession):
 async def test_import_idempotent_by_account_name(db: AsyncSession):
     """无 user_id 时按 account_name 匹配:同名二次 import → created=False、同一行。"""
     op = await _make_operator(db)
-    acc, created = await cookie_service.import_cookies(
+    acc, created, _ = await cookie_service.import_cookies(
         db, op, "号1", [{"name": "a1", "value": "old"}], None
     )
     assert created is True
 
-    acc2, created2 = await cookie_service.import_cookies(
+    acc2, created2, _ = await cookie_service.import_cookies(
         db, op, "号1", [{"name": "a1", "value": "new"}], None
     )
     assert created2 is False
@@ -227,14 +227,14 @@ async def test_import_no_false_merge_across_user_ids(db: AsyncSession):
     op = await _make_operator(db)
 
     # 1) 仅 account_name、无 user_id → 新建(user_id 为空)
-    acc0, c0 = await cookie_service.import_cookies(
+    acc0, c0, _ = await cookie_service.import_cookies(
         db, op, "同名号", [{"name": "a1", "value": "0"}], None
     )
     assert c0 is True
     assert acc0.user_id is None
 
     # 2) 相同 account_name 带 user_id A → 允许并入该行(把 A 盖上,合理)
-    accA, cA = await cookie_service.import_cookies(
+    accA, cA, _ = await cookie_service.import_cookies(
         db, op, "同名号", [{"name": "a1", "value": "A"}], {"user_id": "A"}
     )
     assert cA is False
@@ -242,7 +242,7 @@ async def test_import_no_false_merge_across_user_ids(db: AsyncSession):
     assert accA.user_id == "A"
 
     # 3) 相同 account_name 带不同 user_id B → 不并入(现在该行 user_id=A),新建独立行
-    accB, cB = await cookie_service.import_cookies(
+    accB, cB, _ = await cookie_service.import_cookies(
         db, op, "同名号", [{"name": "a1", "value": "B"}], {"user_id": "B"}
     )
     assert cB is True
@@ -262,7 +262,7 @@ async def test_import_no_false_merge_across_user_ids(db: AsyncSession):
 async def test_import_update_denied_without_access(db: AsyncSession):
     """S1:无 access 的 operator import 命中既有号(按 user_id)→ 抛 AccessDenied 且 cookie 未变。"""
     importer = await _make_operator(db, name="importer")
-    acc, _ = await cookie_service.import_cookies(
+    acc, _, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
     )
 
@@ -283,10 +283,10 @@ async def test_import_update_denied_without_access(db: AsyncSession):
 async def test_import_update_allowed_with_access(db: AsyncSession):
     """S1:有 access 的 operator(导入者本人)命中既有号 → 正常更新 cookie。"""
     importer = await _make_operator(db, name="importer")
-    acc, _ = await cookie_service.import_cookies(
+    acc, _, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
     )
-    acc2, created2 = await cookie_service.import_cookies(
+    acc2, created2, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "updated"}], {"user_id": "u1"}
     )
     assert created2 is False
@@ -298,11 +298,11 @@ async def test_import_update_allowed_with_access(db: AsyncSession):
 async def test_import_update_admin_allowed(db: AsyncSession):
     """S1:admin 无 access 行也能更新既有号(assert 对 admin 放行)。"""
     importer = await _make_operator(db, name="importer")
-    acc, _ = await cookie_service.import_cookies(
+    acc, _, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
     )
     admin = await _make_operator(db, name="boss", role="admin")
-    acc2, created2 = await cookie_service.import_cookies(
+    acc2, created2, _ = await cookie_service.import_cookies(
         db, admin, "号1", [{"name": "a1", "value": "byadmin"}], {"user_id": "u1"}
     )
     assert created2 is False
@@ -318,7 +318,7 @@ async def test_get_cookies_with_access(db: AsyncSession):
     """有 access 的 operator 能取回解密后的 cookies。"""
     op = await _make_operator(db)
     cookies = [{"name": "a1", "value": "x", "sameSite": "lax"}]
-    acc, _ = await cookie_service.import_cookies(db, op, "号1", cookies, {"user_id": "u1"})
+    acc, _, _ = await cookie_service.import_cookies(db, op, "号1", cookies, {"user_id": "u1"})
 
     got = await cookie_service.get_cookies(db, op, acc.id)
     assert got[0]["name"] == "a1"
@@ -329,7 +329,7 @@ async def test_get_cookies_with_access(db: AsyncSession):
 async def test_get_cookies_denied_without_access(db: AsyncSession):
     """无 access 的 operator 取 cookies → 抛 AccessDenied。"""
     importer = await _make_operator(db, name="importer")
-    acc, _ = await cookie_service.import_cookies(
+    acc, _, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "x"}], {"user_id": "u1"}
     )
     # 另一个未获授权的普通运营者
@@ -344,9 +344,156 @@ async def test_get_cookies_denied_without_access(db: AsyncSession):
 async def test_get_cookies_admin_bypasses_access(db: AsyncSession):
     """admin 无需 access 行也能取(assert_account_access 对 admin 放行)。"""
     importer = await _make_operator(db, name="importer")
-    acc, _ = await cookie_service.import_cookies(
+    acc, _, _ = await cookie_service.import_cookies(
         db, importer, "号1", [{"name": "a1", "value": "x"}], {"user_id": "u1"}
     )
     admin = await _make_operator(db, name="boss", role="admin")
     got = await cookie_service.get_cookies(db, admin, acc.id)
     assert got[0]["name"] == "a1"
+
+
+# ---------------- 占位废账号自愈(方向 A):真登录成功清同 operator 近窗占位 ----------------
+
+
+async def _push_placeholder(
+    db: AsyncSession, op: Operator, name: str = "xhs_account_1784606714415"
+) -> XhsAccount:
+    """模拟插件"userInfo 采集失败"的占位推送:user_info 为空、name 为 xhs_account_<时间戳>。
+
+    返回落库的占位账号行(user_id 为空、有该 operator 的授权行、cleaned=0 不触发清理)。
+    """
+    acc, created, cleaned = await cookie_service.import_cookies(
+        db, op, name, [{"name": "web_session", "value": "ph"}], None
+    )
+    assert created is True
+    assert acc.user_id is None
+    assert cleaned == 0  # 占位推送本身(user_id 空)不触发清理
+    return acc
+
+
+async def _count_account(db: AsyncSession, account_id: int) -> int:
+    """直查 DB 中某账号行是否仍在(绕开 ORM identity map 的删除后残影)。"""
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(XhsAccount)
+            .where(XhsAccount.id == account_id)
+        )
+    ).scalar()
+
+
+async def _count_access_of_account(db: AsyncSession, account_id: int) -> int:
+    """直查某账号名下授权行数量。"""
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(OperatorAccountAccess)
+            .where(OperatorAccountAccess.xhs_account_id == account_id)
+        )
+    ).scalar()
+
+
+async def test_real_login_cleans_placeholder_and_access(db: AsyncSession):
+    """§7.1:同 operator 先占位推送再真登录 → 占位行与其授权行被清、真账号在、cleaned==1。"""
+    op = await _make_operator(db)
+    placeholder = await _push_placeholder(db, op)
+
+    acc, created, cleaned = await cookie_service.import_cookies(
+        db, op, "NBDpsy聊心理", [{"name": "web_session", "value": "real"}],
+        {"user_id": "real1", "nickname": "NBDpsy聊心理"},
+    )
+    assert created is True
+    assert cleaned == 1
+    # 占位行与其授权行被清
+    assert await _count_account(db, placeholder.id) == 0
+    assert await _count_access_of_account(db, placeholder.id) == 0
+    # 真账号仍在
+    assert await _count_account(db, acc.id) == 1
+
+
+async def test_real_login_update_path_cleans_placeholder(db: AsyncSession):
+    """更新既有真号(命中 user_id 走更新路径)同样触发占位清理。"""
+    op = await _make_operator(db)
+    # 先建真号
+    real, _, _ = await cookie_service.import_cookies(
+        db, op, "真号", [{"name": "a", "value": "1"}], {"user_id": "u1"}
+    )
+    placeholder = await _push_placeholder(db, op)
+    # 再次推同 user_id(更新路径)
+    _, created2, cleaned2 = await cookie_service.import_cookies(
+        db, op, "真号", [{"name": "a", "value": "2"}], {"user_id": "u1"}
+    )
+    assert created2 is False
+    assert cleaned2 == 1
+    assert await _count_account(db, placeholder.id) == 0
+
+
+async def test_real_login_does_not_touch_identified_rows(db: AsyncSession):
+    """§7.2:清理绝不触碰带 user_id 的账号行(只删 user_id 空 + xhs_account_ 前缀)。"""
+    op = await _make_operator(db)
+    # 一个无辜的带 user_id 真号,恰好碰巧也叫 xhs_account_ 前缀(极端构造)
+    other_real, _, _ = await cookie_service.import_cookies(
+        db, op, "xhs_account_other", [{"name": "a", "value": "1"}], {"user_id": "u-other"}
+    )
+    placeholder = await _push_placeholder(db, op)
+    _, _, cleaned = await cookie_service.import_cookies(
+        db, op, "本尊", [{"name": "a", "value": "2"}], {"user_id": "u-self"}
+    )
+    assert cleaned == 1
+    assert await _count_account(db, placeholder.id) == 0
+    # 带 user_id 的行绝不被删
+    assert await _count_account(db, other_real.id) == 1
+
+
+async def test_renamed_placeholder_is_exempt(db: AsyncSession):
+    """§7.2:PATCH 改过名的占位行(name 不再是 xhs_account_ 前缀)天然豁免,不被清。"""
+    op = await _make_operator(db)
+    placeholder = await _push_placeholder(db, op)
+    # 运营者改名(user_id 仍空,但 name 不再匹配前缀)
+    await account_service.update_account(db, op, placeholder.id, name="我的真号")
+
+    _, _, cleaned = await cookie_service.import_cookies(
+        db, op, "别的真号", [{"name": "a", "value": "x"}], {"user_id": "u-real"}
+    )
+    assert cleaned == 0
+    assert await _count_account(db, placeholder.id) == 1
+
+
+async def test_placeholder_outside_window_not_cleaned(db: AsyncSession):
+    """§7.2:窗口外(created_at 拨到 31 分钟前)的占位行 A 不清,留给 B(TTL reaper)。"""
+    op = await _make_operator(db)
+    placeholder = await _push_placeholder(db, op)
+    # 拨老 created_at 到窗口(30 分钟)之外
+    row = await db.get(XhsAccount, placeholder.id)
+    row.created_at = datetime.utcnow() - timedelta(minutes=31)
+    await db.commit()
+
+    _, _, cleaned = await cookie_service.import_cookies(
+        db, op, "真号", [{"name": "a", "value": "x"}], {"user_id": "u-real"}
+    )
+    assert cleaned == 0
+    assert await _count_account(db, placeholder.id) == 1
+
+
+async def test_cross_operator_isolation(db: AsyncSession):
+    """§7.4:operator X 的占位行,operator Y 推真账号成功 → 绝不误删 X 的占位。"""
+    op_x = await _make_operator(db, name="opX")
+    op_y = await _make_operator(db, name="opY")
+    placeholder = await _push_placeholder(db, op_x)
+
+    _, created, cleaned = await cookie_service.import_cookies(
+        db, op_y, "Y的真号", [{"name": "a", "value": "x"}], {"user_id": "u-y"}
+    )
+    assert created is True
+    assert cleaned == 0  # Y 对 X 的占位无授权,不在清理集合内
+    assert await _count_account(db, placeholder.id) == 1
+
+
+async def test_placeholder_push_does_not_clean_prior_placeholder(db: AsyncSession):
+    """占位推占位:第二次占位推送(user_id 仍空)不清第一次的占位(cookie 保留到 TTL)。"""
+    op = await _make_operator(db)
+    ph1 = await _push_placeholder(db, op, name="xhs_account_111")
+    ph2 = await _push_placeholder(db, op, name="xhs_account_222")
+    # 两次占位推送都 cleaned==0(_push_placeholder 内已断言),两行都在
+    assert await _count_account(db, ph1.id) == 1
+    assert await _count_account(db, ph2.id) == 1

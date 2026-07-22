@@ -20,10 +20,11 @@ MANIFEST_ENTRIES = [{
     "admin_only": False,
     "params": {"account_name": "body,str", "cookies": "body,list[cookie 对象]",
                "user_info": "body,dict|None(user_id/nickname/red_id/avatar)"},
-    "returns": "{account_id, created}",
+    "returns": "{account_id, created, cleaned_placeholders}",
     "errors": "422=缺字段",
     "notes": "正常远程登录由 chrome 插件登录后自动推本端点,多数情况不用手调;"
-             "user_info.user_id 是 upsert 去重键;首次导入新号自动给导入者建授权。",
+             "user_info.user_id 是 upsert 去重键;首次导入新号自动给导入者建授权;"
+             "cleaned_placeholders=本次真登录成功顺带清理的占位废账号数(user_info 空时恒 0)。",
 }]
 
 
@@ -37,14 +38,18 @@ class CookiesImportRequest(BaseModel):
 
 @router.post("/api/cookies/import")
 async def import_cookies_endpoint(payload: CookiesImportRequest) -> dict:
-    """灌入插件推送的 cookie:upsert 唯一账号行,返回 {account_id, created}。"""
+    """灌入插件推送的 cookie:upsert 唯一账号行,返回 {account_id, created, cleaned_placeholders}。"""
     operator = current_operator()
     async with get_session() as session:
-        account, created = await cookie_service.import_cookies(
+        account, created, cleaned = await cookie_service.import_cookies(
             session,
             operator,
             payload.account_name,
             payload.cookies,
             payload.user_info,
         )
-        return {"account_id": account.id, "created": created}
+        return {
+            "account_id": account.id,
+            "created": created,
+            "cleaned_placeholders": cleaned,
+        }

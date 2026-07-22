@@ -70,7 +70,7 @@ async def seed_account(name, user_id, cookies):
     """以 admin 身份灌一个带 cookie 的号;返回 account_id。"""
     admin = await get_root_admin()
     async with db_module.async_session() as s:
-        account, _created = await cookie_service.import_cookies(
+        account, _created, _cleaned = await cookie_service.import_cookies(
             s, admin, name, cookies, {"user_id": user_id}
         )
         return account.id

@@ -107,6 +107,42 @@ async def test_import_second_time_updates_not_duplicates(tmp_path, monkeypatch):
             assert len(total) == 1
 
 
+async def test_import_real_login_cleans_placeholder_returns_count(tmp_path, monkeypatch):
+    """§7.1 端到端:占位推送(无 user_info)→ 真登录推送 → 占位被清、响应 cleaned_placeholders==1。"""
+    async with isolated_client(tmp_path, monkeypatch) as (c, key):
+        auth = {"Authorization": f"Bearer {key}"}
+        # 1) 占位推送:userInfo 采集失败,account_name 走时间戳兜底、user_info 缺省
+        r1 = await c.post(
+            "/api/cookies/import",
+            headers=auth,
+            json={
+                "account_name": "xhs_account_1784606714415",
+                "cookies": [{"name": "web_session", "value": "x"}],
+            },
+        )
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["cleaned_placeholders"] == 0  # 占位推送本身不触发清理
+        placeholder_id = r1.json()["account_id"]
+
+        # 2) 真登录推送:带 user_id → 新建真号并清掉近窗占位
+        r2 = await c.post(
+            "/api/cookies/import",
+            headers=auth,
+            json={
+                "account_name": "NBDpsy聊心理",
+                "cookies": [{"name": "web_session", "value": "y"}],
+                "user_info": {"user_id": "real-http", "nickname": "NBDpsy聊心理"},
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["created"] is True
+        assert r2.json()["cleaned_placeholders"] == 1
+
+        # 占位行确已从库中删除
+        async with db_module.async_session() as s:
+            assert (await s.get(XhsAccount, placeholder_id)) is None
+
+
 async def test_import_without_apikey_401(tmp_path, monkeypatch):
     """无 apikey → 401(中间件挡,不进业务层)。"""
     async with isolated_client(tmp_path, monkeypatch) as (c, _key):

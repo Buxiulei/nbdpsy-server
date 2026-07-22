@@ -345,6 +345,50 @@ async def test_poll_login_rbac_narrowed(tmp_path, monkeypatch):
         assert {a["id"] for a in body_admin["accounts"]} == {acc}
 
 
+async def test_poll_new_account_excludes_cleaned_placeholder(tmp_path, monkeypatch):
+    """§7.6:A 清理占位后,登新号 poll 返回的 accounts 只含真账号(占位被删不再出现)。"""
+    async with isolated_client(tmp_path, monkeypatch) as c:
+        auth = bearer(ADMIN_KEY)
+        since = datetime.utcnow().isoformat()
+
+        # 占位推送(无 user_info)→ 落 xhs_account_ 占位行
+        r1 = await c.post(
+            "/api/cookies/import",
+            headers=auth,
+            json={
+                "account_name": "xhs_account_9990001",
+                "cookies": [{"name": "web_session", "value": "x"}],
+            },
+        )
+        assert r1.status_code == 200, r1.text
+        placeholder_id = r1.json()["account_id"]
+
+        # 真登录推送 → 清掉占位
+        r2 = await c.post(
+            "/api/cookies/import",
+            headers=auth,
+            json={
+                "account_name": "生意经",
+                "cookies": [{"name": "web_session", "value": "y"}],
+                "user_info": {"user_id": "real-poll", "nickname": "生意经"},
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["cleaned_placeholders"] == 1
+        real_id = r2.json()["account_id"]
+
+        # 登新号 poll:accounts 只含真账号,占位 id 不在列表里
+        r = await c.get(
+            "/api/login/poll", params={"since": since}, headers=auth
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["done"] is True
+        ids = {a["id"] for a in body["accounts"]}
+        assert ids == {real_id}
+        assert placeholder_id not in ids
+
+
 async def test_poll_login_bad_since_400(tmp_path, monkeypatch):
     """since="garbage" → 400。"""
     async with isolated_client(tmp_path, monkeypatch) as c:

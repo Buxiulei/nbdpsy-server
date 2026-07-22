@@ -24,6 +24,7 @@ from app.http import ALL_ROUTERS
 from app.mcp_facade import mcp
 from app.publish.runtime import set_active_scheduler
 from app.publish.scheduler import PublishScheduler
+from app.services.placeholder_reaper import PlaceholderReaper
 
 
 def create_app() -> FastAPI:
@@ -57,6 +58,14 @@ def create_app() -> FastAPI:
         if settings.BROWSER_REAP_INTERVAL > 0:
             reaper = BrowserReaper(settings.BROWSER_REAP_INTERVAL)
             reaper.start()
+        # 可选占位废账号 TTL 兜底回收:仅在配置 >0 时起(周期删超龄未回填 user_id 的
+        # xhs_account_ 占位行,兜底"登录失败后一直没重试"的残留)。
+        placeholder_reaper: PlaceholderReaper | None = None
+        if settings.PLACEHOLDER_REAP_INTERVAL > 0:
+            placeholder_reaper = PlaceholderReaper(
+                db_module.async_session, settings.PLACEHOLDER_REAP_INTERVAL
+            )
+            placeholder_reaper.start()
         try:
             yield
         finally:
@@ -66,6 +75,8 @@ def create_app() -> FastAPI:
                 await cookie_checker.stop()
             if reaper is not None:
                 await reaper.stop()
+            if placeholder_reaper is not None:
+                await placeholder_reaper.stop()
 
     # 1.1 薄 MCP facade 的 Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     #      host_origin_protection=False:关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护,

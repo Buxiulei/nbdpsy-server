@@ -427,6 +427,10 @@ async function startRemoteLogin() {
                             } catch (e) { /* 忽略 */ }
 
                             if (pushResult.success) {
+                                // nickname 与 user_id 都为空 = 本次未识别账号身份(落库为 xhs_account_<时间戳>
+                                // 占位号)。cookie 照常保留,但明示运营者「重试一次扫码即可完成识别」——
+                                // 重试成功后服务端会自动清除本次占位号(见 cookie_service 占位自愈)。
+                                const identified = userInfo?.nickname || userInfo?.user_id;
                                 resolve({
                                     success: true,
                                     cookiesCollected: allCookies.length,
@@ -435,7 +439,9 @@ async function startRemoteLogin() {
                                     userInfo: userInfo,
                                     message: userInfo?.nickname
                                         ? `登录成功！欢迎 ${userInfo.nickname}`
-                                        : '登录成功，Cookies 已保存'
+                                        : (identified
+                                            ? '登录成功，Cookies 已保存'
+                                            : '本次未识别账号身份，已暂存 Cookie。请重试一次扫码登录完成识别（重试成功后会自动清除本次的占位账号）')
                                 });
                             } else {
                                 resolve({ success: false, error: pushResult.error });

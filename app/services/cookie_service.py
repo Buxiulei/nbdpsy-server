@@ -13,15 +13,17 @@
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from loguru import logger
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.guards import assert_account_access
+from app.core.config import settings
 from app.core.security import decrypt_cookies, encrypt_cookies
-from app.models.operator import Operator
+from app.models.operator import Operator, OperatorAccountAccess
 from app.models.xhs_account import XhsAccount
 from app.services.operator_service import grant_access
 
@@ -80,14 +82,62 @@ def _apply_cookie_state(
     account.last_login_at = datetime.utcnow()
 
 
+async def _clean_placeholder_accounts(
+    session: AsyncSession, operator_id: int, kept_account_id: int
+) -> int:
+    """真登录成功后清理同 operator 近窗内的占位废账号行及其授权行,返回删除的账号数。
+
+    仅当调用方本次落库的是"真身份"行(user_id 非空)时才调用。清理判据(与需求 §7.2 逐字一致):
+    ``user_id IS NULL AND name LIKE 'xhs_account_%'``,且 created_at 在近
+    ``PLACEHOLDER_CLEAN_WINDOW_MINUTES`` 分钟窗口内,且该行在 operator_account_access 里有
+    ``operator_id == 本次导入 operator`` 的授权行(同 operator 限定,保证并发不误删他人),
+    且 ``id != kept_account_id``(绝不误删本次落库的真号)。命中则删授权行 + 删账号行。
+    """
+    cutoff = datetime.utcnow() - timedelta(
+        minutes=settings.PLACEHOLDER_CLEAN_WINDOW_MINUTES
+    )
+    rows = (
+        await session.execute(
+            select(XhsAccount.id, XhsAccount.name)
+            .join(
+                OperatorAccountAccess,
+                OperatorAccountAccess.xhs_account_id == XhsAccount.id,
+            )
+            .where(
+                XhsAccount.user_id.is_(None),
+                XhsAccount.name.like("xhs_account_%"),
+                XhsAccount.created_at >= cutoff,
+                OperatorAccountAccess.operator_id == operator_id,
+                XhsAccount.id != kept_account_id,
+            )
+        )
+    ).all()
+    if not rows:
+        return 0
+    ids = [row.id for row in rows]
+    await session.execute(
+        delete(OperatorAccountAccess).where(
+            OperatorAccountAccess.xhs_account_id.in_(ids)
+        )
+    )
+    await session.execute(delete(XhsAccount).where(XhsAccount.id.in_(ids)))
+    await session.commit()
+    logger.info(
+        f"[cookie_import] 真登录成功清理占位废账号 operator={operator_id} "
+        f"删除 {len(ids)} 行: "
+        + ", ".join(f"{row.id}:{row.name}" for row in rows)
+    )
+    return len(ids)
+
+
 async def import_cookies(
     session: AsyncSession,
     operator: Operator,
     account_name: str,
     cookies: list[dict],
     user_info: dict | None,
-) -> tuple[XhsAccount, bool]:
-    """upsert 唯一账号行并加密落库 cookie;返回 (账号, 是否新建)。
+) -> tuple[XhsAccount, bool, int]:
+    """upsert 唯一账号行并加密落库 cookie;返回 (账号, 是否新建, 清理的占位废账号数)。
 
     匹配顺序:优先按 user_info.user_id 命中既有号,否则按 account_name。account_name
     兜底仅在不会把两个不同身份并成一行时采用——若 incoming 带 user_id 且同名行已绑定
@@ -95,6 +145,10 @@ async def import_cookies(
     login_cookies、刷新 last_login_at);未命中则新建,并给导入 operator 建 access。
     新建撞 user_id 唯一索引(并发/重复)时回滚 → 按 user_id 重新命中走更新路径。
     cookie 规范化后再 json.dumps 加密。
+
+    占位自愈:三条落库路径结束前,当且仅当本次落库行 user_id 非空(真身份)时,清理同
+    operator 近窗内的占位废账号(见 _clean_placeholder_accounts)。占位推送本身(本次行
+    user_id 为空)不触发清理——cookie 保留到 TTL,由 placeholder_reaper 兜底回收。
     """
     encrypted = encrypt_cookies(
         json.dumps(normalize_cookies(cookies), ensure_ascii=False)
@@ -130,7 +184,12 @@ async def import_cookies(
         await assert_account_access(operator, existing.id, session)
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
-        return existing, False
+        cleaned = (
+            await _clean_placeholder_accounts(session, operator.id, existing.id)
+            if existing.user_id
+            else 0
+        )
+        return existing, False, cleaned
 
     # 新建账号并给导入者授权。
     account = XhsAccount(name=account_name)
@@ -151,10 +210,20 @@ async def import_cookies(
         await assert_account_access(operator, existing.id, session)
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
-        return existing, False
+        cleaned = (
+            await _clean_placeholder_accounts(session, operator.id, existing.id)
+            if existing.user_id
+            else 0
+        )
+        return existing, False, cleaned
     # expire_on_commit=False,commit 后 account.id 已可安全读取。
     await grant_access(session, operator.id, account.id, operator.id)
-    return account, True
+    cleaned = (
+        await _clean_placeholder_accounts(session, operator.id, account.id)
+        if account.user_id
+        else 0
+    )
+    return account, True, cleaned
 
 
 async def get_cookies(

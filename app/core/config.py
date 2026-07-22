@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     BROWSER_REAP_INTERVAL: int = 300
     BROWSER_REAP_AGE: int = 900
 
+    # 占位废账号(登录闭环 userInfo 采集失败留下的 xhs_account_<时间戳> 空号)根治:
+    # A 服务端自愈——真登录成功时清同 operator 近窗内新建的占位行,窗口时长(分钟)。
+    PLACEHOLDER_CLEAN_WINDOW_MINUTES: int = 30
+    # B TTL 兜底 reaper——巡检间隔(秒,0=关闭)与占位行存活上限(小时,超过即回收)。
+    PLACEHOLDER_REAP_INTERVAL: int = 3600
+    PLACEHOLDER_TTL_HOURS: int = 24
+
     # 调试截图开关
     DEBUG_SCREENSHOTS_ENABLED: bool = False
 
