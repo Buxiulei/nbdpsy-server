@@ -342,6 +342,9 @@ class XHSPublishAtomicTasks:
                 # 切换到新页面(同步更新拟人化操作层的 page 引用)
                 self.page = new_page
                 self.human.page = new_page
+                # 换窗后复位虚拟光标:置 None 让下一次移动从新页的合理起点起步,
+                # 避免沿用旧窗坐标做贝塞尔起点画错轨迹
+                self.human.last_mouse_pos = None
                 logger.info("✓ 已切换到新窗口")
 
                 # 等待页面稳定并监控 URL 变化
@@ -1035,7 +1038,9 @@ class XHSPublishAtomicTasks:
                 self.human.click((cx, cy), reason=f"聚焦{intent_desc or intent_key}")
                 self.human.wait(0.2, 0.5, context="聚焦后停顿")
                 # 拟人化逐字键盘输入(已聚焦,不再重复 click)
-                self.human.type_text(None, value, click_first=False)
+                # clear_first:键盘输入是追加语义,重试时会叠加上一轮残留 → 先 Ctrl+a→Backspace
+                # 清空恢复幂等;空框首次清空无副作用。
+                self.human.type_text(None, value, click_first=False, clear_first=True)
                 logger.info(f"[{intent_key}] 拟人输入成功 selector={box['sel']}({len(value)}字)")
                 return True, None
             except Exception as e:  # noqa: BLE001
@@ -1463,7 +1468,7 @@ class XHSPublishAtomicTasks:
                         + '[class*=dialog],[class*=Modal],[class*=mask]');
                     out.dialogText = dlg ? (dlg.innerText||'').trim().slice(0,300) : null;
                     out.toasts = [...document.querySelectorAll(
-                        '[class*=toast],[class*=message],[class*=Toast],[class*=tip]')]
+                        '[class*=toast],[class*=Toast]')]
                         .map(e=>(e.innerText||'').trim()).filter(Boolean).slice(0,6);
                     out.bodyHead = (document.body.innerText||'').trim().slice(0,160);
                     return out;
@@ -1472,32 +1477,6 @@ class XHSPublishAtomicTasks:
             except Exception as fe:
                 logger.error(f"点击后取证失败: {fe}")
                 forensic = {}
-
-            # 账号级禁发检测:点发布后小红书用 toast/弹窗告知"因违反社区规范禁止发笔记"
-            # 等账号处罚态。此时发布按钮点击其实生效了(toast 是 XHS 的拒绝回执),但笔记
-            # 永远发不出去,继续等 30 秒只会误报"发布超时"。命中即以明确原因立即收口,避免
-            # 误判 + 无谓重试(重试也发不出)。
-            try:
-                _probe = " ".join(
-                    (forensic.get("toasts") or [])
-                    + [forensic.get("dialogText") or "", forensic.get("bodyHead") or ""]
-                )
-                ban_markers = [
-                    "因违反社区规范禁止发笔记", "违反社区规范", "禁止发笔记",
-                    "账号存在异常", "账号异常无法发布", "涉嫌违规", "限制发布",
-                ]
-                hit = next((m for m in ban_markers if m in _probe), None)
-                if hit:
-                    logger.error(f"❌ 账号被限制发布:命中「{hit}」→ 该账号当前无法发笔记")
-                    return {
-                        "success": False,
-                        "error": f"账号被小红书限制发布(命中「{hit}」):该账号处于违规/处罚态,"
-                                 f"无法发布笔记。请更换未受限账号,或在小红书 App 内核实账号状态。",
-                        "account_restricted": True,
-                        "screenshot": self._take_screenshot("13_account_restricted"),
-                    }
-            except Exception as be:
-                logger.warning(f"禁发检测异常(忽略): {be}")
 
             # §6.4 坑#1:级联点击已权威确认发布成功 → 立即收口,禁止再进 30 秒等待循环
             # (小红书成功页仅停留约 3 秒就自动跳回发布页,继续等会与跳转赛跑 → 误判 failed
@@ -1513,6 +1492,35 @@ class XHSPublishAtomicTasks:
                     "note_url": cur_url,
                     "note_id": note_id,
                 }
+
+            # 账号级禁发检测:点发布后小红书用 toast/弹窗告知"因违反社区规范禁止发笔记"
+            # 等账号处罚态。此时发布按钮点击其实生效了(toast 是 XHS 的拒绝回执),但笔记
+            # 永远发不出去,继续等 30 秒只会误报"发布超时"。命中即以明确原因立即收口,避免
+            # 误判 + 无谓重试(重试也发不出)。
+            # 注意:必须放在 publish_confirmed 收口之后 —— 已被级联点击权威确认成功的发布,
+            # 绝不能再被禁发关键词误判翻盘成 failed(否则 scheduler 重试 → 重复发同一篇)。
+            # 匹配源只取 dialogText + 真正 toast(不含整页 bodyHead,避免把用户自己正文/正常
+            # 提示误判);关键词只保留整句处罚回执,删掉过泛子串。
+            try:
+                _probe = " ".join(
+                    (forensic.get("toasts") or [])
+                    + [forensic.get("dialogText") or ""]
+                )
+                ban_markers = [
+                    "因违反社区规范禁止发笔记", "账号异常无法发布", "禁止发笔记",
+                ]
+                hit = next((m for m in ban_markers if m in _probe), None)
+                if hit:
+                    logger.error(f"❌ 账号被限制发布:命中「{hit}」→ 该账号当前无法发笔记")
+                    return {
+                        "success": False,
+                        "error": f"账号被小红书限制发布(命中「{hit}」):该账号处于违规/处罚态,"
+                                 f"无法发布笔记。请更换未受限账号,或在小红书 App 内核实账号状态。",
+                        "account_restricted": True,
+                        "screenshot": self._take_screenshot("13_account_restricted"),
+                    }
+            except Exception as be:
+                logger.warning(f"禁发检测异常(忽略): {be}")
 
             # 点击后快速连续截图抓 toast(toast 只显示 2-3 秒)
             for t in range(4):

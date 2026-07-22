@@ -64,6 +64,8 @@ class PublishResult:
     ``success=True`` 时允许 ``note_id`` 为空(小红书成功页可能只有 note_url、
     创作中心抓不到 24 位 hex id)。``need_manual_login`` 是独立信号:创作中心 SSO
     自动认证失败、需人工扫码登录一次,与普通 ``error`` 字符串区分开。
+    ``account_restricted`` 亦为独立信号:账号被小红书判违规/处罚禁发(step7 命中禁发 toast),
+    重试也发不出,状态机据此直接置 failed 且不递增 retries、不排重试(重发=更强高频信号)。
     """
 
     success: bool
@@ -71,6 +73,7 @@ class PublishResult:
     note_url: str = ""
     error: Optional[str] = None
     need_manual_login: bool = False
+    account_restricted: bool = False
 
 
 # sameSite 兜底映射(上游 cookie_service 已 normalize,这里防御性再收口一次)
@@ -237,14 +240,27 @@ class SyncClient:
             # 会冒泡成 pageerror,而 Playwright Firefox driver 处理 location 为空的 pageerror
             # 时会崩(coreBundle.js 读 pageError.location.url 抛 TypeError → 整个 driver 挂)。
             # 在文档最早期兜住这些错误,driver 不再收到畸形 pageerror,发布流程不被打断。
+            # 收窄:仅吞与 ark.xiaohongshu.com 死代理 / 代理拒连(NS_ERROR_PROXY_CONNECTION_REFUSED
+            # / proxy)相关的错误,其余(页面自身真实报错)一律放行给页面处理,不无差别掩盖。
             try:
                 self.context.add_init_script(
-                    "window.addEventListener('unhandledrejection',"
-                    "function(e){try{e.preventDefault();e.stopImmediatePropagation();}catch(_){}}"
-                    ",true);"
-                    "window.addEventListener('error',"
-                    "function(e){try{e.preventDefault();e.stopImmediatePropagation();}catch(_){}}"
-                    ",true);"
+                    "(function(){"
+                    "function _ark(s){if(!s)return false;s=String(s);"
+                    "return s.indexOf('ark.xiaohongshu.com')>=0"
+                    "||s.indexOf('NS_ERROR_PROXY_CONNECTION_REFUSED')>=0"
+                    "||s.toLowerCase().indexOf('proxy')>=0;}"
+                    "window.addEventListener('unhandledrejection',function(e){try{"
+                    "var r=e.reason;var t=r&&(r.message||r.stack)?"
+                    "((r.message||'')+' '+(r.stack||'')):(r!=null?String(r):'');"
+                    # ark/代理拒连 → 吞;或畸形 reason(无 message 无 stack,即崩 driver 的空 location 源)→ 也吞
+                    "if(_ark(t)||!t.trim()){e.preventDefault();e.stopImmediatePropagation();}"
+                    "}catch(_){}},true);"
+                    "window.addEventListener('error',function(e){try{"
+                    "var t=(e.filename||'')+' '+(e.message||'');"
+                    # ark/代理 → 吞;或畸形 error(无 filename 无 message,Playwright 读 location.url 会崩)→ 也吞;真实报错放行
+                    "if(_ark(t)||(!e.filename&&!e.message)){e.preventDefault();e.stopImmediatePropagation();}"
+                    "}catch(_){}},true);"
+                    "})();"
                 )
             except Exception as e:
                 logger.warning(f"[SyncClient] 错误吞噬 init-script 装配失败(忽略): {e}")
@@ -437,7 +453,13 @@ class SyncClient:
             r = atomic.step7_click_publish_and_wait(max_wait=30)
             self.page = atomic.page
             if not r.get("success"):
-                return {"success": False, "error": r.get("error")}
+                # 透出 step7 的账号禁发独立信号(命中禁发 toast),交状态机直接置 failed
+                # 而非徒劳重试——重发反而是更强的高频封号信号。
+                return {
+                    "success": False,
+                    "error": r.get("error"),
+                    "account_restricted": r.get("account_restricted", False),
+                }
 
             logger.info("🎉 发布成功")
             return {
@@ -501,6 +523,7 @@ def publish_once(
             note_url=result.get("note_url", "") or "",
             error=result.get("error"),
             need_manual_login=bool(result.get("need_manual_login", False)),
+            account_restricted=bool(result.get("account_restricted", False)),
         )
     except Exception as e:
         logger.error(f"[publish_once] 异常 account_id={account_id}: {e}")

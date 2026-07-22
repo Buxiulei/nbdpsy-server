@@ -9,14 +9,16 @@ images/topics 序列化成 images_json/topics_json 落库;images 每项为 URL/b
 """
 
 import json
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.auth.context import current_operator
 from app.auth.guards import assert_account_access, visible_account_ids
+from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
@@ -41,6 +43,22 @@ def _parse_schedule_time(raw: str | None) -> datetime | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _next_active_window_start(now: datetime) -> datetime:
+    """算次日活跃窗口起点(naive UTC,带抖动):次日 ``PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR``
+    整点 + ``random.uniform(0, PUBLISH_ACTIVE_WINDOW_JITTER_SEC)``。抖动避免整点节律指纹。
+
+    供每账号每日上限达标后顺延新任务用——不丢 job,改落到次日窗口的 pending 定时任务。
+    """
+    base = (now + timedelta(days=1)).replace(
+        hour=settings.PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    jitter = random.uniform(0, settings.PUBLISH_ACTIVE_WINDOW_JITTER_SEC)
+    return base + timedelta(seconds=jitter)
 
 
 def _job_view(job: PublishJob) -> dict:
@@ -165,6 +183,23 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             raise ValueError("图文笔记至少需要 1 张图片")
         if len(payload.images) > _MAX_IMAGES:
             raise ValueError(f"最多 {_MAX_IMAGES} 张图片")
+        # F2:每账号每自然日发布上限。统计该账号当日(UTC)status in
+        # (pending/publishing/published) 的 job 数;达上限且本任务本会当日发出(立即或定时在今日
+        # 之内)则不立即发,顺延到次日活跃窗口起点(带抖动),仍落库 pending,不丢 job。
+        now_utc = datetime.utcnow()
+        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        due_today = scheduled_at is None or scheduled_at < today_start + timedelta(days=1)
+        if due_today:
+            count_stmt = (
+                select(func.count())
+                .select_from(PublishJob)
+                .where(PublishJob.account_id == payload.account_id)
+                .where(PublishJob.status.in_(("pending", "publishing", "published")))
+                .where(PublishJob.created_at >= today_start)
+            )
+            day_count = (await session.execute(count_stmt)).scalar_one()
+            if day_count >= settings.PUBLISH_DAILY_CAP:
+                scheduled_at = _next_active_window_start(now_utc)
         job = PublishJob(
             account_id=payload.account_id,
             title=payload.title,

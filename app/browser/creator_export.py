@@ -271,7 +271,7 @@ def export_notes(
                 page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 pass
-            time.sleep(1)
+            human.wait(0.8, 2.0, context="主站预热握手")
         except Exception as exc:
             logger.warning(
                 "[creator_export] 账号%s: 主站预热异常: %s;继续 warm-up",
@@ -289,7 +289,7 @@ def export_notes(
         if dashboard is None:
             raise CreatorExportError("data_dashboard_menu_not_found")
         human.click(dashboard, reason="数据看板菜单")
-        time.sleep(1)
+        human.wait(0.8, 2.0, context="数据看板→内容分析")
 
         analysis = _find_creator_element(
             page, ['.d-menu-item:has-text("内容分析")'],
@@ -298,7 +298,7 @@ def export_notes(
         if analysis is None:
             raise CreatorExportError("content_analysis_menu_not_found")
         human.click(analysis, reason="内容分析菜单")
-        time.sleep(3)
+        human.wait(2.0, 4.0, context="内容分析页加载")
 
         # 4) 点「导出数据」并等待下载,存到调用方指定路径。
         #    先在 expect_download 之外定位按钮——expect_download 的计时从 __enter__ 起算,
@@ -314,7 +314,7 @@ def export_notes(
             raise CreatorExportError("export_button_not_found")
         with page.expect_download(timeout=30000) as download_info:
             human.click(export_btn, reason="导出数据按钮")
-            time.sleep(1)
+            human.wait(0.8, 2.0, context="导出下载触发")
         download_info.value.save_as(file_path)
         logger.info("[creator_export] 账号%s: 文件已保存 %s", account_id, file_path)
 

@@ -9,7 +9,8 @@
 2. **统一持久化路径**:指纹落盘到 ``profile_guard.profile_dir(id)/fingerprint.json``,
    与 profile 目录同源,不再单开 ``browser_data/profiles/`` 目录。
 
-数据源:``app/browser/data/*.json``(真实 Chrome UA / 分辨率 / WebGL 渲染器)。
+数据源:``app/browser/data/*.json``(真实 Firefox UA / 分辨率 / WebGL 渲染器)。
+UA 已从 Chrome 切为 Firefox(对齐 camoufox 内核 Firefox/135),消除引擎↔UA↔JA3 三方矛盾。
 """
 import hashlib
 import json
@@ -51,10 +52,12 @@ _PLATFORM_MAP = {
     "linux": "Linux x86_64",
 }
 # 兜底 UA(数据文件缺失时)
+# Firefox UA(对齐 camoufox 内核 Firefox/135;camoufox 是 Firefox 引擎,UA 报 Chrome 会与
+# JA3/navigator.* 三方矛盾被一眼识破,故 fallback 也必须是 Firefox)。
 _FALLBACK_UA = {
-    "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "macos": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    "macos": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+    "linux": "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0",
 }
 
 

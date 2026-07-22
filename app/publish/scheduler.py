@@ -16,6 +16,7 @@
 
 import asyncio
 import json
+import random
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,42 +62,58 @@ def make_publish_runner(
     """
 
     async def publish_runner(job_id: int) -> None:
-        # 1. 原子占用先行:占不到(别处已处理 / 非 pending)直接退,防双重发布
-        if not await scheduler.mark_publishing(job_id):
-            return
+        # 先轻量取 account_id 给 per-account 锁做键;非 pending 直接退(可能已被处理/取消)。
+        async with session_factory() as session:
+            job0 = await session.get(PublishJob, job_id)
+            if job0 is None or job0.status != "pending":
+                return
+            account_id = job0.account_id
 
-        # C1:占用成功后立刻登记在途 —— 真发布可能墙钟 > PUBLISH_JOB_TIMEOUT,
-        #     recover_stale 据此排除本 job,避免"僵死误判 → 复位 → 重投 → 二次发布"。
-        scheduler._in_flight.add(job_id)
+        # per-account 串行临界区:冷却门 + 原子占用 + 发布**全部在锁内**。关键——冷却门必须
+        # 在锁内复核,这样同账号兄弟 job 的 started_at(已 mark_publishing 落库)在锁内可见,
+        # 杜绝『锁外冷却门被同账号并发批量(PUBLISH_CONCURRENCY)绕过 → 冷却塌缩成秒级连发』
+        # 这一封号高频指纹。不同账号各持独立锁,互不阻塞、照常并行。
+        async with account_locks.get(account_id):
+            # 0. 账号级发布冷却门(锁内复核):距上次发布不足抖动间隔则顺延本 job(保持 pending、
+            #    推后 next_retry_at),不占用不发布,下轮 scan 再捞。cooldown_gate 已 id!=job_id
+            #    自排除,只看兄弟 job。
+            if not await scheduler.account_cooldown_gate(job_id):
+                return
 
-        # 临时物料目录:URL/base64 图片落成本地文件的落盘处,发布结束(无论成败)清理。
-        workdir = Path(settings.UPLOAD_DIR) / f"job_{job_id}"
+            # 1. 原子占用:占不到(别处已处理 / 非 pending)直接退,防双重发布。
+            if not await scheduler.mark_publishing(job_id):
+                return
 
-        # 2. 占用成功后的整个执行(载数据 + 物料化 + 线程发布 + finish)统一兜底:任何一步抛异常
-        #    都显式 finish(success=False),交回重试/退避机制,绝不让 job 卡死在 publishing。
-        try:
-            # 2a. 载 job + account + cookie(会话内取尽所需字段,出会话不再触发 lazy load)
-            async with session_factory() as session:
-                job = await session.get(PublishJob, job_id)
-                if job is None:
-                    return
-                account = await session.get(XhsAccount, job.account_id)
-                account_id = job.account_id
-                title = job.title
-                content = job.content
-                raw_images = json.loads(job.images_json or "[]")
-                topics = json.loads(job.topics_json or "[]")
-                cookies = _decrypt_account_cookies(account)
+            # C1:占用成功后立刻登记在途 —— 真发布可能墙钟 > PUBLISH_JOB_TIMEOUT,
+            #     recover_stale 据此排除本 job,避免"僵死误判 → 复位 → 重投 → 二次发布"。
+            scheduler._in_flight.add(job_id)
 
-            # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
-            #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
-            #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
-            paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
-            image_paths = [str(p) for p in paths]
+            # 临时物料目录:URL/base64 图片落成本地文件的落盘处,发布结束(无论成败)清理。
+            workdir = Path(settings.UPLOAD_DIR) / f"job_{job_id}"
 
-            # 2c. per-account 锁串行 + 全局浏览器并发闸 + 线程内跑 sync 发布(禁同号并发)
-            #     browser_slot 封顶总 camoufox 数,超出排队;publish 不 block_images(保发布保真)。
-            async with account_locks.get(account_id):
+            # 2. 占用成功后的整个执行(载数据 + 物料化 + 线程发布 + finish)统一兜底:任何一步抛
+            #    异常都显式 finish(success=False),交回重试/退避机制,绝不让 job 卡死 publishing。
+            try:
+                # 2a. 载 job + account + cookie(会话内取尽所需字段,出会话不再触发 lazy load)
+                async with session_factory() as session:
+                    job = await session.get(PublishJob, job_id)
+                    if job is None:
+                        return
+                    account = await session.get(XhsAccount, job.account_id)
+                    title = job.title
+                    content = job.content
+                    raw_images = json.loads(job.images_json or "[]")
+                    topics = json.loads(job.topics_json or "[]")
+                    cookies = _decrypt_account_cookies(account)
+
+                # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
+                #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
+                #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
+                paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
+                image_paths = [str(p) for p in paths]
+
+                # 2c. 全局浏览器并发闸 + 线程内跑 sync 发布(per-account 串行已由外层锁保证)。
+                #     browser_slot 封顶总 camoufox 数,超出排队;publish 不 block_images(保真)。
                 async with browser_slot():
                     result = await asyncio.to_thread(
                         sync_client.publish_once,
@@ -108,20 +125,20 @@ def make_publish_runner(
                         topics,
                     )
 
-            # 2d. 落状态机(成功→published;失败→重试排期或 failed)
-            await scheduler.finish(job_id, result)
-        except Exception as exc:
-            # publish_once 内部已把可预期失败转成 PublishResult;能逃到这里的是构造/收尾/
-            # 载数据/物料化等意外异常。兜底落一个失败结果,让状态机排重试而非永久 publishing。
-            logger.exception("发布 runner 处理 job {} 异常,兜底转失败", job_id)
-            await scheduler.finish(
-                job_id, sync_client.PublishResult(success=False, error=str(exc))
-            )
-        finally:
-            # C1:无论成败先撤销在途登记(finish 已落终态/重排),之后此 job 若再僵死可正常回收
-            scheduler._in_flight.discard(job_id)
-            # 清理临时物料目录(成功 / 失败 / 提前 return 都清;不存在则忽略)
-            shutil.rmtree(workdir, ignore_errors=True)
+                # 2d. 落状态机(成功→published;失败→重试排期或 failed)
+                await scheduler.finish(job_id, result)
+            except Exception as exc:
+                # publish_once 内部已把可预期失败转成 PublishResult;能逃到这里的是构造/收尾/
+                # 载数据/物料化等意外异常。兜底落失败结果,让状态机排重试而非永久 publishing。
+                logger.exception("发布 runner 处理 job {} 异常,兜底转失败", job_id)
+                await scheduler.finish(
+                    job_id, sync_client.PublishResult(success=False, error=str(exc))
+                )
+            finally:
+                # C1:无论成败先撤销在途登记(finish 已落终态/重排),之后此 job 若再僵死可回收
+                scheduler._in_flight.discard(job_id)
+                # 清理临时物料目录(成功 / 失败 / 提前 return 都清;不存在则忽略)
+                shutil.rmtree(workdir, ignore_errors=True)
 
     return publish_runner
 
@@ -209,6 +226,49 @@ class PublishScheduler:
             await session.commit()
             return result.rowcount
 
+    async def account_cooldown_gate(self, job_id: int) -> bool:
+        """账号级发布冷却门:占用前检查该账号最近一次发布距今是否满足抖动间隔。
+
+        取该账号最近一条 ``published``/``publishing`` job 的 ``started_at``,间隔每次用
+        ``random.uniform(PUBLISH_MIN_INTERVAL_MIN, PUBLISH_MIN_INTERVAL_MAX)`` 现抽(抖动化,
+        避免固定节律指纹)。距今 < 间隔则不发,把本 job 的 ``next_retry_at`` 顺延到
+        ``now + 剩余``、保持 pending(不丢 job,下轮 scan 再捞),返回 ``False`` 让 runner 直接退;
+        满足间隔 / 无历史发布 / job 非 pending 均返回 ``True`` 放行(占用交 mark_publishing 把关)。
+        """
+        now = datetime.utcnow()
+        async with self._session_factory() as session:
+            job = await session.get(PublishJob, job_id)
+            # 非 pending 不在此门处理(可能已被占用/取消),放行给 mark_publishing 原子裁决
+            if job is None or job.status != "pending":
+                return True
+            account_id = job.account_id
+            stmt = (
+                select(PublishJob.started_at)
+                .where(PublishJob.account_id == account_id)
+                .where(PublishJob.status.in_(("published", "publishing")))
+                .where(PublishJob.started_at.is_not(None))
+                .where(PublishJob.id != job_id)
+                .order_by(PublishJob.started_at.desc())
+                .limit(1)
+            )
+            last_started = (await session.execute(stmt)).scalar_one_or_none()
+            if last_started is None:
+                return True
+            interval = random.uniform(
+                settings.PUBLISH_MIN_INTERVAL_MIN, settings.PUBLISH_MIN_INTERVAL_MAX
+            )
+            elapsed = (now - last_started).total_seconds()
+            if elapsed >= interval:
+                return True
+            # 冷却未到:顺延本 job(保持 pending),推后 next_retry_at 到剩余间隔之后
+            job.next_retry_at = now + timedelta(seconds=interval - elapsed)
+            await session.commit()
+            logger.info(
+                "账号 {} 发布冷却中(距上次 {:.0f}s < 间隔 {:.0f}s),job {} 顺延 {:.0f}s",
+                account_id, elapsed, interval, job_id, interval - elapsed,
+            )
+            return False
+
     async def mark_publishing(self, job_id: int) -> bool:
         """原子占用:``UPDATE ... SET status='publishing', started_at=now WHERE id=job_id AND status='pending'``。
 
@@ -258,11 +318,19 @@ class PublishScheduler:
                 job.status = "failed"
                 job.started_at = None
                 job.error = result.error or "需要人工登录/重新扫码"
+            elif getattr(result, "account_restricted", False):
+                # F3:账号被小红书判违规禁发 —— 重发也发不出且是更强高频封号信号,直接终态
+                # failed,不排重试、不增 retries(与 need_manual_login 同源:重试无益且有害)
+                job.status = "failed"
+                job.started_at = None
+                job.error = result.error or "账号被小红书限制发布(违规/处罚态)"
             else:
                 delays = settings.retry_delays
                 if job.retries < len(delays):
-                    # 还有重试额度:按当前 retries 取延迟排下次,再回 pending
-                    job.next_retry_at = now + timedelta(seconds=delays[job.retries])
+                    # 还有重试额度:按当前 retries 取延迟,乘 random.uniform(0.8,1.5) 抖动排下次,
+                    # 再回 pending —— 去掉固定 120/600/1800 的可指纹退避节律。
+                    delay = delays[job.retries] * random.uniform(0.8, 1.5)
+                    job.next_retry_at = now + timedelta(seconds=delay)
                     job.retries += 1
                     job.status = "pending"
                     job.started_at = None

@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     PUBLISH_CONCURRENCY: int = 2
     PUBLISH_RETRY_SCHEDULE: str = "120,600,1800"
     PUBLISH_JOB_TIMEOUT: int = 600
+    # 账号级发布冷却(秒):同一账号两次发布的最小间隔,每次占用前用
+    # random.uniform(MIN, MAX) 现抽,抖动化避免固定节律被指纹化(高频发布是封号信号)。
+    # 冷却未到不丢 job,顺延其 next_retry_at 保持 pending,下轮 scan 再捞。
+    PUBLISH_MIN_INTERVAL_MIN: int = 1200
+    PUBLISH_MIN_INTERVAL_MAX: int = 3600
+    # 每账号每自然日发布上限:建 job 入口达到即顺延到次日活跃窗口起点(带抖动),仍落库 pending。
+    PUBLISH_DAILY_CAP: int = 8
+    # 次日活跃窗口起点(UTC 小时,默认 1 = 北京时间 09:00)与其抖动跨度(秒),
+    # 顺延时间在窗口起点 + random.uniform(0, JITTER) 内落点,避免整点节律。
+    PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR: int = 1
+    PUBLISH_ACTIVE_WINDOW_JITTER_SEC: int = 7200
 
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0
