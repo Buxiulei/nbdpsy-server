@@ -86,6 +86,40 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "qwen-flash"
     LLM_TIMEOUT: int = 15
 
+    # ── 视频管线(transport/remake/revise)──────────────────────────────────
+    # DashScope 单一 apikey 打通 ASR(录音文件识别) + 翻译(qwen-mt) + LLM + VL 四种能力;
+    # 四者共用 compatible-mode(openai 兼容)base_url,ASR 走 dashscope SDK 另说(SDK 自带端点)。
+    DASHSCOPE_API_KEY: str = ""
+    DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # ASR 录音文件识别模型(paraformer 系列,收公网 URL,任务轮询取转写正文)
+    VIDEO_ASR_MODEL: str = "paraformer-v2"
+    # transport 下载阶段的时长闸门(秒):超此时长直接拒收,防超长视频拖垮全链路(源默认 2h)
+    VIDEO_TRANSPORT_MAX_DURATION_SECONDS: int = 7200
+    # 逐句翻译走 qwen-mt 专用档:terms/domains/tm_list 三件套经 extra_body.translation_options 直传
+    VIDEO_MT_MODEL: str = "qwen-mt-plus"
+    # 重写/解析/本地化等通用 LLM 档(openai 兼容 chat)
+    VIDEO_LLM_MODEL: str = "qwen3.7-plus"
+    # 关键帧视觉理解(qwen-vl-max,openai 兼容 multimodal,本地图转 base64 data URL 内联)
+    VIDEO_VL_MODEL: str = "qwen-vl-max"
+
+    # ── 豆包语音 TTS(声音复刻 v3 / seed-icl-2.0),视频配音默认走此 provider ──
+    # v3 HTTP chunked 流式:多行 JSON event,音频在各行 data(base64 mp3 分片),须按行拼接
+    DOUBAO_TTS_APPID: str = ""
+    DOUBAO_TTS_TOKEN: str = ""
+    # 默认复刻音色(牧羊,用户实测确认自然度优于 cosyvoice)
+    DOUBAO_TTS_VOICE: str = "S_hoiqVFN72"
+    DOUBAO_TTS_RESOURCE_ID: str = "seed-icl-2.0"
+    # transport dub 阶段全片统一语速上限(倍率):二分统一语速塞不下总时长时的语速天花板,
+    # 到顶仍溢出则取此值+告警(语速绝不再动,接受残余溢出/漂移)。源默认 1.2。
+    TTS_MAX_RATE: float = 1.2
+
+    # ── 视频 worker 调度(方案 C 独立 asyncio worker,scheduler.py 消费)──
+    # 单机 CPU 编码,并发 1 足够(排队语义与源一致);阶段内 300s 周期 touch heartbeat_at;
+    # 恢复扫描判僵死阈值 900s(15min),超阈从 first_incomplete_stage 续跑。
+    VIDEO_WORKER_CONCURRENCY: int = 1
+    VIDEO_HEARTBEAT_INTERVAL: int = 300
+    VIDEO_STALE_TIMEOUT: int = 900
+
     @property
     def retry_delays(self) -> list[int]:
         """把逗号分隔的重试计划字符串解析为秒数列表。"""

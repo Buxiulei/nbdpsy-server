@@ -33,6 +33,11 @@ chrome 插件 ──(HTTP, Bearer apikey)─────────────
   普通 operator 只能操作被 `grant_account_access` 授权的号。cookie 每个小红书账号**唯一
   一行**(共享 cookie),不按 operator 分裂。
 - **登录外置**:服务端不做登录,chrome 插件把用户已登录的 cookie 推到 `/cookies/import`。
+- **视频能力(搬运/再制作/修订)**:`/api/video/*` 端点建任务,由**独立 asyncio worker 进程**
+  (`nbdpsy-video-worker.service`,与 API 进程隔离——API 重启不杀长任务)轮询 DB 状态机执行。
+  能力覆盖 YouTube 搬运(下载→转写→翻译→配音→烧字幕出片)、分镜级再制作(remake)与成片
+  自然语言修订(revise 增量重制);产物落 `DATA_DIR/uploads/video/` 经 HMAC token 目录直链下载。
+  详见 `app/video/` 与 `docs/DEPLOY.md`「视频 worker」节。
 
 ---
 
@@ -45,9 +50,11 @@ app/
   auth/                # apikey 中间件 / ContextVar 运营者上下文 / RBAC guards / bootstrap root
   models/              # operator / operator_account_access / xhs_account / publish_job
   services/            # operator_service / account_service / cookie_service(纯业务层)
-  http/                # REST 端点:system / manifest / accounts / admin / cookies / publish / extension / downloads
+  http/                # REST 端点:system / manifest / accounts / admin / cookies / publish / extension / downloads / video
   browser/             # sync_client(Camoufox 发布/检测) / profile_guard / fingerprint / cookie_checker
   publish/             # queue(asyncio 队列 + 锁) / scheduler(状态机 + 恢复) / runtime(调度器单例)
+  video/               # 视频搬运/再制作管线:providers(薄 AI 直连) / scheduler(方案 C 调度器) /
+                       #   worker(独立进程入口) / stages / paths(HMAC 产物目录) / pipeline(七阶 + remake 全家)
 alembic/               # DB 迁移
 chrome-extension/      # Manifest V3 插件(推 cookie)
 scripts/               # xvfb.sh / run.sh / pack_extension.sh
