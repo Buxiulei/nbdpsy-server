@@ -497,3 +497,55 @@ async def test_placeholder_push_does_not_clean_prior_placeholder(db: AsyncSessio
     # 两次占位推送都 cleaned==0(_push_placeholder 内已断言),两行都在
     assert await _count_account(db, ph1.id) == 1
     assert await _count_account(db, ph2.id) == 1
+
+
+# ---------------- 加固:字面前缀判据 / 清理 best-effort / DELETE 重申判据 ----------------
+
+
+async def test_literal_prefix_not_wildcard_exempt(db: AsyncSession):
+    """修1:name 下划线按字面匹配(非 LIKE 单字符通配符)——形如 xhsXaccountY 的 user_id 空真号不被误清。"""
+    op = await _make_operator(db)
+    # 该名命中旧 like('xhs_account_%') 通配符(下划线当任意单字符),但不匹配字面前缀 'xhs_account_'
+    decoy = await _push_placeholder(db, op, name="xhsXaccountY123")
+
+    _, _, cleaned = await cookie_service.import_cookies(
+        db, op, "真号", [{"name": "a", "value": "x"}], {"user_id": "u-real"}
+    )
+    assert cleaned == 0
+    assert await _count_account(db, decoy.id) == 1
+
+
+async def test_cleanup_best_effort_swallows_error(db: AsyncSession, monkeypatch):
+    """修2:清理阶段抛异常(如锁竞争)不拖垮主导入——import_cookies 正常返回、cookie 落库、cleaned==0。"""
+    op = await _make_operator(db)
+    placeholder = await _push_placeholder(db, op)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("模拟清理阶段锁竞争 OperationalError")
+
+    monkeypatch.setattr(cookie_service, "_clean_placeholder_accounts", _boom)
+
+    acc, created, cleaned = await cookie_service.import_cookies(
+        db, op, "真号", [{"name": "web_session", "value": "real"}], {"user_id": "real1"}
+    )
+    assert created is True
+    assert cleaned == 0
+    assert acc.login_cookies  # 主导入已落库 cookie
+    assert await _count_account(db, acc.id) == 1
+    # 占位行仍在(清理没跑成),留给 TTL reaper 兜底
+    assert await _count_account(db, placeholder.id) == 1
+
+
+async def test_delete_reasserts_predicate_skips_upgraded(db: AsyncSession):
+    """修3:DELETE 段重申判据——SELECT 后被并发回填 user_id 升级成真号的行,DELETE 时豁免;账号与授权行都存活。"""
+    op = await _make_operator(db)
+    placeholder = await _push_placeholder(db, op, name="xhs_account_777")
+    # 模拟 SELECT→DELETE 之间该行被并发 import 原地回填 user_id 升级成真号
+    row = await db.get(XhsAccount, placeholder.id)
+    row.user_id = "upgraded-mid-race"
+    await db.commit()
+
+    deleted = await cookie_service.delete_placeholder_rows(db, [placeholder.id])
+    assert deleted == 0
+    assert await _count_account(db, placeholder.id) == 1
+    assert await _count_access_of_account(db, placeholder.id) == 1

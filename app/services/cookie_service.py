@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timedelta
 
 from loguru import logger
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from app.core.security import decrypt_cookies, encrypt_cookies
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.xhs_account import XhsAccount
 from app.services.operator_service import grant_access
+from app.services.placeholder_reaper import delete_placeholder_rows, placeholder_clauses
 
 # sameSite 值映射表(小写/别名 → Camoufox/Playwright 要求的首字母大写形式)。
 # 'unspecified' 与未识别值统一落到默认 'Lax'。
@@ -87,11 +88,12 @@ async def _clean_placeholder_accounts(
 ) -> int:
     """真登录成功后清理同 operator 近窗内的占位废账号行及其授权行,返回删除的账号数。
 
-    仅当调用方本次落库的是"真身份"行(user_id 非空)时才调用。清理判据(与需求 §7.2 逐字一致):
-    ``user_id IS NULL AND name LIKE 'xhs_account_%'``,且 created_at 在近
-    ``PLACEHOLDER_CLEAN_WINDOW_MINUTES`` 分钟窗口内,且该行在 operator_account_access 里有
-    ``operator_id == 本次导入 operator`` 的授权行(同 operator 限定,保证并发不误删他人),
-    且 ``id != kept_account_id``(绝不误删本次落库的真号)。命中则删授权行 + 删账号行。
+    仅当调用方本次落库的是"真身份"行(user_id 非空)时才调用。清理判据(与需求 §7.2 一致):
+    ``user_id IS NULL AND name`` 字面前缀 ``xhs_account_``(下划线按字面,非通配符,见
+    placeholder_clauses),且 created_at 在近 ``PLACEHOLDER_CLEAN_WINDOW_MINUTES`` 分钟窗口内,
+    且该行在 operator_account_access 里有 ``operator_id == 本次导入 operator`` 的授权行(同
+    operator 限定,保证并发不误删他人),且 ``id != kept_account_id``(绝不误删本次落库的真号)。
+    命中则经 delete_placeholder_rows 删除(DELETE 内重申判据防并发升级误删 + 授权行按实际删除收窄)。
     """
     cutoff = datetime.utcnow() - timedelta(
         minutes=settings.PLACEHOLDER_CLEAN_WINDOW_MINUTES
@@ -104,8 +106,7 @@ async def _clean_placeholder_accounts(
                 OperatorAccountAccess.xhs_account_id == XhsAccount.id,
             )
             .where(
-                XhsAccount.user_id.is_(None),
-                XhsAccount.name.like("xhs_account_%"),
+                *placeholder_clauses(),
                 XhsAccount.created_at >= cutoff,
                 OperatorAccountAccess.operator_id == operator_id,
                 XhsAccount.id != kept_account_id,
@@ -115,19 +116,35 @@ async def _clean_placeholder_accounts(
     if not rows:
         return 0
     ids = [row.id for row in rows]
-    await session.execute(
-        delete(OperatorAccountAccess).where(
-            OperatorAccountAccess.xhs_account_id.in_(ids)
-        )
-    )
-    await session.execute(delete(XhsAccount).where(XhsAccount.id.in_(ids)))
+    deleted = await delete_placeholder_rows(session, ids)
     await session.commit()
-    logger.info(
-        f"[cookie_import] 真登录成功清理占位废账号 operator={operator_id} "
-        f"删除 {len(ids)} 行: "
-        + ", ".join(f"{row.id}:{row.name}" for row in rows)
-    )
-    return len(ids)
+    if deleted:
+        logger.info(
+            f"[cookie_import] 真登录成功清理占位废账号 operator={operator_id} "
+            f"删除 {deleted}/{len(ids)} 候选: "
+            + ", ".join(f"{row.id}:{row.name}" for row in rows)
+        )
+    return deleted
+
+
+async def _clean_placeholders_best_effort(
+    session: AsyncSession, operator_id: int, kept_account_id: int
+) -> int:
+    """best-effort 包裹占位清理:清理阶段任何异常(如锁竞争 OperationalError)都不拖垮已提交的
+    主导入,仅 logger.warning 记录并返回 0(与 placeholder_reaper 单轮兜异常对称)。
+
+    不 rollback:主账号已在 import_cookies 内先行 commit,清理是提交之后的独立收尾;返回的账号
+    对象须保持已加载属性(供端点读 account.id/created),故不触碰会话事务状态,由调用方
+    (get_session 上下文)关闭时统一清理未提交的清理改动。
+    """
+    try:
+        return await _clean_placeholder_accounts(session, operator_id, kept_account_id)
+    except Exception as exc:
+        logger.warning(
+            f"[cookie_import] 占位清理失败(不影响主导入,cookie 已落库) "
+            f"operator={operator_id}: {exc}"
+        )
+        return 0
 
 
 async def import_cookies(
@@ -185,7 +202,7 @@ async def import_cookies(
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
         cleaned = (
-            await _clean_placeholder_accounts(session, operator.id, existing.id)
+            await _clean_placeholders_best_effort(session, operator.id, existing.id)
             if existing.user_id
             else 0
         )
@@ -211,7 +228,7 @@ async def import_cookies(
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
         cleaned = (
-            await _clean_placeholder_accounts(session, operator.id, existing.id)
+            await _clean_placeholders_best_effort(session, operator.id, existing.id)
             if existing.user_id
             else 0
         )
@@ -219,7 +236,7 @@ async def import_cookies(
     # expire_on_commit=False,commit 后 account.id 已可安全读取。
     await grant_access(session, operator.id, account.id, operator.id)
     cleaned = (
-        await _clean_placeholder_accounts(session, operator.id, account.id)
+        await _clean_placeholders_best_effort(session, operator.id, account.id)
         if account.user_id
         else 0
     )

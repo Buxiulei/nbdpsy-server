@@ -99,6 +99,19 @@ async def test_reap_noop_when_nothing_stale(db_factory, monkeypatch):
     assert await reap_placeholders_once(db_factory) == 0
 
 
+async def test_reap_literal_prefix_not_wildcard(db_factory, monkeypatch):
+    """修1:reaper 按字面前缀——形如 xhsXaccountY 的 user_id 空真号即便超龄也不被删。"""
+    monkeypatch.setattr(reaper_mod.settings, "PLACEHOLDER_TTL_HOURS", 24)
+    op_id = await _make_operator(db_factory)
+    # 命中旧通配符但不匹配字面前缀 'xhs_account_' 的真号名
+    decoy_id = await _push(db_factory, op_id, "xhsXaccountY123", None)
+    await _age_created_at(db_factory, decoy_id, timedelta(hours=25))
+
+    assert await reap_placeholders_once(db_factory) == 0
+    async with db_factory() as s:
+        assert (await s.get(XhsAccount, decoy_id)) is not None
+
+
 # ---------------- lifespan 开关(类比 browser_reaper) ----------------
 
 

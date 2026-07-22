@@ -22,20 +22,62 @@ from app.core.config import settings
 from app.models.operator import OperatorAccountAccess
 from app.models.xhs_account import XhsAccount
 
+# 占位废账号 name 的字面前缀(插件 accountName 时间戳兜底 = f"xhs_account_{Date.now()}")。
+PLACEHOLDER_NAME_PREFIX = "xhs_account_"
+
+
+def placeholder_clauses():
+    """占位废账号字面判据(需求 §7.2)的 SQL 子句:user_id 为空 + name 字面前缀。
+
+    ``startswith(PREFIX, autoescape=True)`` 生成带 ESCAPE 的字面前缀 LIKE
+    (``name LIKE 'xhs\\_account\\_%' ESCAPE ...``),把 name 里的下划线当普通字符而非 LIKE
+    单字符通配符——否则昵称形如 ``xhsXaccountY`` 且 user_id 为空的真号会被误纳入清理集,
+    违反需求 §5(不丢可能有效的 cookie)。方向 A(cookie_service 自愈)与方向 B(本模块 TTL
+    回收)共用本判据,保证清理口径单一来源、不漂移。
+    """
+    return (
+        XhsAccount.user_id.is_(None),
+        XhsAccount.name.startswith(PLACEHOLDER_NAME_PREFIX, autoescape=True),
+    )
+
+
+async def delete_placeholder_rows(session, ids) -> int:
+    """删除 ids 中"仍满足占位判据"的账号行及其授权行,返回实际删除的账号数。不自 commit。
+
+    DELETE 内重申判据是并发防线:SELECT→DELETE 之间被并发 import 原地回填 user_id 升级成真号
+    的行,DELETE 时因不再满足 ``user_id IS NULL`` 而豁免(账号行不删)。授权行只清"账号确已不存在
+    (即刚被本次删掉)"的——按 ``xhs_account_id NOT IN (现存账号 id)`` 收窄,保证被升级成真号的
+    行其授权行不被多删。
+    """
+    if not ids:
+        return 0
+    result = await session.execute(
+        delete(XhsAccount).where(XhsAccount.id.in_(ids), *placeholder_clauses())
+    )
+    deleted = result.rowcount
+    if deleted:
+        await session.execute(
+            delete(OperatorAccountAccess).where(
+                OperatorAccountAccess.xhs_account_id.in_(ids),
+                OperatorAccountAccess.xhs_account_id.not_in(select(XhsAccount.id)),
+            )
+        )
+    return deleted
+
 
 async def reap_placeholders_once(session_factory) -> int:
-    """扫一轮:删超 TTL 的占位废账号(user_id 空 + xhs_account_ 前缀)及其授权行,返回删除数。
+    """扫一轮:删超 TTL 的占位废账号(user_id 空 + xhs_account_ 字面前缀)及其授权行,返回删除数。
 
-    仅删满足全部三条件的行:user_id 为空、name 以 xhs_account_ 开头、created_at 早于
-    utcnow - PLACEHOLDER_TTL_HOURS。带 user_id 的号(即便超龄)与未超龄的占位都不动。
+    仅删满足全部三条件的行:user_id 为空、name 以 xhs_account_ 字面开头、created_at 早于
+    utcnow - PLACEHOLDER_TTL_HOURS。带 user_id 的号(即便超龄)与未超龄的占位都不动。删除走
+    delete_placeholder_rows(DELETE 内重申判据 + 授权行按实际删除收窄)。
     """
     cutoff = datetime.utcnow() - timedelta(hours=settings.PLACEHOLDER_TTL_HOURS)
     async with session_factory() as session:
         rows = (
             await session.execute(
                 select(XhsAccount.id, XhsAccount.name).where(
-                    XhsAccount.user_id.is_(None),
-                    XhsAccount.name.like("xhs_account_%"),
+                    *placeholder_clauses(),
                     XhsAccount.created_at < cutoff,
                 )
             )
@@ -43,18 +85,14 @@ async def reap_placeholders_once(session_factory) -> int:
         if not rows:
             return 0
         ids = [row.id for row in rows]
-        await session.execute(
-            delete(OperatorAccountAccess).where(
-                OperatorAccountAccess.xhs_account_id.in_(ids)
-            )
-        )
-        await session.execute(delete(XhsAccount).where(XhsAccount.id.in_(ids)))
+        deleted = await delete_placeholder_rows(session, ids)
         await session.commit()
-    logger.info(
-        f"[placeholder_reaper] TTL 回收占位废账号 删除 {len(ids)} 行: "
-        + ", ".join(f"{row.id}:{row.name}" for row in rows)
-    )
-    return len(ids)
+    if deleted:
+        logger.info(
+            f"[placeholder_reaper] TTL 回收占位废账号 删除 {deleted}/{len(ids)} 候选: "
+            + ", ".join(f"{row.id}:{row.name}" for row in rows)
+        )
+    return deleted
 
 
 class PlaceholderReaper:
