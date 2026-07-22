@@ -192,13 +192,22 @@ async def asr_transcribe(audio_url: str) -> list[dict]:
     return _parse_transcription(payload)
 
 
-async def mt_translate(texts: list[str], *, term_sheet: list[dict]) -> list[str]:
+async def mt_translate(
+    texts: list[str],
+    *,
+    term_sheet: list[dict],
+    domains: str | None = None,
+    tm_list: list[dict] | None = None,
+) -> list[str]:
     """qwen-mt 逐句翻译（英→中），N 进 N 出保时间轴。
 
-    内部构造 translation_options（source_lang/target_lang/terms）经 extra_body 直传——
-    model=VIDEO_MT_MODEL 与 translation_options 必须同时到位（三件套保真的命门）。
-    term_sheet 元素形如 {"en","zh","source"}，取 en/zh 组装 terms。并发上限 _MT_CONCURRENCY，
-    任一句失败抛原异常（不重试、不回退，由调用方按源语义兜底）。
+    内部构造 translation_options（source_lang/target_lang/terms[/domains/tm_list]）经
+    extra_body 直传——model=VIDEO_MT_MODEL 与 translation_options 必须同时到位（三件套保真的命门）。
+    term_sheet 元素形如 {"en","zh","source"}，取 en/zh 组装 terms。domains（领域+风格描述）与
+    tm_list（[{"source","target"}] 上文译对）为可选上下文增强：**非 None 才进 options**，由调用方
+    （M3 translator）无状态喂入（provider 不维护滑窗，per-call 一份上下文应用于本批全部 texts，
+    与源 _mt_domains/_TM_WINDOW 消费面同构）。并发上限 _MT_CONCURRENCY，任一句失败抛原异常
+    （不重试、不回退，由调用方按源语义兜底）。
     """
     if not texts:
         return []
@@ -207,7 +216,11 @@ async def mt_translate(texts: list[str], *, term_sheet: list[dict]) -> list[str]
         for t in term_sheet or []
         if t.get("en") and t.get("zh")
     ]
-    options = {"source_lang": "English", "target_lang": "Chinese", "terms": terms}
+    options: dict = {"source_lang": "English", "target_lang": "Chinese", "terms": terms}
+    if domains is not None:
+        options["domains"] = domains
+    if tm_list is not None:
+        options["tm_list"] = tm_list
     client = _openai_client()
     sem = asyncio.Semaphore(_MT_CONCURRENCY)
 
@@ -251,12 +264,18 @@ async def vl_describe(image_path: str, prompt: str) -> str:
     return resp.choices[0].message.content or ""
 
 
-async def tts_synthesize(text: str, *, voice: str, out_path: str) -> float:
+async def tts_synthesize(
+    text: str, *, voice: str, out_path: str, rate: float = 1.0
+) -> float:
     """豆包声音复刻 v3 合成 → wav 落 out_path，返回音频时长（秒）。
 
     v3 chunked 流式：拼各行 data（base64 mp3 分片）成完整 mp3 → ffmpeg 转 wav 24kHz mono。
     空音频/带 error 的响应抛 RuntimeError（原异常，不重试）。
+    rate：语速倍率（1.0 基准），映射到火山 speech_rate（整数百分比，0 基准，钳 [-50,100]）——
+    M3 dubber 的「二分统一语速 + 超槽重合成压缩」机制据此调速（源 tts.synthesize(rate=...) 消费面）。
     """
+    # 语速映射：cosyvoice rate（1.0 基准）→ 火山 speech_rate（整数百分比，0 基准），钳 [-50,100]
+    speech_rate = max(-50, min(100, int(round((rate - 1.0) * 100))))
     headers = {
         "X-Api-Key": settings.DOUBAO_TTS_TOKEN,
         "X-Api-Resource-Id": settings.DOUBAO_TTS_RESOURCE_ID,
@@ -268,7 +287,9 @@ async def tts_synthesize(text: str, *, voice: str, out_path: str) -> float:
         "req_params": {
             "text": text,
             "speaker": voice,
-            "audio_params": {"format": "mp3", "sample_rate": 24000},
+            "audio_params": {
+                "format": "mp3", "sample_rate": 24000, "speech_rate": speech_rate,
+            },
         },
     }
     async with httpx.AsyncClient(timeout=60) as client:

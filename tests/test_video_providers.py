@@ -97,6 +97,25 @@ async def test_mt_translate_preserves_order_and_direct_passes_options(monkeypatc
     assert _FakeAsyncOpenAI.last_init_kwargs["base_url"] == settings.DASHSCOPE_BASE_URL
 
 
+async def test_mt_translate_optional_domains_and_tm_list(monkeypatch):
+    """domains/tm_list 非 None 才进 translation_options；缺省则不出现（provider 无状态）。"""
+    calls = _install_fake_openai(monkeypatch, lambda kw: "z")
+    domains = 'A Chinese psychology popular-science video about "CPTSD".'
+    tm = [{"source": "prior en", "target": "上文译文"}]
+    await providers.mt_translate(
+        ["s"], term_sheet=[], domains=domains, tm_list=tm)
+    opts = calls[0]["extra_body"]["translation_options"]
+    assert opts["domains"] == domains
+    assert opts["tm_list"] == tm
+
+    # 缺省不塞 domains/tm_list（只留 source_lang/target_lang/terms）
+    calls2 = _install_fake_openai(monkeypatch, lambda kw: "z")
+    await providers.mt_translate(["s"], term_sheet=[])
+    opts2 = calls2[0]["extra_body"]["translation_options"]
+    assert "domains" not in opts2
+    assert "tm_list" not in opts2
+
+
 async def test_mt_translate_empty_returns_empty(monkeypatch):
     _install_fake_openai(monkeypatch, lambda kw: "x")
     assert await providers.mt_translate([], term_sheet=[]) == []
@@ -333,6 +352,56 @@ async def test_tts_synthesize_streams_and_returns_duration(monkeypatch, tmp_path
     assert captured["headers"]["X-Api-App-Id"] == settings.DOUBAO_TTS_APPID
     assert captured["headers"]["X-Api-Resource-Id"] == settings.DOUBAO_TTS_RESOURCE_ID
     assert captured["body"]["req_params"]["speaker"] == "S_hoiqVFN72"
+
+
+@pytest.mark.parametrize(
+    "rate,expected",
+    [(1.0, 0), (1.5, 50), (0.5, -50), (2.0, 100), (3.0, 100), (0.1, -50)],
+)
+async def test_tts_synthesize_rate_maps_to_speech_rate(
+    monkeypatch, tmp_path, rate, expected):
+    """rate（1.0 基准倍率）→ 火山 speech_rate（整数百分比，钳 [-50,100]）。"""
+    raw = _stream_bytes([b"MP3"])
+    captured: dict = {}
+
+    class _StreamResp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aiter_bytes(self):
+            yield raw
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, *, headers, json):
+            captured["body"] = json
+            return _StreamResp()
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _Client)
+
+    async def _fake_conv(audio, out_path):
+        with wave.open(out_path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * 24000)
+
+    monkeypatch.setattr(providers, "_mp3_bytes_to_wav", _fake_conv)
+
+    await providers.tts_synthesize(
+        "x", voice="v", out_path=str(tmp_path / "o.wav"), rate=rate)
+    assert captured["body"]["req_params"]["audio_params"]["speech_rate"] == expected
 
 
 async def test_tts_synthesize_raises_on_empty_audio(monkeypatch, tmp_path):

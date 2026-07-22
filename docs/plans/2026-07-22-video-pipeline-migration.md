@@ -23,7 +23,8 @@
 
 ## 接口契约（跨 track 绑定）
 
-- providers（M1 产，M3 消费）：`async asr_transcribe(audio_url:str)->list[dict{start,end,text}]` / `async mt_translate(texts:list[str],*,term_sheet)->list[str]`（内部构造 translation_options 直传） / `async llm_chat(messages:list[dict],*,temperature=0.3)->str` / `async vl_describe(image_path:str,prompt:str)->str` / `async tts_synthesize(text:str,*,voice:str,out_path:str)->float`（返回时长秒）。全部失败抛原异常，重试由调用方按源语义。
+- providers（M1 产，M3 消费）：`async asr_transcribe(audio_url:str)->list[dict{start,end,text}]` / `async mt_translate(texts:list[str],*,term_sheet,domains:str|None=None,tm_list:list[dict]|None=None)->list[str]`（内部构造 translation_options 直传；domains/tm_list 非 None 才进 options，无状态由调用方喂上下文） / `async llm_chat(messages:list[dict],*,temperature=0.3)->str` / `async vl_describe(image_path:str,prompt:str)->str` / `async tts_synthesize(text:str,*,voice:str,out_path:str,rate:float=1.0)->float`（返回时长秒；rate 映射火山 speech_rate 供 dubber 统一语速/压缩）。全部失败抛原异常，重试由调用方按源语义。
+  - **M1 审查后契约微扩**（审查 I-1/I-2）：plan 冻结契约窄于源，裁决=微扩、provider 保持薄——`mt_translate` 加可选 `domains/tm_list`（与源 `_mt_domains`/`_TM_WINDOW` 消费面同构）；`tts_synthesize` 加 `rate`（恢复源 doubao_tts 的 `audio_params.speech_rate` 映射，M3 dubber 二分统一语速依赖）。
 - scheduler（M2 产，M3/M4 消费）：`STAGE_ORDER/REMAKE_STAGE_ORDER` 与源一致；handler 注册表 `STAGE_HANDLERS: dict[str, async (job, session, ctx)->stats]`；`ctx={"deadline": monotonic秒}`；`enqueue(job_id)` 即置 queued（worker 轮询取）；`create_job/create_revision_job/fail_job/finish_job/update_stage/first_incomplete_stage` 语义与源 job_store 一致（改 async + AsyncSession）。
 - paths（M1 产）：`raw_dir/tts_dir/out_dir(job_id)->Path`（根 `DATA_DIR/uploads/video/{id}-{hmac16}/`）、`to_public_url(path)->"/uploads/video/..."`。
 
