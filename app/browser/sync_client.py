@@ -18,9 +18,10 @@
 - ``PublishResult``:``{success, note_id, note_url, error, need_manual_login}``;
   返回契约**允许 success=True 但 note_id=""**(只有 note_url)。
 """
+import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -55,6 +56,43 @@ def _ark_blackhole_pac_url() -> str:
     import base64
     b64 = base64.b64encode(_ARK_BLACKHOLE_PAC.encode("utf-8")).decode("ascii")
     return "data:application/x-ns-proxy-autoconfig;base64," + b64
+
+
+def _resolve_headed_display() -> Optional[Tuple[str, str]]:
+    """动态解析本用户(roots)图形会话的 (DISPLAY, XAUTHORITY)。
+
+    headed 浏览器要接到真屏(RTX 4090)会话做硬件渲染,而 gdm autologin 的图形会话
+    display 号(:0/:1)与 auth 路径可能随会话重启/回落 greeter 而变——硬编码 systemd env
+    会失效。故运行时扫本 uid 的 gnome-session/gnome-shell 进程,读其 /proc/<pid>/environ
+    里的 DISPLAY+XAUTHORITY(排除 Xvfb :99 与 Wayland)。找到即返回,让浏览器始终跟随当前
+    真实图形会话;找不到返回 None(回落调用方环境里的 DISPLAY)。
+    """
+    import glob
+    uid = os.getuid()
+    for pid_dir in glob.glob("/proc/[0-9]*"):
+        try:
+            if os.stat(pid_dir).st_uid != uid:
+                continue
+            with open(pid_dir + "/comm", encoding="utf-8", errors="ignore") as f:
+                comm = f.read().strip()
+            # comm 被内核截断到 15 字符:gnome-session-binary → "gnome-session-b"
+            if comm not in ("gnome-session-b", "gnome-shell"):
+                continue
+            env: Dict[str, str] = {}
+            with open(pid_dir + "/environ", "rb") as f:
+                for kv in f.read().split(b"\x00"):
+                    if b"=" in kv:
+                        k, _, v = kv.partition(b"=")
+                        env[k.decode("utf-8", "ignore")] = v.decode("utf-8", "ignore")
+            if env.get("WAYLAND_DISPLAY"):
+                continue  # Wayland 会话不适用(需 X11 让 camoufox headed)
+            disp = (env.get("DISPLAY") or "").strip()
+            if disp and disp != ":99":  # 排除 Xvfb 虚拟屏
+                xauth = (env.get("XAUTHORITY") or "").strip() or f"/run/user/{uid}/gdm/Xauthority"
+                return (disp, xauth)
+        except Exception:
+            continue
+    return None
 
 
 @dataclass
@@ -190,6 +228,23 @@ class SyncClient:
             pdir.mkdir(parents=True, exist_ok=True)
             clean_locks(pdir)
             delete_cookies_db(pdir)
+
+            # headed 模式:动态把 DISPLAY/XAUTHORITY 指向 roots 当前真实图形会话(真屏 4090),
+            # 不依赖 systemd 硬编码——会话 display 号/auth 变动或回落 greeter 时自动跟随/告警。
+            if not self.headless:
+                resolved = _resolve_headed_display()
+                if resolved:
+                    os.environ["DISPLAY"], os.environ["XAUTHORITY"] = resolved
+                    logger.info(
+                        f"[SyncClient] headed 接真屏图形会话 DISPLAY={resolved[0]} "
+                        f"XAUTHORITY={resolved[1]}"
+                    )
+                else:
+                    logger.warning(
+                        "[SyncClient] 未找到 roots 真实图形会话(可能掉回 gdm greeter);"
+                        f"沿用环境 DISPLAY={os.environ.get('DISPLAY', '?')}——"
+                        "若是 :99/greeter,headed 接 4090 会失败,请检查 autologin 会话"
+                    )
 
             # 从 UA 推断操作系统
             ua = fp.user_agent or ""

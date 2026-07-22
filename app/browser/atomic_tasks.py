@@ -626,11 +626,11 @@ class XHSPublishAtomicTasks:
             # (标题框 placeholder「填写标题会有更多赞哦」出现)。失败再回退 set_input_files。
             logger.info(f"2.4 点「上传图片」按钮上传 {len(image_paths)} 张(file_chooser)...")
             uploaded_ok = False
+            gesture_made = False  # 「上传图片」按钮的真人点击手势是否已做出
             try:
                 with self.page.expect_file_chooser(timeout=8000) as fc_info:
-                    clicked = False
                     # 合规:拟人化点「上传图片」按钮(定位坐标 → human.click 真实按压),
-                    # 真实用户手势才能触发原生 file_chooser,禁裸 page.click。
+                    # 真实用户手势才触发原生 file_chooser,禁裸 page.click。
                     for sel in ["button:has-text('上传图片')", "text=上传图片"]:
                         try:
                             bb = self.page.locator(sel).first.bounding_box(timeout=4000)
@@ -641,28 +641,47 @@ class XHSPublishAtomicTasks:
                                  bb["y"] + bb["height"] * 0.5),
                                 reason="上传图片按钮",
                             )
-                            clicked = True
+                            gesture_made = True
                             break
                         except Exception:
                             continue
-                    if not clicked:
+                    if not gesture_made:
                         raise RuntimeError("未找到「上传图片」按钮")
                 fc_info.value.set_files(image_paths)
                 logger.info("✓ file_chooser 已设置全部图片")
                 uploaded_ok = True
             except Exception as e:
-                logger.warning(f"file_chooser 上传失败({e}),回退 set_input_files 到隐藏 input")
+                logger.warning(f"file_chooser 上传失败({e})")
 
             if not uploaded_ok:
-                # 【拒绝无手势上传】file_chooser(点「上传图片」按钮触发原生选择器)失败时,过去回退
-                # 到直接对隐藏 input set_input_files——绕过真人点击手势、零 pointer 事件,正是
-                # AI托管检测盯的自动化特征;且该兜底下游常"只存草稿+页面重置"产坏草稿。改为
-                # fail-closed:直接判失败,交状态机重试拟人化 file_chooser 路径,绝不无手势注入文件。
-                return {
-                    "success": False,
-                    "error": "file_chooser(点上传按钮)触发失败,拒绝无手势 set_input_files 回退",
-                    "screenshot": self._take_screenshot("03_02_filechooser_failed"),
-                }
+                if not gesture_made:
+                    # 连「上传图片」按钮都点不到 → 无合法手势途径,fail-closed,拒绝无手势注入。
+                    return {
+                        "success": False,
+                        "error": "未找到可点击的「上传图片」按钮,拒绝无手势上传",
+                        "screenshot": self._take_screenshot("03_02_no_upload_button"),
+                    }
+                # 手势已做出(human.click 点过「上传图片」按钮),仅 file_chooser 事件未被 Playwright
+                # 拦截(headed Firefox 下 file_chooser 拦截不稳)。此时补 set_input_files 完成上传
+                # **不算无手势**——真人点击已先行发生,只是换个原语把文件灌进已触发的 input。
+                try:
+                    self.page.keyboard.press("Escape")  # 关掉点击可能弹出的原生文件对话框
+                except Exception:
+                    pass
+                upload_input = self._find_element_with_retry(
+                    ["input[type='file'][accept*='image']", "input[type='file']"],
+                    timeout=10, must_be_visible=False,
+                    intent_key="upload_image_input", intent_desc="上传图片的 file input",
+                )
+                if not upload_input:
+                    return {
+                        "success": False,
+                        "error": "手势已做但未找到 file input,上传失败",
+                        "screenshot": self._take_screenshot("03_02_no_file_input"),
+                    }
+                upload_input.set_input_files(image_paths)
+                logger.info("✓ 手势已做+file_chooser未拦截,回退 set_input_files 完成上传")
+                uploaded_ok = True
 
             self.page.wait_for_load_state("domcontentloaded", timeout=10000)
             self.human.wait(1.5, 2.5, context="上传完成")
