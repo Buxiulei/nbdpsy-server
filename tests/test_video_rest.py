@@ -6,6 +6,7 @@
 起，故 job 建后停在 queued 便于断言。
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import app.core.db as db_module
@@ -306,14 +307,33 @@ async def test_revise_400_on_edit_plan_error(tmp_path, monkeypatch):
 # ── 删除 ────────────────────────────────────────────────────────────────
 
 async def test_delete_409_running(tmp_path, monkeypatch):
+    """running + 心跳非 NULL = 被 worker 真占用（mark_running 刷了心跳）→ 409 不可删。"""
     async with rest_client(tmp_path, monkeypatch) as client:
         await _new_op("op-vid-d1")
         job_id = (await client.post(
             "/api/video/jobs", json={"url": _YT},
             headers=bearer("op-vid-d1"))).json()["job_id"]
-        await _set_row(job_id, status="running")
+        # 造「被 worker 占用」态：running 且心跳非 NULL
+        await _set_row(job_id, status="running", heartbeat_at=datetime.utcnow())
         r = await client.delete(f"/api/video/jobs/{job_id}", headers=bearer("op-vid-d1"))
         assert r.status_code == 409
+
+
+async def test_delete_allows_running_with_null_heartbeat(tmp_path, monkeypatch):
+    """C1：running + 心跳 NULL = 从未被 worker 占用的暂存态（revision 继承窗口 API 崩溃残留）→
+    放行删除，作为唯一 API 补救（retry 对 running 一律 409）。"""
+    monkeypatch.setattr(config_module.settings, "DATA_DIR", str(tmp_path / "data"))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        await _new_op("op-vid-dnull")
+        job_id = (await client.post(
+            "/api/video/jobs", json={"url": _YT},
+            headers=bearer("op-vid-dnull"))).json()["job_id"]
+        # 造暂存/崩溃残留态：running 但心跳 NULL（未被 worker 占用）
+        await _set_row(job_id, status="running", heartbeat_at=None)
+        r = await client.delete(f"/api/video/jobs/{job_id}", headers=bearer("op-vid-dnull"))
+        assert r.status_code == 200
+        assert r.json()["deleted"] == job_id
+        assert await _get_row(job_id) is None
 
 
 async def test_delete_removes_row(tmp_path, monkeypatch):

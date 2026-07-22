@@ -57,8 +57,10 @@ STAGE_BUDGET_SECONDS = {
     "render": 5400, "compose": 3600,
 }
 
-# 僵死判定阈值（分钟）：status=running 且心跳超此时长 → recovery 判僵死续跑。
-_STALE_MINUTES = 15
+# 僵死判定阈值默认值（秒）：status=running 且心跳超此时长 → recovery 判僵死续跑。
+# 默认 900s(=15min)；worker 进程按 settings.VIDEO_STALE_TIMEOUT 注入构造器覆盖（m2 配置接线，
+# 见 app/video/worker.py），使 DEPLOY.md 里「VIDEO_STALE_TIMEOUT 是活旋钮」为真。
+_STALE_TIMEOUT_SECONDS = 900
 # 单个 job 恢复重排上限：超此次数直接判死，避免坏 job 无限重排。
 _MAX_RETRIES = 2
 # 阶段内心跳泵间隔（秒）：handler 执行期间每这么多秒 touch 一次心跳，让长阶段（analyze
@@ -141,7 +143,17 @@ async def create_revision_job(session, parent, *, instructions: str, edit_plan: 
     新行 mode=remake、parent_job_id 指向被修订父 job；options 深拷贝父配置（voice/burn 等
     pipeline 参数，revision 重跑才与父同参）并加 revision 块（原始意见 instructions + 解析出
     的编辑清单 edit_plan）。term_sheet 继承父 job——translate 阶段被跳过（继承），不继承则
-    deliver 术语表为空。修订链不限层数——parent 传上一层 job 即可（revision 的 revision 允许）。"""
+    deliver 术语表为空。修订链不限层数——parent 传上一层 job 即可（revision 的 revision 允许）。
+
+    【C1 修复·故意的「不可发现暂存态」】出厂即显式 ``status="running"`` 而非默认 queued，
+    ``heartbeat_at`` 保持 NULL。这是刻意为之：本函数只是派生 job 的第一步，紧接着 API 进程还要
+    ``inherit_artifacts``（同步拷父产物到子 raw 目录，秒级）→ ``mark_stages_inherited`` 才把继承
+    阶段标 done。若出厂即 queued，独立 worker 的 ``scan_queued``（只按 status='queued' 发现）会在
+    这段继承窗口里抢走子 job——此刻 stages 尚空 → first_incomplete=download → 全量重跑，既破坏
+    增量修订，又与 inherit_artifacts 并发写同一 raw 目录。
+    「running + 心跳 NULL」两条 worker 入口都够不着：``scan_queued`` 不匹配 running；
+    ``recover_stale`` 的 ``heartbeat_at < cutoff`` 对 NULL 在 SQL 里永不命中。故继承全程子 job 对
+    worker 隐形。唯一的 queued 转换收敛在末尾——端点做完继承后调 ``reset_to_queued`` 才放行。"""
     options = deepcopy(parent.options or {})
     options["revision"] = {"instructions": instructions, "edit_plan": edit_plan}
     job = VideoJob(
@@ -154,6 +166,8 @@ async def create_revision_job(session, parent, *, instructions: str, edit_plan: 
         parent_job_id=parent.id,
         created_by=parent.created_by,
         term_sheet=deepcopy(parent.term_sheet) if parent.term_sheet else parent.term_sheet,
+        # 暂存态：running + 心跳 NULL，防 worker 在继承窗口抢跑（详见上方 docstring C1 修复）。
+        status="running",
     )
     session.add(job)
     await session.commit()
@@ -231,6 +245,19 @@ async def fail_job(session, job, error: str) -> None:
     await session.commit()
 
 
+async def reset_to_queued(session, job) -> None:
+    """把 job 复位回 queued + 刷心跳（``VideoScheduler.enqueue`` 与 REST ``_requeue`` 共用的 DB 半）。
+
+    置 status='queued' + updated_at，commit 后 ``touch_heartbeat``——让 ``mark_running`` 能原子占用
+    （WHERE status='queued'），并刷新心跳把 ``recover_stale`` 的误判窗口推后一个 stale_timeout。
+    纯 DB 操作：**不含**进程内 ``submit``（跨进程 worker 无从 submit）与终态幂等门（completed/failed
+    的判定由各调用方自把关，语义差异保留在调用方，本函数只做无条件复位）。"""
+    job.status = "queued"
+    job.updated_at = datetime.utcnow()
+    await session.commit()
+    await touch_heartbeat(session, job.id)
+
+
 class VideoScheduler:
     """视频调度器：DB 状态机 + 原子占用 + 阶段自链 + 心跳泵 + 僵死恢复（方案 C 单 worker）。
 
@@ -249,6 +276,7 @@ class VideoScheduler:
         concurrency: int = 1,
         poll_interval: float = 5.0,
         heartbeat_interval: float = _HEARTBEAT_PUMP_SECONDS,
+        stale_timeout: float = _STALE_TIMEOUT_SECONDS,
         handlers: dict | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -256,6 +284,9 @@ class VideoScheduler:
         self._concurrency = max(1, concurrency)
         self._poll_interval = poll_interval
         self._heartbeat_interval = heartbeat_interval
+        # 僵死判定阈值（秒）：recover_stale 据此算 cutoff。worker 从 settings.VIDEO_STALE_TIMEOUT
+        # 注入（m2 配置接线），缺省与旧硬编码一致（900s=15min）。
+        self._stale_timeout = stale_timeout
         # handlers=None 时引用模块级 STAGE_HANDLERS（同一 dict 对象，M3 原地 mutate 可见）。
         self._handlers = handlers if handlers is not None else STAGE_HANDLERS
         self._queue: asyncio.Queue[int] = asyncio.Queue()
@@ -294,18 +325,21 @@ class VideoScheduler:
             return result.rowcount == 1
 
     async def recover_stale(self) -> int:
-        """回收僵死 job：status=running 且心跳超 _STALE_MINUTES → 复位回 queued 让主循环重占续跑。
+        """回收僵死 job：status=running 且心跳超 _stale_timeout（秒，构造器注入）→ 复位回 queued 让主循环重占续跑。
 
         返回复位条数。源语义逐条保真：
         - 只碰「心跳超时」的僵死 job（worker 崩溃 / OOM / 平滑重启），不碰显式 fail 的（已 failed 被过滤）；
         - 超 _MAX_RETRIES 直接 fail_job（判死），避免坏 job 无限重排；
-        - 复位前先 ``touch_heartbeat``（重排前先 touch，把「再次误判窗口」推后一个 _STALE_MINUTES）；
+        - 复位前先 ``touch_heartbeat``（重排前先 touch，把「再次误判窗口」推后一个 _stale_timeout）；
         - retry_count 递增。
 
         与源差异（celery→asyncio）：源 recovery 直接 enqueue_stage 且保持 status=running；此处复位
         回 queued，由主循环 scan → mark_running 原子重占（统一「占用防双发」入口），避免两轮 recovery
-        重复入队。排除本进程 _in_flight 在途 job（阶段墙钟长不等于僵死）。"""
-        cutoff = datetime.utcnow() - timedelta(minutes=_STALE_MINUTES)
+        重复入队。排除本进程 _in_flight 在途 job（阶段墙钟长不等于僵死）。
+
+        心跳 NULL 的 running job（revision 继承窗口暂存态，见 create_revision_job）天然被
+        ``heartbeat_at < cutoff`` 过滤（SQL 中 NULL 比较永不为真），故 recover 不会误捞暂存态子 job。"""
+        cutoff = datetime.utcnow() - timedelta(seconds=self._stale_timeout)
         recovered = 0
         async with self._session_factory() as session:
             stmt = (select(VideoJob).where(VideoJob.status == "running")
@@ -441,10 +475,8 @@ class VideoScheduler:
             job = await get_job(session, job_id)
             if job is None or job.status in ("completed", "failed"):
                 return
-            job.status = "queued"
-            job.updated_at = datetime.utcnow()
-            await session.commit()
-            await touch_heartbeat(session, job_id)
+            # 复位 queued + 刷心跳的 DB 半抽到共用 reset_to_queued（与 REST _requeue 同源，m1 DRY）。
+            await reset_to_queued(session, job)
         self.submit(job_id)
 
     async def _worker(self) -> None:

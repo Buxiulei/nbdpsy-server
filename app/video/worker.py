@@ -27,7 +27,16 @@ async def main() -> None:
     await init_db()
 
     concurrency = int(getattr(settings, "VIDEO_WORKER_CONCURRENCY", 1) or 1)
-    scheduler = VideoScheduler(async_session, concurrency=concurrency)
+    # 阶段内心跳周期 / 僵死判定阈值从 settings 注入（m2 配置接线，使 DEPLOY.md 里两旋钮为真）；
+    # 缺省与 scheduler 内旧硬编码一致（300s / 900s）。
+    heartbeat_interval = int(getattr(settings, "VIDEO_HEARTBEAT_INTERVAL", 300) or 300)
+    stale_timeout = int(getattr(settings, "VIDEO_STALE_TIMEOUT", 900) or 900)
+    scheduler = VideoScheduler(
+        async_session,
+        concurrency=concurrency,
+        heartbeat_interval=heartbeat_interval,
+        stale_timeout=stale_timeout,
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

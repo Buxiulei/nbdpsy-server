@@ -29,7 +29,6 @@ import logging
 import mimetypes
 import re
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -185,13 +184,12 @@ async def _requeue(session, job: VideoJob) -> None:
 
     等价 ``scheduler.enqueue`` 的 DB 半（置 queued + touch_heartbeat），去掉进程内 submit——
     方案 C 下 worker 是独立进程，API 进程内无调度器实例可 submit。尤其解 revision 子 job 的
-    「running + 心跳 NULL」死局（mark_stages_inherited 经 update_stage 把子 job 翻成 running，
-    mark_running 占不到、recover 对 NULL 心跳永不命中）：复位 queued 后 mark_running 可原子占用。
-    """
-    job.status = "queued"
-    job.updated_at = datetime.utcnow()
-    await session.commit()
-    await scheduler.touch_heartbeat(session, job.id)
+    「running + 心跳 NULL」暂存态（create_revision_job 出厂即此态，mark_running 占不到、
+    recover 对 NULL 心跳永不命中）：复位 queued 后 mark_running 可原子占用。
+
+    复位 queued 的 DB 半与 ``scheduler.enqueue`` 同源，抽到 ``scheduler.reset_to_queued`` 共用
+    （m1 DRY）；本 wrapper 只做委托，保留端点侧局部命名与语义注释。"""
+    await scheduler.reset_to_queued(session, job)
 
 
 def _load_raw_json(job_id: int, name: str):
@@ -346,7 +344,12 @@ async def delete_video_job(job_id: int) -> dict:
             raise NotFoundError(f"视频任务 {job_id} 不存在")
         if not _can_access(job, op):
             raise AccessDenied("无权访问该视频任务")
-        if job.status == "running":
+        # running 且心跳非 NULL = 被 worker 真占用（mark_running 占用时必刷 heartbeat_at，见
+        # scheduler.mark_running）→ 409 不可删。running 且心跳 NULL = 从未被 worker 占用的暂存态
+        # （revision 继承窗口 API 进程若中途崩溃留下的残留：create_revision_job 出厂即 running+NULL，
+        # _requeue 前崩溃则永卡此态）→ 放行删除，提供唯一的 API 补救（retry 门对 running 一律 409，
+        # 且此时继承未完成、retry 语义错误，正确补救就是 delete 后重发 revise）。
+        if job.status == "running" and job.heartbeat_at is not None:
             raise HTTPException(409, "运行中不可删，先等失败或完成")
         shutil.rmtree(paths.job_dir(job.id), ignore_errors=True)
         await session.delete(job)

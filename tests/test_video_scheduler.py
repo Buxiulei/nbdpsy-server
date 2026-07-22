@@ -49,6 +49,7 @@ from app.video.scheduler import (
     create_revision_job,
     first_incomplete_stage,
     mark_stages_inherited,
+    reset_to_queued,
 )
 
 
@@ -366,6 +367,28 @@ async def test_recover_stale_max_retries_marks_failed(vf):
     assert "超过最大重试次数" in job.error
 
 
+# ── m2 配置接线：recover_stale 用注入的 stale_timeout 算 cutoff（非硬编码 15min）──────
+async def test_recover_stale_honors_configured_timeout(vf):
+    """构造器注入的 stale_timeout（秒）真被 recover_stale 消费：心跳 5s 前的 running job，
+    stale_timeout=3600 时判新鲜不动、stale_timeout=1 时判僵死复位。"""
+    hb = datetime.utcnow() - timedelta(seconds=5)
+    async with vf() as s:
+        job = VideoTransportJob(url="u", mode="transport", status="running",
+                                heartbeat_at=hb, retry_count=0)
+        s.add(job)
+        await s.commit()
+        await s.refresh(job)
+        job_id = job.id
+
+    # 大阈值（1h）：5s 前的心跳仍新鲜 → 不复位
+    assert await VideoScheduler(vf, stale_timeout=3600).recover_stale() == 0
+    assert (await _get(vf, job_id)).status == "running"
+
+    # 小阈值（1s）：5s 前的心跳已超 → 判僵死复位回 queued
+    assert await VideoScheduler(vf, stale_timeout=1).recover_stale() == 1
+    assert (await _get(vf, job_id)).status == "queued"
+
+
 # ── 生命周期循环：recover + scan + 自链 + stop ────────────────────────────
 async def test_scheduler_loop_recovers_and_processes(vf):
     """start：每 poll 周期先 recover_stale（僵死 running 复位 queued）再 scan→submit，
@@ -419,10 +442,44 @@ async def test_revision_job_first_incomplete_is_rewrite(vf):
     assert first_incomplete_stage(job) == "rewrite"  # 前五阶段 done → 第 6 阶 rewrite
 
 
+async def test_revision_staging_state_undiscoverable_until_requeued(vf):
+    """C1：revision 子 job 出厂即「running + 心跳 NULL」暂存态——scan_queued / recover_stale 都
+    发现不到它（防 worker 在继承窗口抢走 → stages 空 → 全量重跑破坏增量修订）；reset_to_queued
+    后才放行，可被 scan 发现取走。"""
+    async with vf() as s:
+        parent = await create_job(s, url="u", options={}, user_id=1, mode="remake")
+        parent.status = "completed"
+        await s.commit()
+        child = await create_revision_job(
+            s, parent, instructions="改", edit_plan=[{"type": "global_param"}])
+        child_id = child.id
+
+    # 出厂即暂存态：running + 心跳 NULL（两条 worker 入口都够不着）
+    row = await _get(vf, child_id)
+    assert row.status == "running"
+    assert row.heartbeat_at is None
+
+    scheduler = VideoScheduler(vf)
+    # scan_queued 发现不到暂存态子 job（真断言：防继承窗口抢跑）
+    assert child_id not in await scheduler.scan_queued()
+    # recover_stale 也捞不到（心跳 NULL，SQL heartbeat<cutoff 永不命中）→ 不复位
+    assert await scheduler.recover_stale() == 0
+    assert (await _get(vf, child_id)).status == "running"
+
+    # reset_to_queued（端点继承完成后调用）后才放行：可被 scan 发现、心跳已刷
+    async with vf() as s:
+        child = await s.get(VideoTransportJob, child_id)
+        await reset_to_queued(s, child)
+    assert child_id in await scheduler.scan_queued()
+    row = await _get(vf, child_id)
+    assert row.status == "queued"
+    assert row.heartbeat_at is not None
+
+
 async def test_enqueue_unblocks_revision_subjob(vf):
-    """enqueue 原语解 revision 子 job 死局：mark_stages_inherited 把子 job 翻成 running+NULL 心跳
-    （mark_running 占不到、recover 对 NULL 心跳永不命中）→ enqueue 复位 queued + touch + submit →
-    调度循环从 rewrite 自链跑到 completed。"""
+    """enqueue 原语放行 revision 子 job 暂存态：create_revision_job 出厂即 running+NULL 心跳、
+    mark_stages_inherited 维持此态（mark_running 占不到、recover 对 NULL 心跳永不命中）→ enqueue
+    复位 queued + touch + submit → 调度循环从 rewrite 自链跑到 completed。"""
     async with vf() as s:
         parent = await create_job(s, url="u", options={"voice": "S_x"}, user_id=7,
                                   mode="remake")
@@ -435,7 +492,7 @@ async def test_enqueue_unblocks_revision_subjob(vf):
         await mark_stages_inherited(s, job, REMAKE_STAGE_ORDER[:5], parent.id)
         job_id = job.id
 
-    # 死局前置：子 job 已被 update_stage 翻成 running 且心跳 NULL——两条入口都够不着
+    # 暂存态前置：子 job 出厂即 running 且心跳 NULL（继承阶段标 done 后仍此态）——两条入口都够不着
     stuck = await _get(vf, job_id)
     assert stuck.status == "running"
     assert stuck.heartbeat_at is None
