@@ -17,6 +17,10 @@ from app.core.config import settings
 from app.core.db import async_session, init_db
 from app.video.scheduler import VideoScheduler
 
+# 触发 transport 七阶 handler 注册进 scheduler.STAGE_HANDLERS（原地 mutate）——
+# 必须在起调度器前 import，否则 STAGE_HANDLERS 为空、自链首阶段即 KeyError。
+import app.video.stages  # noqa: E402,F401
+
 
 async def main() -> None:
     """建表 → 起调度器 → 等停止信号 → 优雅收尾。"""
