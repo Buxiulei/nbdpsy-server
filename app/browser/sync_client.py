@@ -239,28 +239,18 @@ class SyncClient:
             # 吞未捕获错误/未处理拒绝:ark 被 PAC 打到死代理后请求网络错误,XHS 若未 catch
             # 会冒泡成 pageerror,而 Playwright Firefox driver 处理 location 为空的 pageerror
             # 时会崩(coreBundle.js 读 pageError.location.url 抛 TypeError → 整个 driver 挂)。
-            # 在文档最早期兜住这些错误,driver 不再收到畸形 pageerror,发布流程不被打断。
-            # 收窄:仅吞与 ark.xiaohongshu.com 死代理 / 代理拒连(NS_ERROR_PROXY_CONNECTION_REFUSED
-            # / proxy)相关的错误,其余(页面自身真实报错)一律放行给页面处理,不无差别掩盖。
+            # 在文档最早期(capture 阶段)兜住**所有**未捕获错误/拒绝:init-script 先于
+            # Juggler 内容脚本注册,capture+stopImmediatePropagation 抢在 Juggler 的
+            # uncaughtError 监听器之前吞掉,使 driver 不再收到畸形(location 为空)pageerror。
+            # 【必须吞全部,不能收窄】——实测收窄成"只吞 ark/畸形"后,真点发布时 ark 死代理
+            # 网络失败产生的 pageerror 漏给 Juggler → driver 崩(coreBundle 读 location.url)。
+            # 权衡:自动化场景防 driver 崩 > 保留页面真实报错,故无差别吞掉。
             try:
                 self.context.add_init_script(
-                    "(function(){"
-                    "function _ark(s){if(!s)return false;s=String(s);"
-                    "return s.indexOf('ark.xiaohongshu.com')>=0"
-                    "||s.indexOf('NS_ERROR_PROXY_CONNECTION_REFUSED')>=0"
-                    "||s.toLowerCase().indexOf('proxy')>=0;}"
                     "window.addEventListener('unhandledrejection',function(e){try{"
-                    "var r=e.reason;var t=r&&(r.message||r.stack)?"
-                    "((r.message||'')+' '+(r.stack||'')):(r!=null?String(r):'');"
-                    # ark/代理拒连 → 吞;或畸形 reason(无 message 无 stack,即崩 driver 的空 location 源)→ 也吞
-                    "if(_ark(t)||!t.trim()){e.preventDefault();e.stopImmediatePropagation();}"
-                    "}catch(_){}},true);"
+                    "e.preventDefault();e.stopImmediatePropagation();}catch(_){}},true);"
                     "window.addEventListener('error',function(e){try{"
-                    "var t=(e.filename||'')+' '+(e.message||'');"
-                    # ark/代理 → 吞;或畸形 error(无 filename 无 message,Playwright 读 location.url 会崩)→ 也吞;真实报错放行
-                    "if(_ark(t)||(!e.filename&&!e.message)){e.preventDefault();e.stopImmediatePropagation();}"
-                    "}catch(_){}},true);"
-                    "})();"
+                    "e.preventDefault();e.stopImmediatePropagation();}catch(_){}},true);"
                 )
             except Exception as e:
                 logger.warning(f"[SyncClient] 错误吞噬 init-script 装配失败(忽略): {e}")
