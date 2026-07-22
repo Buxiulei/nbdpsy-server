@@ -9,18 +9,18 @@
   5. 前五阶段 stats 含 inherited_from + 下游消费路径 stats，first_incomplete_stage=rewrite。
 
 平移自 test_remake_revision_integration.py。换 import 面同 test_video_remake_integration；
-另：源依赖 REST 端点的 ``_enrich_inherited_stats`` / ``_INHERITED_STAGES``（M4 API 层，尚未迁移），
-此处内联同语义 helper 使本集成测试自足——M4 落地 video_rest 后应改回从端点导入。
+``_enrich_inherited_stats`` / ``_INHERITED_STAGES`` 此前内联（M4 API 层未落时使集成测试自足），
+M4 落地 video_rest 后改回从端点导入（源亦在 API 层）。
 """
 import json
 import os
 import subprocess
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.config import settings
+from app.http.video_rest import _INHERITED_STAGES, _enrich_inherited_stats
 from app.video import paths as vt_paths
 from app.video import scheduler
 from app.video import stages as vt_stages
@@ -30,31 +30,7 @@ from app.video.pipeline.remake.inherit import inherit_artifacts
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
-# M4 API 层将定义这两者（继承阶段集合 + 补路径 stats）；此处内联使集成测试自足。
-_INHERITED_STAGES = ["download", "analyze", "transcript", "resegment", "translate"]
 _CHILD_CHAIN = ["rewrite", "dub", "storyboard", "render", "compose", "deliver"]
-
-
-async def _enrich_inherited_stats(db, child, parent):
-    """给继承阶段补下游消费的真实路径 stats（*_path 重指子 raw 已拷入的同名文件，标量原样保留）。
-
-    内联自源 app/api/endpoints/video_transport._enrich_inherited_stats（M4 迁移后应删本地副本、
-    改回端点导入）。修复 mark_stages_inherited 只写 inherited_from 的断链：_handle_storyboard 读
-    analyze.facts_path、deliver 读 download.info。"""
-    child_raw = vt_paths.raw_dir(child.id)
-    for name in _INHERITED_STAGES:
-        parent_stats = ((parent.stages or {}).get(name) or {}).get("stats") or {}
-        stats = {"inherited_from": parent.id}
-        for k, v in parent_stats.items():
-            if k == "inherited_from":
-                continue
-            if k.endswith("_path") and isinstance(v, str):
-                cand = child_raw / Path(v).name
-                if cand.exists():                # 子目录有拷贝才重指
-                    stats[k] = str(cand)
-            else:
-                stats[k] = v                     # info / 计数 / source 等标量保留
-        await scheduler.update_stage(db, child, name, status="done", stats=stats)
 
 
 @pytest.fixture

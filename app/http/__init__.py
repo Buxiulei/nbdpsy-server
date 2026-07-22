@@ -17,6 +17,7 @@ from app.http import (
     publish_rest,
     system,
     uploads_rest,
+    video_rest,
 )
 
 ALL_ROUTERS = [
@@ -31,6 +32,7 @@ ALL_ROUTERS = [
     notes_rest.router,
     downloads.router,
     uploads_rest.router,
+    video_rest.router,
 ]
 
 ALL_MANIFEST_ENTRIES = [
@@ -44,4 +46,5 @@ ALL_MANIFEST_ENTRIES = [
     *publish_rest.MANIFEST_ENTRIES,
     *notes_rest.MANIFEST_ENTRIES,
     *uploads_rest.MANIFEST_ENTRIES,
+    *video_rest.MANIFEST_ENTRIES,
 ]
