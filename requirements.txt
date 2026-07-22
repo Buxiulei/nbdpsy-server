@@ -16,8 +16,15 @@ loguru>=0.7
 pytest>=8.0
 pytest-asyncio>=0.23
 openai>=1.0
-# 视频管线 dub 阶段拼轨（sample 级 overlay/mix wav），M3a transport 链引入；配 ffmpeg 使用。
-# 其余视频运行时依赖（dashscope SDK / yt-dlp / demucs 可选）由 M4 requirements 统一收口。
+# 视频管线运行时依赖：
+# - pydub：dub 阶段拼轨（sample 级 overlay/mix wav），配 ffmpeg 使用（M3a 引入）。
+# - dashscope：ASR 录音文件识别 SDK（providers 惰性 import；缺则 ASR 阶段 ImportError）。
+# - yt-dlp：download 阶段 `python -m yt_dlp` 拉源视频 + 字幕（downloader）。
+# - numpy：remake 像素向量化（analyzer 抽帧特征 / programmatic 生球 / tones 双侧音轨）。
+# demucs（BGM 分离）仍为可选，缺失时 muxer 优雅降级为纯配音替换，故不入 requirements。
 pydub>=0.25
+dashscope>=1.20
+yt-dlp>=2024.1
+numpy>=1.26
 openpyxl>=3.1
 fastmcp>=3.4,<4
