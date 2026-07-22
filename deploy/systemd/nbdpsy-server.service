@@ -14,6 +14,8 @@ Environment=DISPLAY=:0
 Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/alembic upgrade head
 ExecStartPre=/bin/bash /home/roots/nbdpsy-server/scripts/pack_extension.sh
+# 幂等修补 Playwright Firefox 驱动的 pageError 崩溃 bug(venv 重建后自动重打)
+ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/python /home/roots/nbdpsy-server/scripts/patch_playwright_driver.py
 ExecStart=/home/roots/nbdpsy-server/.venv/bin/uvicorn app.server:create_app --factory --host 0.0.0.0 --port 8848
 Restart=always
 RestartSec=3

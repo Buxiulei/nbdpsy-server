@@ -30,16 +30,20 @@ from loguru import logger
 # 跨号随机分档属推测性防御本轮不做，故删除以免误导。
 PROFILES = {
     "casual": {
-        "click_pre_delay": (0.1, 0.3),
-        "hover_delay": (0.2, 0.5),
-        "think_delay": (0.5, 1.5),
-        "type_char_delay": (80, 150),
-        "type_pause_prob": 0.10,
-        "type_pause_range": (0.3, 0.8),
-        "mouse_steps_range": (5, 10),
-        "mouse_duration_range": (0.3, 0.8),
-        "scroll_step_delay": (0.05, 0.10),
-        "mistake_prob": 0.08,
+        # 用户要求:单次鼠标操作(移动+悬停+按压)控制在 2s 内。camoufox humanize 已关,
+        # 每步 mouse.move 仅 ~17ms,故点击总耗时=下列 sleep 预算之和。收紧后单次点击
+        # 约:移动≤0.8 + 悬停≤0.25 + 按压前≤0.18 + 按下0.05~0.15 ≈ 最坏 1.4s(元素目标另加
+        # scroll≤0.28),稳在 2s 内。
+        "click_pre_delay": (0.06, 0.18),
+        "hover_delay": (0.1, 0.25),
+        "think_delay": (0.4, 1.0),
+        "type_char_delay": (55, 110),
+        "type_pause_prob": 0.08,
+        "type_pause_range": (0.2, 0.5),
+        "mouse_steps_range": (5, 9),
+        "mouse_duration_range": (0.2, 0.45),
+        "scroll_step_delay": (0.04, 0.08),
+        "mistake_prob": 0.05,
         "typo_prob": 0.04,
     },
 }
@@ -83,8 +87,8 @@ class SyncHumanActions:
             element = target
             # 先确保元素在视口内
             try:
-                element.scroll_into_view_if_needed()
-                time.sleep(random.uniform(0.2, 0.4))
+                element.scroll_into_view_if_needed(timeout=2000)
+                time.sleep(random.uniform(0.12, 0.28))
             except Exception:
                 pass
 
@@ -297,9 +301,9 @@ class SyncHumanActions:
         # H1 Fitts：时长与步数随移动距离缩放，10px 微调与 400px 长移不再同速。
         base_steps = random.randint(*self.params["mouse_steps_range"])
         base_duration = random.uniform(*self.params["mouse_duration_range"])
-        steps = base_steps + int(dist / 100)                       # 距离越远步数越多
+        steps = base_steps + int(dist / 140)                       # 距离越远步数越多(每步仅~17ms往返)
         duration = base_duration * (1 + math.log2(dist / 120 + 1))  # 距离越远时长越长（对数缩放）
-        duration = min(duration, 3.0)  # 上限 clamp:极端长移不拖垮上层步骤超时
+        duration = min(duration, 0.8)  # 上限 clamp 0.8s:满足"单次鼠标操作≤2s",长移也不拖拉
 
         path = self._bezier((cx, cy), (x, y), steps)
 

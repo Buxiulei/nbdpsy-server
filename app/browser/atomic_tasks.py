@@ -620,71 +620,47 @@ class XHSPublishAtomicTasks:
 
             # 2.3 查找文件上传 input 元素(优先图片入口，绝不回退到视频 file input)
             logger.info("2.3 查找文件上传input元素...")
-            # 2.4 上传文件:优先点「上传图片」按钮走 file_chooser。
-            # 坑:新版编辑器直接 set_input_files 到隐藏 input 只存草稿 + 页面重置回视频
-            # tab、编辑器不驻留;而点按钮触发的 file_chooser 会正常进入并停留在图文编辑器
-            # (标题框 placeholder「填写标题会有更多赞哦」出现)。失败再回退 set_input_files。
-            logger.info(f"2.4 点「上传图片」按钮上传 {len(image_paths)} 张(file_chooser)...")
+            # 2.4 上传文件:直接 set_input_files 到隐藏 <input type=file>,**不点上传按钮**。
+            # 坑(headed 实测录屏确认):真桌面上点「上传图片」按钮会弹**原生 GTK 文件框**
+            # (Playwright expect_file_chooser 拦不住)、模态卡死整个流程。故不点按钮,直接把文件
+            # 灌进隐藏 input —— 无原生框、一次处理多图;set_input_files 触发 input change 事件,
+            # XHS 上传处理照常接管。上传后**验证缩略图真渲染出来**,避免"假成功"。
+            logger.info(f"2.4 set_input_files 直传 {len(image_paths)} 张(不点按钮,避开原生文件框)...")
+            upload_input = self._find_element_with_retry(
+                ["input[type='file'][accept*='image']", "input[type='file']"],
+                timeout=10, must_be_visible=False,
+                intent_key="upload_image_input", intent_desc="隐藏文件 input",
+            )
+            if not upload_input:
+                return {
+                    "success": False,
+                    "error": "未找到文件上传 input 元素",
+                    "screenshot": self._take_screenshot("03_02_no_file_input"),
+                }
+            upload_input.set_input_files(image_paths)
+            logger.info(f"✓ set_input_files 已灌入 {len(image_paths)} 张,等上传渲染...")
+
+            # 等图片真正上传渲染(blob/xhscdn/ros 缩略图出现),而非盲目往下走(修"假成功")。
             uploaded_ok = False
-            gesture_made = False  # 「上传图片」按钮的真人点击手势是否已做出
-            try:
-                with self.page.expect_file_chooser(timeout=8000) as fc_info:
-                    # 合规:拟人化点「上传图片」按钮(定位坐标 → human.click 真实按压),
-                    # 真实用户手势才触发原生 file_chooser,禁裸 page.click。
-                    for sel in ["button:has-text('上传图片')", "text=上传图片"]:
-                        try:
-                            bb = self.page.locator(sel).first.bounding_box(timeout=4000)
-                            if not bb:
-                                continue
-                            self.human.click(
-                                (bb["x"] + bb["width"] * 0.5,
-                                 bb["y"] + bb["height"] * 0.5),
-                                reason="上传图片按钮",
-                            )
-                            gesture_made = True
-                            break
-                        except Exception:
-                            continue
-                    if not gesture_made:
-                        raise RuntimeError("未找到「上传图片」按钮")
-                fc_info.value.set_files(image_paths)
-                logger.info("✓ file_chooser 已设置全部图片")
-                uploaded_ok = True
-            except Exception as e:
-                logger.warning(f"file_chooser 上传失败({e})")
-
-            if not uploaded_ok:
-                if not gesture_made:
-                    # 连「上传图片」按钮都点不到 → 无合法手势途径,fail-closed,拒绝无手势注入。
-                    return {
-                        "success": False,
-                        "error": "未找到可点击的「上传图片」按钮,拒绝无手势上传",
-                        "screenshot": self._take_screenshot("03_02_no_upload_button"),
-                    }
-                # 手势已做出(human.click 点过「上传图片」按钮),仅 file_chooser 事件未被 Playwright
-                # 拦截(headed Firefox 下 file_chooser 拦截不稳)。此时补 set_input_files 完成上传
-                # **不算无手势**——真人点击已先行发生,只是换个原语把文件灌进已触发的 input。
+            for _ in range(15):
+                self.human.wait(0.8, 1.4, context="等图片上传渲染")
                 try:
-                    self.page.keyboard.press("Escape")  # 关掉点击可能弹出的原生文件对话框
+                    n = self.page.evaluate(
+                        "() => document.querySelectorAll("
+                        "\"img[src^='blob:'],img[src*='xhscdn'],img[src*='ros']\").length"
+                    )
                 except Exception:
-                    pass
-                upload_input = self._find_element_with_retry(
-                    ["input[type='file'][accept*='image']", "input[type='file']"],
-                    timeout=10, must_be_visible=False,
-                    intent_key="upload_image_input", intent_desc="上传图片的 file input",
-                )
-                if not upload_input:
-                    return {
-                        "success": False,
-                        "error": "手势已做但未找到 file input,上传失败",
-                        "screenshot": self._take_screenshot("03_02_no_file_input"),
-                    }
-                upload_input.set_input_files(image_paths)
-                logger.info("✓ 手势已做+file_chooser未拦截,回退 set_input_files 完成上传")
-                uploaded_ok = True
-
-            self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-            self.human.wait(1.5, 2.5, context="上传完成")
+                    n = 0
+                if n and n >= 1:
+                    uploaded_ok = True
+                    logger.info(f"✓ 图片已上传渲染(检测到 {n} 张缩略图)")
+                    break
+            if not uploaded_ok:
+                return {
+                    "success": False,
+                    "error": "set_input_files 后图片未上传渲染(编辑器可能拒绝/重置回视频tab)",
+                    "screenshot": self._take_screenshot("04_upload_not_rendered"),
+                }
             self._take_screenshot("04_after_upload")
 
             # 2.5 验证 URL 未变化(防止自动返回)
@@ -1246,6 +1222,15 @@ class XHSPublishAtomicTasks:
         logger.info("=" * 60)
 
         try:
+            # 收尾清场:step6 打 #话题 会触发 XHS 话题自动补全下拉框,发布时若仍打开,首次点击
+            # 会落到下拉框(实测截图 publish_07_12 确认下拉框覆盖)→ 只关下拉框、发布"页面未变"。
+            # 先按 Esc 关掉补全下拉,再让页面稳一下,确保发布按钮可被干净点击。
+            try:
+                self.page.keyboard.press("Escape")
+                time.sleep(0.4)
+            except Exception:
+                pass
+
             logger.info("7.1 综合探测发布按钮 DOM(light/open-shadow/closed-shadow + 全页候选)...")
             self._take_screenshot("12_before_publish")
             publish_clicked = False

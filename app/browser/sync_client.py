@@ -36,26 +36,10 @@ from app.browser.profile_guard import (
     sanitize_launch_options,
 )
 
-# ark.xiaohongshu.com 是小红书商家/专业号后端(trade_note/permission、experiment_info
-# 等商品/直播权限门)。发布普通图文根本不需要它,但在 tun 环境下该域被路由到北京、
-# 与会话直连 IP 不匹配 → 稳定返回 401 → XHS 前端全局 401 拦截器无脑跳登录页
-# (login?redirectReason=401),表现为"上传/编辑后掉登录"。抓包实证:图片上传
-# (ros-upload/creator permit)全 200,唯一 401 就是 ark 这些商家权限门;且这些请求
-# 从 Service Worker/隔离上下文发出,Playwright route / window.fetch / XHR patch 均拦不到。
-# 解法:用 Firefox PAC 把 ark.xiaohongshu.com 指向死代理(127.0.0.1:1)→ 连接失败
-# (网络错误,而非 401)→ 前端 401 拦截器不触发,不跳登录;其余域 DIRECT(照旧走 tun)。
-# PAC 是浏览器全局代理层,SW/iframe/主线程一律生效,弥补 route/JS 拦不到的盲区。
-_ARK_BLACKHOLE_PAC = (
-    "function FindProxyForURL(url, host){"
-    'if(host=="ark.xiaohongshu.com"){return "PROXY 127.0.0.1:1";}'
-    'return "DIRECT";}'
-)
-
-
-def _ark_blackhole_pac_url() -> str:
-    import base64
-    b64 = base64.b64encode(_ARK_BLACKHOLE_PAC.encode("utf-8")).decode("ascii")
-    return "data:application/x-ns-proxy-autoconfig;base64," + b64
+# 注:曾用 Firefox PAC 把 ark.xiaohongshu.com 指向死代理规避其 401 跳登录,但实测该 PAC
+# 会让真发布时 ark 网络失败 → 崩 Playwright driver、且挡住发布。sing-box 现已把
+# .xiaohongshu.com + camoufox 进程全路由 direct-out(直连),ark 与会话同 IP 直连返回 200
+# 不再 401,PAC 已弃用(见 start() 处 firefox_user_prefs 注释)。
 
 
 def _resolve_headed_display() -> Optional[Tuple[str, str]]:
@@ -257,7 +241,11 @@ class SyncClient:
 
             camoufox_opts = launch_options(
                 headless=self.headless,
-                humanize=True,
+                # 【关掉 camoufox 原生 humanize】它会把**每一次** page.mouse.move 平滑动画化
+                # (最多 1.5s/次),与 SyncHumanActions 的多步贝塞尔叠乘 → 单次点击要 14×1.7s≈24s
+                # 拖拉(实测 humanize=False 单步 move 1.7s→0.017s)。拟人化统一由 SyncHumanActions
+                # 一层负责(贝塞尔轨迹+变速+微颤+犹豫),这里不再重复humanize。
+                humanize=False,
                 block_webrtc=True,
                 block_webgl=False,  # headed 跑在真屏 :0 + RTX 4090:放开 WebGL 走真 GPU
                                     # 硬件渲染(真 NVIDIA 指纹),而非 Xvfb 软件渲染/headless 特征
@@ -273,11 +261,13 @@ class SyncClient:
                     "navigator.platform": fp.platform or "Win32",
                 },
                 window=(fp.viewport["width"], fp.viewport["height"]),
-                # PAC 把 ark.xiaohongshu.com 指向死代理 → 商家权限门 401 变网络错误,
-                # 前端不再跳登录(详见模块顶部 _ARK_BLACKHOLE_PAC 注释)。其余 DIRECT。
+                # 【去掉 ark PAC 死代理】sing-box 现已把 .xiaohongshu.com + camoufox 进程全
+                # 路由到 direct-out(直连,绕 tun),ark 走直连与会话同 IP → 返回 200 不再 401,
+                # 无需 PAC blackhole;而 PAC 反而让真发布时 ark 网络失败 → 崩 Playwright driver。
+                # 故不设代理(走系统 tun+sing-box 路由)。仅关地理位置,避免发布页弹权限授权框卡流程。
                 firefox_user_prefs={
-                    "network.proxy.type": 2,  # 2 = 用 PAC
-                    "network.proxy.autoconfig_url": _ark_blackhole_pac_url(),
+                    "permissions.default.geo": 2,   # 2=拒绝:不弹"允许获取位置"授权框
+                    "geo.enabled": False,
                 },
             )
             # 持久化参数注入(NewBrowser 通过 from_options 展开传给 launch_persistent_context)
