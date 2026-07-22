@@ -99,8 +99,8 @@ class SyncHumanActions:
                     pass
                 if not box or box['x'] < 0 or box['y'] < 0:
                     # H6 别让兜底悄悄打穿拟人承诺：先用 getBoundingClientRect 取坐标，
-                    # 走下方常规坐标点击（mouse.down/up）；仅当坐标彻底拿不到时才降级
-                    # 原生 element.click()，并大声 warning 记录。
+                    # 走下方常规坐标点击（mouse.down/up）；仅当坐标彻底拿不到时 fail-loud
+                    # 抛异常，绝不降级合成点击（详见下方 else 分支）。
                     rect = None
                     try:
                         rect = self.page.evaluate(
