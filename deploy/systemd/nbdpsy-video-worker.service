@@ -1,14 +1,13 @@
 [Unit]
 Description=nbdpsy-video-worker - 视频搬运/再制作后台调度 worker（方案 C 独立 asyncio 进程）
 # 与 API 进程隔离：API 重启不杀长任务。DB/迁移已由 nbdpsy-server 的 alembic upgrade 就绪。
-After=network.target nbdpsy-xvfb.service nbdpsy-server.service
-Requires=nbdpsy-xvfb.service
+# 不依赖任何显示：still_image 截图走 chromium headless=True（宿主 Xvfb 已随 d86619f 走向弃用）。
+After=network.target nbdpsy-server.service
 
 [Service]
 Type=simple
 User=roots
 WorkingDirectory=/home/roots/nbdpsy-server
-Environment=DISPLAY=:99
 # 与 API 同源环境（.env）：DATABASE_URL / DATA_DIR / AI 凭据等一致；缺文件不致命（- 前缀）。
 EnvironmentFile=-/home/roots/nbdpsy-server/.env
 ExecStart=/home/roots/nbdpsy-server/.venv/bin/python -m app.video.worker
