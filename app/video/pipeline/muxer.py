@@ -164,9 +164,11 @@ async def _run_ffmpeg(argv: list[str], *, timeout: float) -> None:
 
 
 async def probe_nvenc() -> bool:
+    # 探测画幅必须用真实工作分辨率 1080p：半坏驱动/显存吃紧时 256x256 小会话能过而
+    # 1080p 大会话 InitializeEncoder OOM（e2e job1 实证），小画幅探测会假阳性。
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "nullsrc=s=256x256:d=1",
-        "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-",
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "nullsrc=s=1920x1080:d=1",
+        "-c:v", "h264_nvenc", "-frames:v", "10", "-f", "null", "-",
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     try:
         # 全局约束：ffmpeg 子进程一律 wait_for 超时；探测超时=不可用，回退 libx264 是安全默认
@@ -332,4 +334,16 @@ async def mux(video_path: Path, dub_audio: Path, out_path: Path, *,
         argv += ["-c:v", "h264_nvenc", "-preset", "p4"] if use_nvenc \
             else ["-c:v", "libx264", "-preset", "veryfast"]
     argv += ["-c:a", "aac", "-b:a", "128k", str(out_path)]
-    await _run_ffmpeg(argv, timeout=timeout)
+    try:
+        await _run_ffmpeg(argv, timeout=timeout)
+    except MuxError as e:
+        # NVENC 运行时兜底：probe 通过但真编码仍可能失败（探测与编码间显存被占/驱动半坏态），
+        # 降级 libx264 重试一次——"回退 libx264 是安全默认"。本就走 libx264/copy 的失败原样上抛。
+        if not use_nvenc or "h264_nvenc" not in argv:
+            raise
+        logger.warning("h264_nvenc 运行时失败，降级 libx264 重试: %s", e)
+        i = argv.index("h264_nvenc")
+        argv[i - 1:i + 3] = ["-c:v", "libx264", "-preset", "veryfast"]
+        if deadline is not None:
+            timeout = max(60.0, min(1800.0, deadline - time.monotonic()))
+        await _run_ffmpeg(argv, timeout=timeout)

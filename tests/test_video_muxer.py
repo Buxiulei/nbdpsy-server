@@ -6,6 +6,8 @@ pipeline/resources/nbdpsy_logo.png（_LOGO_PATH 指向它）。
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app.video.pipeline import muxer
 from app.video.pipeline.muxer import (
     _split_screens,
@@ -142,6 +144,42 @@ class TestMuxer:
         assert "[vsub]fade=t=out" in fc               # 叠加在字幕流之后（vsub → vfade）
         assert "[vfade]" in argv and "[aout]" in argv  # 最终流：视频 vfade / 音频 afade 输出
         assert "copy" not in argv                     # 淡出请求禁用 copy 快路径（须重编码）
+
+    async def test_mux_nvenc_runtime_failure_falls_back_libx264(self, tmp_path, monkeypatch):
+        # NVENC probe 通过但真编码失败（半坏驱动/显存争用，e2e job1 实证）→ 降级 libx264 重试一次
+        calls = []
+
+        async def _fake_run(argv, *, timeout):
+            calls.append(list(argv))
+            if "h264_nvenc" in argv:
+                raise muxer.MuxError("ffmpeg 失败: InitializeEncoder failed: out of memory (10)")
+        monkeypatch.setattr(muxer, "_run_ffmpeg", _fake_run)
+        segs = [{"start": 0.0, "end": 2.0, "zh": "字幕"}]
+        ass = build_ass(segs, tmp_path / "s.ass")
+        await mux(tmp_path / "v.mp4", tmp_path / "dub.wav", tmp_path / "out.mp4",
+                  ass_path=ass, use_nvenc=True, logo_path=None)
+        assert len(calls) == 2                       # 第一轮 nvenc 失败 + 第二轮 libx264 重试
+        assert "h264_nvenc" in calls[0]
+        assert "libx264" in calls[1] and "h264_nvenc" not in calls[1]
+        # 除编码器四参外其余 argv 不变（滤镜链/映射/音频参数原样保留）
+        strip = lambda a: [x for x in a if x not in (
+            "h264_nvenc", "libx264", "p4", "veryfast")]
+        assert strip(calls[0]) == strip(calls[1])
+
+    async def test_mux_libx264_failure_raises_no_retry(self, tmp_path, monkeypatch):
+        # 本就走 libx264 的失败原样上抛，不重试
+        calls = []
+
+        async def _fake_run(argv, *, timeout):
+            calls.append(list(argv))
+            raise muxer.MuxError("ffmpeg 失败: boom")
+        monkeypatch.setattr(muxer, "_run_ffmpeg", _fake_run)
+        segs = [{"start": 0.0, "end": 2.0, "zh": "字幕"}]
+        ass = build_ass(segs, tmp_path / "s.ass")
+        with pytest.raises(muxer.MuxError):
+            await mux(tmp_path / "v.mp4", tmp_path / "dub.wav", tmp_path / "out.mp4",
+                      ass_path=ass, use_nvenc=False, logo_path=None)
+        assert len(calls) == 1
 
     async def test_mux_no_fade_kwargs_unchanged(self, tmp_path, monkeypatch):
         # 不给 fade 参数（transport 链默认）→ 无字幕无 logo 仍走 copy 快路径、无 fade
