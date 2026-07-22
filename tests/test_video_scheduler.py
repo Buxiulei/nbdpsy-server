@@ -11,6 +11,7 @@
 - deadline 透传：每阶段 ctx["deadline"] == monotonic + STAGE_BUDGET_SECONDS[stage]。
 - _slim 落库：handler 返回的大列表被剔除，只留标量字段；products 弹出进 finish_job。
 - revision job：派生后前五阶段标 inherited done → first_incomplete=rewrite。
+- enqueue 原语：解 revision 子 job「running+NULL 心跳」死局 → 调度循环从 rewrite 跑到 completed。
 
 视频 job 模型由并行 Track M1（app/models/video_job.py）产出；本文件在测试内建**同构临时模型**
 ``VideoTransportJob``（字段/列名与源 models/video_transport.py 一致），并 monkeypatch 调度模块的
@@ -416,3 +417,44 @@ async def test_revision_job_first_incomplete_is_rewrite(vf):
     assert job.parent_job_id == parent_id
     assert job.options["revision"]["instructions"] == "把片头改短"
     assert first_incomplete_stage(job) == "rewrite"  # 前五阶段 done → 第 6 阶 rewrite
+
+
+async def test_enqueue_unblocks_revision_subjob(vf):
+    """enqueue 原语解 revision 子 job 死局：mark_stages_inherited 把子 job 翻成 running+NULL 心跳
+    （mark_running 占不到、recover 对 NULL 心跳永不命中）→ enqueue 复位 queued + touch + submit →
+    调度循环从 rewrite 自链跑到 completed。"""
+    async with vf() as s:
+        parent = await create_job(s, url="u", options={"voice": "S_x"}, user_id=7,
+                                  mode="remake")
+        # 现实语义：revision 修订的是**已完成**的父片——父置终态 completed，调度循环不会再取它
+        # （否则父仍 queued 会被 scan_queued 一并跑，污染本用例只关心的子 job 自链）。
+        parent.status = "completed"
+        await s.commit()
+        job = await create_revision_job(
+            s, parent, instructions="改", edit_plan=[{"type": "global_param"}])
+        await mark_stages_inherited(s, job, REMAKE_STAGE_ORDER[:5], parent.id)
+        job_id = job.id
+
+    # 死局前置：子 job 已被 update_stage 翻成 running 且心跳 NULL——两条入口都够不着
+    stuck = await _get(vf, job_id)
+    assert stuck.status == "running"
+    assert stuck.heartbeat_at is None
+
+    recorded: list[str] = []
+    scheduler = VideoScheduler(
+        vf, poll_interval=0.02,
+        handlers=_recorder_handlers(REMAKE_STAGE_ORDER, recorded))
+    scheduler.start()
+    try:
+        await scheduler.enqueue(job_id)  # 解死局
+        for _ in range(300):
+            if (await _get(vf, job_id)).status == "completed":
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await scheduler.stop()
+
+    job = await _get(vf, job_id)
+    assert job.status == "completed"
+    # 前五继承阶段跳过，自链从 rewrite 起到 deliver
+    assert recorded == REMAKE_STAGE_ORDER[5:]

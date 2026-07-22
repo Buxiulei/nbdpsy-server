@@ -39,6 +39,7 @@ from sqlalchemy import select, update
 try:  # pragma: no cover - 合流后恒成功
     from app.models.video_job import VideoJob
 except ImportError:  # pragma: no cover - M2 独立开发期
+    # 合流后删除本 try/except 容错，直接 `from app.models.video_job import VideoJob`。
     VideoJob = None
 
 
@@ -70,9 +71,28 @@ _MAX_RETRIES = 2
 # 实测 42min）阶段内持续刷心跳，不被 recovery 按 15min 无心跳误判僵死。
 _HEARTBEAT_PUMP_SECONDS = 300
 
-# 阶段 handler 注册表：签名 ``async (job, session, ctx) -> stats dict``，ctx={"deadline": monotonic秒}。
-# 本 track（M2 调度骨架）留空；Track M3（pipeline 平移）就地填充（``STAGE_HANDLERS.update(...)``，
-# 原地 mutate 保持本模块引用同一 dict 对象，调度器运行时可见）。测试注入 mock handler。
+# ── 阶段 handler 注册表 ────────────────────────────────────────────────
+# 签名 ``async (job, session, ctx) -> stats dict``，ctx={"deadline": monotonic秒}。
+# 本 track（M2 调度骨架）留空；Track M3（pipeline 平移）就地填充：
+#   ``from app.video.scheduler import STAGE_HANDLERS; STAGE_HANDLERS.update({...})``
+# 必须原地 mutate（勿 rebind），保持调度器与本模块引用同一 dict 对象，运行时可见。
+#
+# 【硬契约·M3 平移红线：handler 全程不得阻塞事件循环】
+# 本调度器是单进程 asyncio worker——心跳泵、主循环（recover/scan）、并发的其它 job 全部跑在
+# **同一个事件循环**上。任何 handler 里的同步阻塞调用都会冻住整个循环：心跳泵停刷 →
+# recover_stale 误判本 job 僵死、其它 job 排不上、主循环扫不了表。故 M3 平移 ffmpeg/pydub/
+# dashscope-SDK 等同步代码时：
+#   - CPU 密集 / 同步阻塞 I/O（ffmpeg 子进程、pydub 解码、requests、文件大读写）：
+#     必须 ``await asyncio.to_thread(sync_fn, ...)`` 下沉到线程；
+#   - 外部子进程（ffmpeg/ffprobe）：必须 ``await asyncio.create_subprocess_exec(...)``（异步子进程），
+#     不得用 ``subprocess.run`` / ``os.system``。
+# 范式出处：宿主 ``app/publish/scheduler.py`` —— ``sync_client.publish_once`` 与
+# ``materialize_images`` 均经 ``asyncio.to_thread`` 下沉，不阻塞发布调度循环。
+#
+# 【M3 填充后必须补回全量注册 assert（源 tasks.py:413）】
+#   assert set(STAGE_HANDLERS) == set(STAGE_ORDER) | set(REMAKE_STAGE_ORDER), \
+#       "STAGE_HANDLERS 与两种 mode 的阶段集合不一致"
+# 覆盖两种 mode 全部阶段，漏一个自链会在该阶段 KeyError → fail_job 断链。
 STAGE_HANDLERS: dict[str, Callable[..., Awaitable[dict]]] = {}
 
 
@@ -407,6 +427,31 @@ class VideoScheduler:
         """把 job_id 立即投入内部队列（非阻塞）。与 scan 循环共用队列 + _process；mark_running 原子
         占用保证同一 job 只处理一次，重复 submit 安全。"""
         self._queue.put_nowait(job_id)
+
+    async def enqueue(self, job_id: int) -> None:
+        """把 job 投入调度管线（plan 冻结契约原语）：非终态 job 复位 status='queued' + 刷心跳，
+        再 submit 入内部队列（免等下个 scan 周期即被取）。
+
+        两处必需：
+        1. **revision 子 job 接线（解死局）**：``create_revision_job`` + ``mark_stages_inherited``
+           后，子 job 因 ``update_stage`` 的「queued→running」被翻成 status='running' 且
+           heartbeat_at 仍为 NULL——此态 ``mark_running``（WHERE status='queued'）占不到、
+           ``recover_stale``（WHERE heartbeat_at<cutoff，SQL 中 NULL 永不命中）也捞不到，成死局。
+           enqueue 复位回 queued + touch 心跳，解锁 mark_running 原子占用，管线从 first_incomplete
+           （=rewrite）续跑。
+        2. **免定时立即发**：置 queued 后直接 submit（宿主 publish.submit 范式），M4 REST 建 job /
+           派 revision 后调本原语立即触发，不等下个 poll 周期。
+
+        终态 job（completed/failed）幂等保护：不复位、不入队。"""
+        async with self._session_factory() as session:
+            job = await get_job(session, job_id)
+            if job is None or job.status in ("completed", "failed"):
+                return
+            job.status = "queued"
+            job.updated_at = datetime.utcnow()
+            await session.commit()
+            await touch_heartbeat(session, job_id)
+        self.submit(job_id)
 
     async def _worker(self) -> None:
         """队列 worker 主循环：阻塞取 job_id → _process；单个 job 异常只记录不退出。"""
