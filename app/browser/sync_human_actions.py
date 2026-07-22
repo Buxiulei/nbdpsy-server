@@ -116,9 +116,15 @@ class SyncHumanActions:
                     ):
                         box = rect  # 交回常规拟人点击路径
                     else:
-                        logger.warning(f"[SyncHuman] 坐标彻底拿不到，降级为原生点击 element.click() | {reason}")
-                        element.click()
-                        return
+                        # 【绝不降级合成点击】坐标彻底拿不到(detached/尺寸0/闭合shadow)时,
+                        # 过去这里静默走 element.click()(无贝塞尔/无时序的合成点击)——正是
+                        # AI托管检测盯的信号,且是全部 ElementHandle 调用点(含 self_heal 发布按钮)
+                        # 的唯一残留非拟人路径。改为 fail-loud 抛异常:交由调用方 try/except 重试
+                        # 或判失败,宁可失败也绝不发合成点击。
+                        raise RuntimeError(
+                            f"[SyncHuman] 元素坐标彻底不可得(detached/尺寸0/闭合shadow),"
+                            f"拒绝降级合成点击 | {reason}"
+                        )
 
             if random_offset:
                 click_x = box['x'] + box['width'] * random.uniform(0.3, 0.7)

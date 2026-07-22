@@ -620,14 +620,6 @@ class XHSPublishAtomicTasks:
 
             # 2.3 查找文件上传 input 元素(优先图片入口，绝不回退到视频 file input)
             logger.info("2.3 查找文件上传input元素...")
-            upload_input_selectors = [
-                "input[type='file'][accept*='image']",
-                "input[type='file'][accept*='png']",
-                "input[type='file'][accept*='jpg']",
-                "input[type='file']",
-                ".upload-input",
-                "input.upload-input",
-            ]
             # 2.4 上传文件:优先点「上传图片」按钮走 file_chooser。
             # 坑:新版编辑器直接 set_input_files 到隐藏 input 只存草稿 + 页面重置回视频
             # tab、编辑器不驻留;而点按钮触发的 file_chooser 会正常进入并停留在图文编辑器
@@ -662,18 +654,15 @@ class XHSPublishAtomicTasks:
                 logger.warning(f"file_chooser 上传失败({e}),回退 set_input_files 到隐藏 input")
 
             if not uploaded_ok:
-                upload_input = self._find_element_with_retry(
-                    upload_input_selectors, timeout=10, must_be_visible=False,
-                    intent_key="upload_image_input", intent_desc="上传图片的 file input",
-                )
-                if not upload_input:
-                    return {
-                        "success": False,
-                        "error": "未找到文件上传input元素",
-                        "screenshot": self._take_screenshot("03_02_no_upload_input"),
-                    }
-                upload_input.set_input_files(image_paths)
-                logger.info("✓ (回退)set_input_files 完成")
+                # 【拒绝无手势上传】file_chooser(点「上传图片」按钮触发原生选择器)失败时,过去回退
+                # 到直接对隐藏 input set_input_files——绕过真人点击手势、零 pointer 事件,正是
+                # AI托管检测盯的自动化特征;且该兜底下游常"只存草稿+页面重置"产坏草稿。改为
+                # fail-closed:直接判失败,交状态机重试拟人化 file_chooser 路径,绝不无手势注入文件。
+                return {
+                    "success": False,
+                    "error": "file_chooser(点上传按钮)触发失败,拒绝无手势 set_input_files 回退",
+                    "screenshot": self._take_screenshot("03_02_filechooser_failed"),
+                }
 
             self.page.wait_for_load_state("domcontentloaded", timeout=10000)
             self.human.wait(1.5, 2.5, context="上传完成")
