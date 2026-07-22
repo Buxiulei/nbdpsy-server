@@ -6,6 +6,7 @@
 
 from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
+from app.models.psych_glossary import PsychGlossary
 from app.models.publish_job import PublishJob
 from app.models.upload_batch import UploadBatch
 from app.models.video_job import VideoJob
@@ -20,4 +21,5 @@ __all__ = [
     "NoteMetricDaily",
     "UploadBatch",
     "VideoJob",
+    "PsychGlossary",
 ]
