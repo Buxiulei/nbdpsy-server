@@ -1709,11 +1709,11 @@ class XHSPublishAtomicTasks:
                     logger.debug(f"[发布] {url} 获取失败: {e}")
                     continue
 
-            # 兜底:点击「笔记管理」侧边栏
+            # 兜底:点击「笔记管理」侧边栏(拟人化点击,禁裸 element.click)
             try:
                 note_mgmt_btn = self.page.query_selector("text=笔记管理")
                 if note_mgmt_btn:
-                    note_mgmt_btn.click()
+                    self.human.click(note_mgmt_btn, reason="笔记管理侧边栏")
                     time.sleep(3)
                     html = self.page.content()
                     ids = re.findall(r'"noteId"\s*:\s*"([a-f0-9]{24})"', html)

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
 from app.browser.self_heal import SelfHealLocator
+from app.browser.sync_human_actions import SyncHumanActions
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,8 @@ def export_notes(
         CreatorExportError: 任一步失败(reason 含语义;warm-up 三轮失败为
             ``need_manual_login``)。
     """
+    # 合规:导出流程也是真实账号上的 XHS 交互,所有点击走 SyncHumanActions 拟人化。
+    human = SyncHumanActions(page)
     try:
         # 1) 主站预热:让浏览器对主站 cookies 完成一次握手(失败不致命)。
         try:
@@ -285,7 +288,7 @@ def export_notes(
         )
         if dashboard is None:
             raise CreatorExportError("data_dashboard_menu_not_found")
-        dashboard.click(timeout=30000)
+        human.click(dashboard, reason="数据看板菜单")
         time.sleep(1)
 
         analysis = _find_creator_element(
@@ -294,7 +297,7 @@ def export_notes(
         )
         if analysis is None:
             raise CreatorExportError("content_analysis_menu_not_found")
-        analysis.click(timeout=30000)
+        human.click(analysis, reason="内容分析菜单")
         time.sleep(3)
 
         # 4) 点「导出数据」并等待下载,存到调用方指定路径。
@@ -310,7 +313,7 @@ def export_notes(
         if export_btn is None:
             raise CreatorExportError("export_button_not_found")
         with page.expect_download(timeout=30000) as download_info:
-            export_btn.click(timeout=30000)
+            human.click(export_btn, reason="导出数据按钮")
             time.sleep(1)
         download_info.value.save_as(file_path)
         logger.info("[creator_export] 账号%s: 文件已保存 %s", account_id, file_path)
