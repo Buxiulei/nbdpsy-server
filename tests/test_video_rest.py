@@ -385,3 +385,32 @@ async def test_serve_video_product_404_bad_segments(tmp_path, monkeypatch):
         # 文件名含非法字符（空格）→ 404
         assert (await client.get(
             "/uploads/video/1-0123456789abcdef/out/bad name.mp4")).status_code == 404
+
+
+async def test_serve_video_product_nested_subpath(tmp_path, monkeypatch):
+    """嵌套子目录（raw/asr_gaps/ 等管线多级产物）可直链取回——DashScope ASR 云端按公网 URL 拉音频。"""
+    monkeypatch.setattr(config_module.settings, "DATA_DIR", str(tmp_path / "data"))
+    token_dir = "1-0123456789abcdef"
+    gaps = tmp_path / "data" / "uploads" / "video" / token_dir / "raw" / "asr_gaps"
+    gaps.mkdir(parents=True)
+    (gaps / "gap0_0.wav").write_bytes(b"WAVBYTES")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.get(f"/uploads/video/{token_dir}/raw/asr_gaps/gap0_0.wav")
+        assert r.status_code == 200, r.text
+        assert r.content == b"WAVBYTES"
+
+
+async def test_serve_video_product_nested_traversal_404(tmp_path, monkeypatch):
+    """嵌套路径的穿越/隐藏段攻击全部 404：..、以点开头的段、空段。"""
+    monkeypatch.setattr(config_module.settings, "DATA_DIR", str(tmp_path / "data"))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        for evil in (
+            "/uploads/video/1-0123456789abcdef/raw/../../../etc/passwd",
+            "/uploads/video/1-0123456789abcdef/raw/.hidden/x.wav",
+            "/uploads/video/1-0123456789abcdef/raw//gap0_0.wav",
+            # 注：裸 ".." 段会先被 Starlette 路径规范化成 307 重定向（到不了本路由），
+            # follow_redirects 后落到不存在的资源仍是 404——两层防御殊途同归。
+            "/uploads/video/1-0123456789abcdef/raw/asr_gaps/..",
+        ):
+            assert (await client.get(
+                evil, follow_redirects=True)).status_code == 404, evil

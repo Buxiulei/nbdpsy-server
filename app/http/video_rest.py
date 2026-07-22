@@ -58,12 +58,13 @@ _INHERITED_STAGES = ["download", "analyze", "transcript", "resegment", "translat
 _YT_RE = re.compile(r"^https://(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]+")
 
 # ── /uploads/video 静态取图路由的防路径穿越白名单（仿 uploads_rest）─────────────────
-# 产物目录段 = {job_id}-{hmac16}（paths._job_root），子目录 ∈ {raw,tts,out}，文件名允许
-# 字母数字/点/下划线/连字符且不含 .. 与路径分隔符。三段均为单路径段（FastAPI 路径参数不跨 /），
-# 叠加正则白名单 + resolve/is_relative_to 纵深防御，杜绝 ../ 逃逸。
+# 产物目录段 = {job_id}-{hmac16}（paths._job_root），顶层子目录 ∈ {raw,tts,out}，其下允许
+# 嵌套子目录（管线会写 raw/asr_gaps/ 等多级路径，DashScope ASR 云端需按公网 URL 取回）。
+# subpath 逐段校验：每段只允许字母数字开头 + 字母数字/点/下划线/连字符，结构性排除 ..、空段
+# 与隐藏路径，叠加 resolve/is_relative_to 纵深防御，杜绝 ../ 逃逸。
 _TOKEN_DIR_RE = re.compile(r"^\d+-[0-9a-f]{16}$")
 _SUB_RE = re.compile(r"^(raw|tts|out)$")
-_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SEG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 MANIFEST_ENTRIES = [
@@ -357,25 +358,28 @@ async def delete_video_job(job_id: int) -> dict:
         return {"deleted": job_id}
 
 
-@router.get("/uploads/video/{token_dir}/{sub}/{name}")
-async def serve_video_product(token_dir: str, sub: str, name: str) -> FileResponse:
+@router.get("/uploads/video/{token_dir}/{sub}/{subpath:path}")
+async def serve_video_product(token_dir: str, sub: str, subpath: str) -> FileResponse:
     """取回视频产物（白名单免鉴权：HMAC token 目录即访问控制，与源一致）。
 
     ``/uploads`` 前缀在鉴权中间件白名单内（uploads_rest 同款），故本路由免 apikey——不可猜的
     ``{job_id}-{hmac16}`` 目录名（SECRET_KEY 派生，攻击者无从枚举他人成片）承担访问控制。
-    正则白名单 + resolve/is_relative_to 双保险挡路径穿越；非文件 404。media_type 按扩展名猜
-    （成片 mp4 / 字幕 srt / meta json 等各异），未知回退 application/octet-stream。
+    subpath 允许嵌套（如 ``raw/asr_gaps/gap0_0.wav``，源仓 StaticFiles mount 天然支持，此处
+    对齐）：逐段正则白名单 + resolve/is_relative_to 双保险挡路径穿越；非文件 404。media_type
+    按扩展名猜（成片 mp4 / 字幕 srt / meta json 等各异），未知回退 application/octet-stream。
     请求时读 settings.DATA_DIR（不在 import 期绑定），与 paths / uploads_rest 同惯例，使测试
     对 DATA_DIR 的 monkeypatch 生效。
     """
+    segments = subpath.split("/")
     if (not _TOKEN_DIR_RE.fullmatch(token_dir)
             or not _SUB_RE.fullmatch(sub)
-            or not _FILE_RE.fullmatch(name)):
+            or not segments
+            or not all(_SEG_RE.fullmatch(seg) for seg in segments)):
         raise HTTPException(status_code=404, detail="资源不存在")
     video_root = (Path(settings.DATA_DIR) / "uploads" / "video").resolve()
-    file_path = (video_root / token_dir / sub / name).resolve()
+    file_path = (video_root / token_dir / sub / Path(*segments)).resolve()
     # 纵深防御：正则已结构性排除逃逸字符，这里再确认最终路径确在 uploads/video 根内（双保险）。
     if not file_path.is_relative_to(video_root) or not file_path.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")
-    media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    media_type = mimetypes.guess_type(segments[-1])[0] or "application/octet-stream"
     return FileResponse(file_path, media_type=media_type)
