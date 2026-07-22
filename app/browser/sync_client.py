@@ -159,7 +159,7 @@ class SyncClient:
         self,
         account_id: int,
         cookies: List[Dict[str, Any]],
-        headless: bool = True,
+        headless: bool = False,
         block_images: bool = False,
     ):
         self.account_id = account_id
@@ -204,7 +204,8 @@ class SyncClient:
                 headless=self.headless,
                 humanize=True,
                 block_webrtc=True,
-                block_webgl=True,  # 无头场景禁 WebGL 省 GPU/内存,恒开
+                block_webgl=False,  # headed 跑在真屏 :0 + RTX 4090:放开 WebGL 走真 GPU
+                                    # 硬件渲染(真 NVIDIA 指纹),而非 Xvfb 软件渲染/headless 特征
                 block_images=self.block_images,  # 只读路径拦图省内存;发布路径为 False 保真
                 locale=fp.locale or "zh-CN",
                 os=target_os,

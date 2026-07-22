@@ -1,13 +1,17 @@
 [Unit]
 Description=nbdpsy-server - 小红书运营能力 REST 后台
-After=network.target nbdpsy-xvfb.service
-Requires=nbdpsy-xvfb.service
+# 浏览器 headed 跑在真屏 :0(roots autologin 图形会话)+ RTX 4090 硬件渲染,排在 gdm 之后启动。
+# 不再依赖 Xvfb :99(虚拟屏/软件渲染/headless 是风控检测信号,已弃用)。
+After=network.target gdm.service
 
 [Service]
 Type=simple
 User=roots
 WorkingDirectory=/home/roots/nbdpsy-server
-Environment=DISPLAY=:99
+# 浏览器接到真屏 :0 + 4090:DISPLAY=:0,XAUTHORITY 指向 roots :0 图形会话的 auth cookie。
+# 真 GPU 硬件 WebGL/canvas 指纹、无 headless 特征——比 Xvfb 软件渲染像真人得多。
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/alembic upgrade head
 ExecStartPre=/bin/bash /home/roots/nbdpsy-server/scripts/pack_extension.sh
 ExecStart=/home/roots/nbdpsy-server/.venv/bin/uvicorn app.server:create_app --factory --host 0.0.0.0 --port 8848
