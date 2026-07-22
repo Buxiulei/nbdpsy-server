@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # 顺延时间在窗口起点 + random.uniform(0, JITTER) 内落点,避免整点节律。
     PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR: int = 1
     PUBLISH_ACTIVE_WINDOW_JITTER_SEC: int = 7200
+    # 只存草稿模式(默认 True):录入内容(上传+填标题正文话题)后**不点发布**,由小红书
+    # 编辑器自动存草稿,提醒用户到草稿箱手动真人发布。规避"点发布提交"这一刻的「人机发布」
+    # 风控检测(封号根因)。要恢复自动真发,置 False。
+    PUBLISH_DRAFT_ONLY: bool = True
 
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0

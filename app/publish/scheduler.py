@@ -308,7 +308,14 @@ class PublishScheduler:
             # C1 守卫:非 publishing 态不落 —— 复活的重复 runner / 已 cancel 的 job 不被覆盖
             if job.status != "publishing":
                 return
-            if result.success:
+            if getattr(result, "draft_saved", False):
+                # 只存草稿模式:内容已录入并存为草稿,未真发布 —— 终态 draft(不重试),
+                # error 字段借用于承载"去草稿箱手动发布"提示,供前端/用户看到。
+                job.status = "draft"
+                job.note_id = ""
+                job.note_url = ""
+                job.error = getattr(result, "message", None) or "已存草稿,请到小红书草稿箱手动发布"
+            elif result.success:
                 job.status = "published"
                 job.note_id = result.note_id
                 job.note_url = result.note_url
