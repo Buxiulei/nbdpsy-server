@@ -333,7 +333,8 @@ async def mux(video_path: Path, dub_audio: Path, out_path: Path, *,
                  "-map", f"[{vlabel}]", "-map", alabel]
         argv += ["-c:v", "h264_nvenc", "-preset", "p4"] if use_nvenc \
             else ["-c:v", "libx264", "-preset", "veryfast"]
-    argv += ["-c:a", "aac", "-b:a", "128k", str(out_path)]
+    # +faststart：moov 前置，浏览器/移动端可边下边播（moov 在尾部时弱网/内置播放器表现为"打不开"）
+    argv += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(out_path)]
     try:
         await _run_ffmpeg(argv, timeout=timeout)
     except MuxError as e:
