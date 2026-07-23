@@ -157,6 +157,29 @@ class SyncHumanActions:
 
         logger.info(f"[SyncHuman] 点击 ({click_x:.0f}, {click_y:.0f}) | {reason}")
 
+    def hover(
+        self,
+        target: Union[ElementHandle, Tuple[float, float]],
+        *,
+        reason: str = "",
+    ):
+        """拟人化悬停(贝塞尔移动到目标 + 停留,**不点击**)。
+
+        用于"悬停才显出操作图标"类交互(如笔记管理卡片的删除按钮)。
+        """
+        self._action_count += 1
+        if isinstance(target, tuple):
+            hx, hy = target
+        else:
+            box = target.bounding_box()
+            if not box:
+                raise RuntimeError(f"[SyncHuman] 悬停目标坐标不可得 | {reason}")
+            hx = box['x'] + box['width'] * random.uniform(0.3, 0.7)
+            hy = box['y'] + box['height'] * random.uniform(0.3, 0.7)
+        self._move_to(hx, hy)
+        time.sleep(random.uniform(*self.params["hover_delay"]))
+        logger.info(f"[SyncHuman] 悬停 ({hx:.0f}, {hy:.0f}) | {reason}")
+
     def type_text(
         self,
         target: Optional[ElementHandle],

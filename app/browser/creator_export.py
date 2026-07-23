@@ -304,6 +304,21 @@ def export_notes(
         #    先在 expect_download 之外定位按钮——expect_download 的计时从 __enter__ 起算,
         #    若把定位(可能吃满 30s + 自愈)放进 with 体内,硬编码失效会先耗尽 download waiter,
         #    自愈即便定位成功也已超时。故 with 体内只做 click。
+        # 空表 fail-fast:当天新发的笔记次日才进数据看板;表无数据行时点「导出数据」
+        # 不产生任何下载 → 30s download 超时,报错语义误导(实测 RCA 2026-07-23 生意经)。
+        # 先数表格数据行,空表直接以明确 reason 收口,不再点导出白等。
+        try:
+            row_cnt = page.evaluate(
+                "() => document.querySelectorAll("
+                "'.d-table tbody tr, table tbody tr, [class*=table] [class*=row]').length"
+            )
+        except Exception:
+            row_cnt = -1  # 数不出来不拦路,照旧走导出
+        if row_cnt == 0:
+            raise CreatorExportError(
+                "no_data: 数据看板暂无笔记数据(新发笔记通常次日才入看板),无文件可导出"
+            )
+
         os.makedirs(download_dir, exist_ok=True)
         file_path = os.path.join(download_dir, f"export_{account_id}_{ts}.xlsx")
         export_btn = _find_creator_element(
