@@ -3,7 +3,7 @@
 覆盖(brief 必测):
 - 无 apikey → 401(中间件挡)。
 - 带合法 apikey → 200,返回体键与 get_extension_download 工具全等
-  {download_url, version, apikey_hint, install_steps, server_time};
+  {download_url, version, extension_version, apikey_hint, install_steps, server_time};
   download_url 含 /downloads/extension.zip?t= 的 cache-buster;install_steps 非空 list;
   server_time 可被 datetime.fromisoformat 解析;apikey_hint 不含任何明文 key。
 """
@@ -28,8 +28,11 @@ async def test_extension_returns_download_info(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text
         data = r.json()
         assert set(data.keys()) == {
-            "download_url", "version", "apikey_hint", "install_steps", "server_time",
+            "download_url", "version", "extension_version", "apikey_hint",
+            "install_steps", "server_time",
         }
+        # extension_version 是插件真实版本(manifest.json),与服务端 version 语义区分
+        assert data["extension_version"] and data["extension_version"] != data["version"]
         assert "/downloads/extension.zip?t=" in data["download_url"]
         assert data["version"] == __version__
         assert isinstance(data["install_steps"], list) and len(data["install_steps"]) > 0

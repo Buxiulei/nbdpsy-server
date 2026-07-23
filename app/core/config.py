@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     # 到顶仍溢出则取此值+告警(语速绝不再动,接受残余溢出/漂移)。源默认 1.2。
     TTS_MAX_RATE: float = 1.2
 
+    # ── 一致性生图(gpt-image-2 锚点法,自薯营家 2026-07-23 停机迁移)──
+    # OpenAI Images API:自定义 base_url 走国内中转;PROXY 非空时再叠 HTTP 代理。
+    OPENAI_IMAGE_API_KEY: str = ""
+    OPENAI_IMAGE_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_IMAGE_MODEL: str = "gpt-image-2"
+    # 质量档:medium 为质量/成本平衡点(8 页约 $0.68);low 便宜但文字易糊
+    OPENAI_IMAGE_QUALITY: str = "medium"
+    # 单张生图调用超时(秒):gpt-image 单张常 30-120s,留足余量
+    OPENAI_IMAGE_TIMEOUT: int = 300
+    OPENAI_IMAGE_PROXY: str = ""
+
     # ── 视频 worker 调度(方案 C 独立 asyncio worker,scheduler.py 消费)──
     # 单机 CPU 编码,并发 1 足够(排队语义与源一致);阶段内 300s 周期 touch heartbeat_at;
     # 恢复扫描判僵死阈值 900s(15min),超阈从 first_incomplete_stage 续跑。

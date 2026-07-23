@@ -14,6 +14,7 @@ from app.http import (
     extension_rest,
     manifest,
     notes_rest,
+    op_images_rest,
     publish_rest,
     system,
     uploads_rest,
@@ -30,6 +31,7 @@ ALL_ROUTERS = [
     extension_rest.router,
     publish_rest.router,
     notes_rest.router,
+    op_images_rest.router,
     downloads.router,
     uploads_rest.router,
     video_rest.router,
@@ -45,6 +47,7 @@ ALL_MANIFEST_ENTRIES = [
     *extension_rest.MANIFEST_ENTRIES,
     *publish_rest.MANIFEST_ENTRIES,
     *notes_rest.MANIFEST_ENTRIES,
+    *op_images_rest.MANIFEST_ENTRIES,
     *uploads_rest.MANIFEST_ENTRIES,
     *video_rest.MANIFEST_ENTRIES,
 ]
