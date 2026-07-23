@@ -110,10 +110,19 @@ GET_USER_INFO_JS = """
     const nameEl = document.querySelector('.user-name') || document.querySelector('.user-nickname');
     if (nameEl) result.nickname = nameEl.textContent.trim();
 
-    // 头像（.user-image 是个人主页的头像 img）
-    const avatarEl = document.querySelector('.user-image')
-                  || document.querySelector('.avatar-wrapper img');
-    if (avatarEl && avatarEl.src) result.avatar = avatarEl.src;
+    // 头像。坑(实测 2026-07-23):.user-image 在现版 XHS 是**容器 div 而非 img**,
+    // 旧写法 || 链在这个 truthy div 上短路,div.src=undefined → avatar 永远 null,
+    // 检测后头像永不同步。修:候选统一收集(容器则取其内 img),挑第一个真带 src 的;
+    // 终极兜底按头像 CDN 域(sns-avatar)匹配——个人主页上该域图像均为本人头像。
+    const avatarCands = [
+        document.querySelector('.user-image img'),
+        document.querySelector('.user-image'),
+        document.querySelector('.avatar-wrapper img'),
+        document.querySelector('.reds-img-box img'),
+    ].concat(Array.from(document.querySelectorAll('img'))
+        .filter(i => /sns-avatar/.test(i.src || '')));
+    const avatarEl = avatarCands.find(el => el && el.src);
+    if (avatarEl) result.avatar = avatarEl.src;
 
     // 小红书号（.user-redId 包含 "小红书号：xxx"）
     const redIdEl = document.querySelector('.user-redId');

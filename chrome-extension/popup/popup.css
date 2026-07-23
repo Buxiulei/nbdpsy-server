@@ -10,17 +10,24 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
   color: #333;
-  /* 通铺白色单一表面:弹窗窗口边缘是系统方角,body 若铺红渐变会在白色圆角容器外
-     露出一圈"方角红框"(用户反馈)。去框设计,弹窗圆角交给 Chrome 窗口形状本身。 */
+  /* 外圈铺白:弹窗窗口边缘是系统方角,铺色块必露方角(2.1.3 红渐变的教训)。
+     白底与弹窗窗口融为一体、方角不可见,视觉主体交给下面的圆角容器+勃艮第光晕。 */
   background: #fff;
   min-width: 320px;
   min-height: 400px;
 }
 
+/* 圆角卡片 + 勃艮第红光晕(用户要的"外框红色元素"):细红描边 + 近层勃艮第投影
+   + 远层淡金光晕,在白底上呈现"圆角红光外框",无任何方角色块。 */
 .container {
   background: #fff;
-  margin: 0;
+  border-radius: 16px;
+  margin: 10px;
   padding: 16px;
+  border: 1px solid rgba(138, 33, 54, 0.16);
+  box-shadow:
+    0 2px 16px rgba(138, 33, 54, 0.24),
+    0 0 40px rgba(196, 160, 96, 0.20);
 }
 
 /* 头部 */
