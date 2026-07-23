@@ -1144,18 +1144,14 @@ class XHSPublishAtomicTasks:
             if tags and len(tags) > 0:
                 # 去重 + 截断 ≤10(纯函数)
                 tags = dedupe_topics(tags)
-                # 用 JS 把话题作为纯 #标签快速追加到正文末尾(不 click / 不等下拉 /
-                # 不走慢速自愈)。坑:旧版逐个 click+type+等下拉+回删要几十秒,而小红书
-                # 编辑器只驻留几十秒就自动存草稿+重置回视频 tab —— 慢 step6 会让后续 step7
-                # 点发布落到已重置的页面(实测发布超时)。故这里瞬时追加,保住发布窗口。
-                # 纯文本 #tag 不是下拉精选话题,但足以发布;精选话题为次要,让位于"能发出去"。
-                tag_str = " " + " ".join(
-                    (t if str(t).startswith("#") else f"#{str(t).lstrip('#')}")
-                    for t in tags
-                )
-                logger.info(f"6.1 拟人化追加话题标签: {tag_str.strip()}")
-                # 合规:走 SyncHumanActions,禁 JS 注入。定位正文框坐标(只读)→ 拟人点击聚焦
-                # → Ctrl+End 移到正文末尾 → 逐字键盘输入 #标签(纯文本 tag,足以发布)。
+                # 走主仓(薯营家)实证过的下拉精选流:逐个输入 #tag → 等下拉 → JS 只读定位
+                # 精确匹配项坐标 → 拟人真实鼠标点击选中 → 生成**真话题实体**(蓝色可点击 chip),
+                # 纯文本 #tag 只是文字不参与话题分发。无精确匹配则 Escape+回删,绝不留残缺文本
+                # (残缺话题会撑爆 10 个上限拦发布,RCA 2026-05-18)。
+                # 历史注:旧版曾因"逐个等下拉要几十秒、编辑器驻留窗口撑不住"降级成纯文本——
+                # 那个慢主因是 camoufox humanize 与贝塞尔双重拟人化叠乘(单击 24s),已根治
+                # (单击 1.3s),现在每个话题全流程 ~5-7s,窗口内绰绰有余,故恢复下拉精选流。
+                logger.info(f"6.1 下拉精选流添加话题: {tags}")
                 try:
                     box = self.page.evaluate(r"""(sels) => {
                         for (const sel of sels) {
@@ -1173,19 +1169,97 @@ class XHSPublishAtomicTasks:
                         "textarea[placeholder*='正文']",
                         "div[contenteditable='true']",
                     ])
-                    if box:
+                    if not box:
+                        logger.warning("未找到正文框,跳过话题(不阻断发布)")
+                    else:
                         cx = box["x"] + box["w"] * 0.5
                         cy = box["y"] + box["h"] * 0.5
-                        self.human.click((cx, cy), reason="聚焦正文框(追加话题)")
-                        self.human.wait(0.2, 0.5, context="聚焦后停顿")
+                        self.human.click((cx, cy), reason="聚焦正文框(添加话题)")
                         self.human.press_key("Control+End", reason="光标移到正文末尾")
-                        self.human.type_text(None, tag_str, click_first=False)
-                        logger.info("✓ 话题标签已拟人化追加(纯文本 #tag)")
+                        self.human.press_key("Enter", reason="话题另起一行")
+                        added = 0
+                        for tag_idx, tag in enumerate(tags):
+                            tag_text = tag if str(tag).startswith("#") else f"#{tag}"
+                            tag_name = str(tag).lstrip("#").strip()
+                            self.human.type_text(None, tag_text, click_first=False)
+                            logger.info(f"   [{tag_idx+1}/{len(tags)}] 输入话题: {tag_text}")
+                            self.human.wait(1.5, 2.5, context="等待话题下拉")
+
+                            # JS 只读定位下拉精确匹配项坐标(不 JS click,点击走拟人鼠标)。
+                            # 匹配规则(主仓 RCA 2026-05-18):精确相等优先;或以完整 tagName
+                            # 开头且剩余非汉字(浏览量统计文案);禁止残缺前缀误配。
+                            option_pos = self.page.evaluate(r"""
+                                (tagName) => {
+                                    const allElements = document.querySelectorAll('*');
+                                    const candidates = [];
+                                    for (const el of allElements) {
+                                        const style = window.getComputedStyle(el);
+                                        const pos = style.position;
+                                        if (pos !== 'absolute' && pos !== 'fixed') continue;
+                                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                                        if (el.closest('[contenteditable]')) continue;
+                                        const rect = el.getBoundingClientRect();
+                                        if (rect.width > 800 || rect.height > 600) continue;
+                                        if (rect.width < 10 || rect.height < 10) continue;
+                                        const text = el.innerText || '';
+                                        if (text.includes(tagName) || text.includes('#' + tagName)) {
+                                            candidates.push({ el, area: rect.width * rect.height });
+                                        }
+                                    }
+                                    if (candidates.length === 0) return {success: false, reason: 'no_floating_layer'};
+                                    candidates.sort((a, b) => a.area - b.area);
+                                    const target = candidates[0];
+                                    const items = target.el.querySelectorAll('div, li, a, span, p');
+                                    const okRect = (it) => { const r = it.getBoundingClientRect();
+                                        return (r.width > 5 && r.height > 5 && r.height < 80)
+                                            ? {x: r.x + r.width/2, y: r.y + r.height/2} : null; };
+                                    // 第一轮:精确相等优先
+                                    for (const item of items) {
+                                        const itemText = (item.innerText || '').trim();
+                                        if (!itemText || itemText.length > 50) continue;
+                                        const cleanText = itemText.replace(/^#/, '').trim();
+                                        if (cleanText === tagName) {
+                                            const c = okRect(item);
+                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
+                                        }
+                                    }
+                                    // 第二轮:以完整 tagName 开头(剩余应是统计文案,非汉字延展)
+                                    for (const item of items) {
+                                        const itemText = (item.innerText || '').trim();
+                                        if (!itemText || itemText.length > 50) continue;
+                                        const cleanText = itemText.replace(/^#/, '').trim();
+                                        if (cleanText.startsWith(tagName) && cleanText.length > tagName.length) {
+                                            const rest = cleanText.slice(tagName.length);
+                                            if (/^[一-龥]/.test(rest)) continue;
+                                            const c = okRect(item);
+                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
+                                        }
+                                    }
+                                    return {success: false, reason: 'no_exact_match'};
+                                }
+                            """, tag_name)
+
+                            if option_pos and option_pos.get("success"):
+                                ox, oy = option_pos["x"], option_pos["y"]
+                                matched = option_pos.get("matched", "")
+                                self.human.click((ox, oy), reason=f"点击话题选项: {matched[:20]}")
+                                logger.info(f"   ✓ 话题下拉点击成功: '{matched}'")
+                                added += 1
+                            else:
+                                # 无精确匹配:回删刚输入的 #tag,绝不留残缺文本
+                                reason = option_pos.get("reason", "unknown") if option_pos else "error"
+                                logger.info(f"   下拉无精确匹配({reason}),回删该话题不插入")
+                                try:
+                                    self.page.keyboard.press("Escape")
+                                    for _ in range(len(tag_text)):
+                                        self.page.keyboard.press("Backspace")
+                                except Exception as _be:
+                                    logger.info(f"   回删话题异常: {_be}")
+                            self.human.wait(0.8, 1.5, context="话题处理")
+                        logger.info(f"✓ 话题添加完成: {added}/{len(tags)} 个精选实体")
                         options_set.append("tags")
-                    else:
-                        logger.warning("未找到正文框,跳过话题(不阻断发布)")
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"拟人化追加话题失败({e}),跳过话题不阻断发布")
+                    logger.warning(f"下拉精选流添加话题失败({e}),跳过话题不阻断发布")
 
             if location:
                 logger.info(f"6.2 设置地点: {location}")
@@ -1375,19 +1449,62 @@ class XHSPublishAtomicTasks:
                         ("拟人点击-0.59", lambda: self.human.click(
                             (fx, fy), reason="发布(closed shadow 0.59)")),
                     ]
-                    for name, act in attempts:
+                    # 发布是**非幂等**操作:一旦点击被发布按钮接收(无论成功回执还是 Network
+                    # Error 拒绝回执),都会生成一篇笔记。旧逻辑点后只 sleep 2s,未见跳转就换手段
+                    # 再点 → 发布慢/并发/网络摩擦时首点其实已生效,补点又各生成一篇 → 重复发布
+                    # (实测看世界并发真发布出 3 篇同文)。改为:点一次 → 长窗口(~12s)轮询成功页;
+                    # 未见成功也先判「点击是否已被接收」(回执 toast / 按钮 loading / 已离开发布页),
+                    # 已接收则**绝不补点**、转等待兜底,仅在明确未被接收(疑似点空)时才换位置补点。
+                    def _click_registered():
+                        try:
+                            if _published():
+                                return True
+                            n = self.page.evaluate(
+                                "() => document.querySelectorAll("
+                                "'[class*=toast],[class*=Toast]').length")
+                            if n and n > 0:
+                                return True
+                            return bool(self.page.evaluate(
+                                "() => { const h=document.querySelector('xhs-publish-btn');"
+                                " if(!h) return true;"
+                                " const s=(h.innerHTML||'')+((h.shadowRoot&&h.shadowRoot.innerHTML)||'');"
+                                " return /loading|disabled|submitting|发布中/i.test(s); }"))
+                        except Exception:
+                            return False
+
+                    for idx, (name, act) in enumerate(attempts):
+                        # 补点前先确认上次点击**未被接收**;已接收则停手,绝不重复发布
+                        if idx > 0 and _click_registered():
+                            logger.info(
+                                f"[{name}] 跳过补点:上次点击已被接收(防重复发布),转等待兜底")
+                            publish_clicked = True
+                            click_strategy = "closed shadow:已接收待确认"
+                            break
                         try:
                             self.human.wait(0.3, 0.7, context="确认发布内容")
                             act()
                             logger.info(f"✓ [closed shadow] 尝试[{name}] @({tx:.0f},{ty:.0f})")
-                            time.sleep(2.0)
-                            if _published():
+                            # 长窗口轮询成功页(发布慢/并发/网络摩擦时 sleep 2s 远不够)
+                            published = False
+                            for _ in range(12):
+                                time.sleep(1.0)
+                                if _published():
+                                    published = True
+                                    break
+                            if published:
                                 logger.info(f"✓ [{name}] 发布生效(页面已变化)")
                                 publish_clicked = True
                                 publish_confirmed = True
                                 click_strategy = f"closed shadow:{name}"
                                 break
-                            logger.info(f"… [{name}] 后页面未变,尝试下一手段")
+                            # 未跳成功页但点击已被接收 → 不补点,转等待兜底(防重复发布)
+                            if _click_registered():
+                                logger.info(
+                                    f"… [{name}] 未跳成功页但点击已被接收 → 停止补点(防重复),转等待兜底")
+                                publish_clicked = True
+                                click_strategy = f"closed shadow:{name}(已接收待确认)"
+                                break
+                            logger.info(f"… [{name}] 点击未被接收(疑似点空),换手段补点")
                         except Exception as ae:
                             logger.info(f"[{name}] 执行异常: {ae}")
                     if not publish_clicked:
