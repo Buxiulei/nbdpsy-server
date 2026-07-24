@@ -20,6 +20,7 @@ from app.http.cookies_rest import _decrypt_account_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import note_delete, note_export
 from app.services.note_metrics_service import list_notes, note_trend
+from app.services.quota import assert_operator_quota
 
 router = APIRouter()
 
@@ -92,6 +93,8 @@ MANIFEST_ENTRIES = [
 async def start_note_export_endpoint(account_id: int) -> dict:
     """异步触发该号创作中心笔记导出,立即返回 export_id(导出后台跑,不阻塞)。"""
     operator = current_operator()
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不发起导出。
+    await assert_operator_quota(operator)
     async with get_session() as session:
         await assert_account_access(operator, account_id, session)
         account = await session.get(XhsAccount, account_id)
@@ -115,6 +118,8 @@ async def start_note_deletion_endpoint(
 ) -> dict:
     """异步触发按标题删除该号笔记(不可逆),立即返回 deletion_id。"""
     operator = current_operator()
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不发起删除。
+    await assert_operator_quota(operator)
     async with get_session() as session:
         await assert_account_access(operator, account_id, session)
         account = await session.get(XhsAccount, account_id)

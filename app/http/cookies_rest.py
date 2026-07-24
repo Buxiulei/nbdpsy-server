@@ -19,6 +19,7 @@ from app.core.errors import NotFoundError
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import cookie_check
+from app.services.quota import assert_operator_quota
 
 router = APIRouter()
 
@@ -50,6 +51,8 @@ MANIFEST_ENTRIES = [
 async def start_cookie_check_endpoint(account_id: int) -> dict:
     """异步发起该号 cookie 活性检测,立即返回 check_id(检测 20-40s,不阻塞)。"""
     operator = current_operator()
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不发起检测。
+    await assert_operator_quota(operator)
     async with get_session() as session:
         await assert_account_access(operator, account_id, session)
         account = await session.get(XhsAccount, account_id)
