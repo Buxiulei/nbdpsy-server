@@ -1,0 +1,32 @@
+[Unit]
+Description=nbdpsy-worker - 浏览器任务调度中枢(supervisor,按账号派生子进程)
+# API/Worker 拆分架构(docs/design/2026-07-24-api-worker-split-design.md):
+# 本单元跑 python -m app.worker(NBDPSY_ROLE=worker):扫描 DB 队列(publish_jobs +
+# browser_jobs)→ 按账号派生 account_worker 子进程 + op_images 执行 + 各类 reaper。
+# 排在 nbdpsy-api 之后:DB 迁移由 api 的 ExecStartPre 跑(本单元不跑 alembic,
+# 避免双迁移竞争);账号子进程要上真屏 :0(camoufox headed,4090 硬件渲染),
+# 故与 api 同款排在 gdm 之后 + 同款 DISPLAY/XAUTHORITY。
+After=nbdpsy-api.service network.target gdm.service
+
+[Service]
+Type=simple
+User=roots
+WorkingDirectory=/home/roots/nbdpsy-server
+# 账号子进程接真屏 :0 + 4090:真 GPU 硬件 WebGL/canvas 指纹、无 headless 特征。
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+Environment=NBDPSY_ROLE=worker
+# 浅探测 api 存活(迁移已到 head 的代理信号):失败则本次启动失败,
+# 由 Restart=always + RestartSec 周期重试兜住,不做循环等待。
+ExecStartPre=/usr/bin/curl -sf http://127.0.0.1:8848/healthz
+ExecStart=/home/roots/nbdpsy-server/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=3
+# 优雅停机 ≤15s:SIGTERM → supervisor 停派新任务 → 给 in-flight 浏览器 10s 收尾 →
+# 强杀残余 camoufox → 退出;15s 内退不掉 SIGKILL 全进程组(mixed 连带清 camoufox
+# 子进程树)。被杀任务由僵死恢复按 kind 语义处置(见 docs/deployment.md),不静默丢失。
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

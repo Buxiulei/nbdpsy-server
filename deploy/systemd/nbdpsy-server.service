@@ -1,3 +1,6 @@
+# 【已被 api/worker 双单元取代,保留作单进程回滚位(NBDPSY_ROLE=all)】
+# 常态部署用 nbdpsy-api.service + nbdpsy-worker.service(见 docs/deployment.md);
+# 回滚时 stop 双单元后 start 本单元即回到单进程架构(NBDPSY_ROLE 默认 all,兼跑全部角色)。
 [Unit]
 Description=nbdpsy-server - 小红书运营能力 REST 后台
 # 浏览器 headed 跑在真屏 :0(roots autologin 图形会话)+ RTX 4090 硬件渲染,排在 gdm 之后启动。
