@@ -233,26 +233,35 @@ def test_publish_modules_import_and_public_surface():
         assert hasattr(atomic_tasks.XHSPublishAtomicTasks, step)
 
 
-def test_normalize_cookies_hostonly_dup_not_collide():
-    """同名双份(RCA 2026-07-24 acc2 发布必败根因):`.域` 与 host-only 并存时,
-    host-only 保持原样不加点——绝不与活凭据同名同域撞车(后写覆盖先写),
-    且 creator 子域 fallback 只克隆 `.域` 那份(host-only 不混入)。"""
+def test_normalize_cookies_dup_picks_later_expiry_live():
+    """同名双份(RCA 2026-07-25 三路真验活铁证):归一 `.xiaohongshu.com` 后按
+    **expires 更晚者胜**(最近写入=活凭据)。实测活 web_session 常在 host-only 那份且
+    过期更晚——07-24 武断保留 `.域` 把活号注入成 invalid,本用例锁死正确方向。"""
     out = normalize_cookies_for_injection([
-        {"name": "id_token", "value": "LIVE", "domain": ".xiaohongshu.com"},
-        {"name": "id_token", "value": "STALE", "domain": "xiaohongshu.com"},
+        {"name": "web_session", "value": "OLD", "domain": ".xiaohongshu.com",
+         "expires": 1000},
+        {"name": "web_session", "value": "LIVE", "domain": "xiaohongshu.com",
+         "expires": 2000},  # 更晚过期 = 活凭据
     ])
-    # 3 条:`.域`主站 + creator fallback + host-only 原样
-    assert len(out) == 3
+    # 同名归一同键 → 只 1 条主站 + 1 条 creator,值取 LIVE
     dotted = [c for c in out if c.get("domain") == ".xiaohongshu.com"]
-    hostonly = [c for c in out if c.get("domain") == "xiaohongshu.com"]
     creator = [c for c in out if "url" in c]
     assert len(dotted) == 1 and dotted[0]["value"] == "LIVE"
-    assert len(hostonly) == 1 and hostonly[0]["value"] == "STALE"  # 保持 host-only,不撞车
-    assert len(creator) == 1 and creator[0]["value"] == "LIVE"      # creator 只拿活凭据
+    assert len(creator) == 1 and creator[0]["value"] == "LIVE"
+    assert all(c["value"] == "LIVE" for c in out)  # 旧值 OLD 绝不注入
+
+
+def test_normalize_cookies_dup_tie_hostonly_wins():
+    """expires 平局时 host-only 源胜(实测活值所在)。"""
+    out = normalize_cookies_for_injection([
+        {"name": "id_token", "value": "DOT", "domain": ".xiaohongshu.com", "expires": 500},
+        {"name": "id_token", "value": "HOST", "domain": "xiaohongshu.com", "expires": 500},
+    ])
+    assert all(c["value"] == "HOST" for c in out)
 
 
 def test_normalize_cookies_solitary_hostonly_still_dotted():
-    """孤立 host-only(无同名 `.域` 份)沿旧行为加点归一,既有账号路径不回归。"""
+    """孤立 host-only(无同名 `.域` 份)加点归一为 `.xiaohongshu.com` 并触发 creator。"""
     out = normalize_cookies_for_injection(
         [{"name": "solo", "value": "x", "domain": "xiaohongshu.com"}]
     )

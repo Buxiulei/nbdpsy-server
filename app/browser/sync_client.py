@@ -123,32 +123,46 @@ def normalize_cookies_for_injection(cookies: List[Dict[str, Any]]) -> List[Dict[
     if not cookies:
         return []
 
-    # 同名双份坑(实测 RCA 2026-07-24,acc2 发布必败根因):插件快照里同一 name 常
-    # 同时存在 `.xiaohongshu.com`(域 cookie,www/creator 实际在用的活凭据)与
-    # `xiaohongshu.com`(host-only,只发给裸域,常是陈旧值)两份。旧逻辑把 host-only
-    # 强制加点 → 与 `.域` 同名同域**撞车**(后写覆盖先写),陈旧值排后面就赢 →
-    # creator SSO 中途 401 → 编辑器自动存草稿弹回/点草稿编辑被踢登录页。
-    # 修:同名在 `.域` 已有一份时,host-only 保持原样(真浏览器里它对 www/creator
-    # 本就不可见);孤立的 host-only 维持旧的加点归一(不改变既有账号的可用路径)。
-    dotted_names = {
-        c.get("name") for c in cookies
-        if str(c.get("domain", "")).startswith(".")
-    }
+    # 同名双份坑(实测 RCA 2026-07-25,三路真验活铁证,推翻 07-24 的错误修复):
+    # 插件快照里同一 name 常同时存在 `.xiaohongshu.com`(域 cookie)与 `xiaohongshu.com`
+    # (host-only)两份且**值不同**——但哪份是活凭据不能靠 domain 形态武断判定:
+    # 实测 acc2/acc5 的活 web_session 恰在 **host-only** 那份(且其 expires 更晚)。
+    # 07-24 曾武断"保留 .域 / 排除 host-only",把每个号真活 session 踢掉 → 全号 invalid。
+    # 正解:同名归一到 `.xiaohongshu.com` 后按 **expires 更晚者胜**(cookie 每次 Set
+    # 刷新过期,更晚过期=更近写入=活凭据),平局时 host-only 源胜(实测活值所在),
+    # 确定性地让活值对 www/creator 生效,不靠列表顺序。
+    def _norm_domain(raw: str) -> str:
+        if "www.xiaohongshu.com" in raw:
+            return ".xiaohongshu.com"
+        return raw if raw.startswith(".") else "." + raw.lstrip(".")
 
-    result: List[Dict[str, Any]] = []
+    def _exp(c: Dict[str, Any]) -> float:
+        v = c.get("expires")
+        return float(v) if v and v > 0 else 0.0
+
+    # 按 (name, 归一 domain) 选代表:expires 更晚胜,平局 host-only 源胜。
+    chosen: dict[tuple[str, str], Dict[str, Any]] = {}
+    order: List[tuple[str, str]] = []
     for cookie in cookies:
         name = cookie.get("name")
         if not name or "value" not in cookie:
             continue
+        key = (name, _norm_domain(str(cookie.get("domain", ".xiaohongshu.com"))))
+        cur = chosen.get(key)
+        if cur is None:
+            chosen[key] = cookie
+            order.append(key)
+            continue
+        c_exp, cur_exp = _exp(cookie), _exp(cur)
+        cur_domain = str(cur.get("domain", ""))
+        is_hostonly = not str(cookie.get("domain", "")).startswith(".")
+        cur_hostonly = not cur_domain.startswith(".")
+        if c_exp > cur_exp or (c_exp == cur_exp and is_hostonly and not cur_hostonly):
+            chosen[key] = cookie
 
-        domain = cookie.get("domain", ".xiaohongshu.com")
-        if "www.xiaohongshu.com" in domain:
-            domain = ".xiaohongshu.com"
-        elif not domain.startswith(".") and name not in dotted_names:
-            # 孤立 host-only:沿旧行为加点归一(域 cookie 对全子域生效)
-            domain = "." + domain
-        # else:同名 `.域` 已存在 → host-only 保持原样,绝不与活凭据撞车
-
+    result: List[Dict[str, Any]] = []
+    for name, domain in order:
+        cookie = chosen[(name, domain)]
         same_site = _coerce_same_site(cookie.get("sameSite"))
         entry: Dict[str, Any] = {
             "name": name,
@@ -159,11 +173,13 @@ def normalize_cookies_for_injection(cookies: List[Dict[str, Any]]) -> List[Dict[
             "secure": cookie.get("secure", True),
             "sameSite": same_site,
         }
-        if cookie.get("expires") and cookie["expires"] > 0:
-            entry["expires"] = cookie["expires"]
+        exp = cookie.get("expires")
+        if exp and exp > 0:
+            entry["expires"] = exp
         result.append(entry)
 
         # creator 子域 fallback:以 url 方式补注入,确保创作中心能读到 cookie
+        # (Camoufox/Firefox 对 domain 前缀点的子域匹配不可靠)。
         if domain == ".xiaohongshu.com":
             creator = {
                 "name": name,
@@ -173,8 +189,8 @@ def normalize_cookies_for_injection(cookies: List[Dict[str, Any]]) -> List[Dict[
                 "secure": cookie.get("secure", True),
                 "sameSite": same_site,
             }
-            if cookie.get("expires") and cookie["expires"] > 0:
-                creator["expires"] = cookie["expires"]
+            if exp and exp > 0:
+                creator["expires"] = exp
             result.append(creator)
 
     return result
