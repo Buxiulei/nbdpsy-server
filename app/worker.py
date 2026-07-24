@@ -20,11 +20,11 @@ import asyncio
 import json
 import os
 import signal
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import or_, select
+from sqlalchemy import update, or_, select
 
 import app.core.db as db_module
 from app.browser.browser_reaper import BrowserReaper
@@ -232,6 +232,15 @@ class Supervisor:
                 await self._repo.recover_stale()
             except Exception:
                 logger.exception("browser_jobs 僵死恢复失败(忽略,下轮重试)")
+        # a2. publish_jobs 僵死恢复(评审确认的 critical:account_worker 被 SIGKILL/
+        #     断电后 publishing 永久悬挂——finally 兜底进程级击杀下不执行,必须由
+        #     supervisor 巡回归位)。语义移植自 PublishScheduler.recover_stale:
+        #     超 PUBLISH_JOB_TIMEOUT 的 publishing 复位 pending;排除仍有存活子进程的
+        #     账号(在途真发布,墙钟超时≠僵死,复位会二次发布)。
+        try:
+            await self._recover_stale_publish()
+        except Exception:
+            logger.exception("publish_jobs 僵死恢复失败(忽略,下轮重试)")
         # b. 可派发工作:publish_jobs(SQL 直查到期 pending)+ browser_jobs(queued 全量)
         publish_rows = await self._due_publish_jobs()
         browser_rows: list[dict] = []
@@ -249,6 +258,33 @@ class Supervisor:
                 account_rows.append(row)
         # c+d. 账号公平轮转派发子进程
         await self._dispatch_accounts(publish_rows, account_rows)
+
+    async def _recover_stale_publish(self) -> int:
+        """publishing 且 started_at 超 PUBLISH_JOB_TIMEOUT 的僵死发布复位 pending。
+
+        排除 self._procs 中仍有存活子进程的账号:该号 account_worker 可能仍在真发布,
+        复位会触发重派 + 二次发布(重复笔记)。子进程消亡后下一轮即可命中复位。
+        返回复位条数。
+        """
+        cutoff = datetime.utcnow() - timedelta(seconds=settings.PUBLISH_JOB_TIMEOUT)
+        live_accounts = [
+            acc for acc, proc in self._procs.items() if proc.returncode is None
+        ]
+        async with self._session_factory() as session:
+            stmt = (
+                update(PublishJob)
+                .where(PublishJob.status == "publishing")
+                .where(PublishJob.started_at.is_not(None))
+                .where(PublishJob.started_at <= cutoff)
+            )
+            if live_accounts:
+                stmt = stmt.where(PublishJob.account_id.not_in(live_accounts))
+            stmt = stmt.values(status="pending", started_at=None)
+            res = await session.execute(stmt)
+            await session.commit()
+        if res.rowcount:
+            logger.warning(f"[supervisor] 复位僵死 publishing 发布任务 {res.rowcount} 条")
+        return res.rowcount
 
     async def _due_publish_jobs(self) -> list[tuple[int, int, datetime | None]]:
         """SQL 直查到期 pending 发布任务:(id, account_id, created_at),按 id 升序。
@@ -430,17 +466,22 @@ class Supervisor:
             payload = claimed.get("payload") or {}
             if isinstance(payload, str):
                 payload = json.loads(payload or "{}")
+            hb = self._track(self._repo.heartbeat_loop(job_id))  # 执行期心跳防误判僵死
             try:
-                result = await op_images_service.execute(payload)
-                if not isinstance(result, dict):
-                    result = {"error": f"op_images 返回非 dict:{type(result).__name__}"}
-            except Exception as exc:
-                logger.exception("op_images job {} 执行异常", job_id)
-                result = {"error": str(exc)}
-            status = "error" if result.get("error") else "done"
-            await asyncio.to_thread(
-                self._repo.finish_job_sync, db_path, job_id, status, result
-            )
+                try:
+                    result = await op_images_service.execute(payload)
+                    if not isinstance(result, dict):
+                        result = {"error": f"op_images 返回非 dict:{type(result).__name__}"}
+                except Exception as exc:
+                    logger.exception("op_images job {} 执行异常", job_id)
+                    result = {"error": str(exc)}
+                status = "error" if result.get("error") else "done"
+                await asyncio.to_thread(
+                    self._repo.finish_job_sync, db_path, job_id, status, result,
+                    self._worker_tag,
+                )
+            finally:
+                hb.cancel()
         except Exception:
             logger.exception("op_images job {} 台账收尾异常(交僵死恢复处置)", job_id)
         finally:

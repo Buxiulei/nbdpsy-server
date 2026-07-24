@@ -46,8 +46,15 @@ class _FakeRepo:
         row = next((r for r in self.rows if r["id"] == job_id), None)
         return dict(row) if row else None
 
-    def finish_job_sync(self, db_path, job_id, status, result):
+    def finish_job_sync(self, db_path, job_id, status, result, worker_tag=None):
         self.finishes.append((job_id, status, result))
+
+    async def heartbeat_loop(self, job_id, interval_s=300.0):
+        # 假心跳循环:立即挂起等 cancel(生产版每 300s touch 一次)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
 
 
 class _FakeProc:
@@ -339,3 +346,35 @@ async def test_request_stop_halts_dispatch(db_factory, monkeypatch):
     await asyncio.sleep(0.1)
     assert repo.recover_calls == frozen, "停机后不得再扫描"
     assert spawned == [], "停机后不得再派发"
+
+
+async def test_recover_stale_publish_resets_dead_but_spares_live(db_factory, monkeypatch):
+    """评审 F1 锁定:超时 publishing 复位 pending;有存活子进程的账号被豁免(在途真发布)。"""
+    from datetime import datetime, timedelta
+
+    import app.worker as worker_mod
+    from app.models.publish_job import PublishJob
+
+    stale_at = datetime.utcnow() - timedelta(seconds=9999)
+    async with db_factory() as session:
+        session.add(PublishJob(account_id=71, title="死", content="c", images_json="[]",
+                               topics_json="[]", status="publishing", started_at=stale_at))
+        session.add(PublishJob(account_id=72, title="活", content="c", images_json="[]",
+                               topics_json="[]", status="publishing", started_at=stale_at))
+        await session.commit()
+
+    sup = worker_mod.Supervisor(db_factory, include_video=False)
+
+    class _Live:
+        returncode = None  # 存活子进程
+
+    sup._procs[72] = _Live()  # 账号 72 在途 → 豁免
+    n = await sup._recover_stale_publish()
+    assert n == 1
+
+    from sqlalchemy import select
+    async with db_factory() as session:
+        rows = {r.account_id: r for r in
+                (await session.execute(select(PublishJob))).scalars().all()}
+    assert rows[71].status == "pending" and rows[71].started_at is None  # 死者复位
+    assert rows[72].status == "publishing"  # 在途豁免

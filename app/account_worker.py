@@ -370,13 +370,13 @@ def run_browser_job(
         if not isinstance(result, dict):
             result = {"error": f"execute 返回非 dict: {type(result).__name__}"}
         status = "error" if result.get("error") else "done"
-        repo.finish_job_sync(db_path, job_id, status, result)
+        repo.finish_job_sync(db_path, job_id, status, result, worker_tag)
         logger.info("{} browser job {}({}) 完成,终态 {}", prefix, job_id, kind, status)
     except Exception as exc:
         # 任何异常(未知 kind / execute 崩 / asyncio 崩)兜底写 error 终态,绝不留 running
         logger.exception("{} browser job {}({}) 执行异常,兜底置 error", prefix, job_id, kind)
         try:
-            repo.finish_job_sync(db_path, job_id, "error", {"error": str(exc)})
+            repo.finish_job_sync(db_path, job_id, "error", {"error": str(exc)}, worker_tag)
         except Exception:
             logger.exception("{} browser job {} 兜底写终态也失败", prefix, job_id)
     finally:

@@ -70,7 +70,7 @@ class FakeRepo:
         self.claim_calls.append((db_path, job_id, worker_tag))
         return self.claim_result
 
-    def finish_job_sync(self, db_path, job_id, status, result):
+    def finish_job_sync(self, db_path, job_id, status, result, worker_tag=None):
         self.finish_calls.append((job_id, status, result))
 
     def heartbeat_sync(self, db_path, job_id):

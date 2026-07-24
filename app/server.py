@@ -14,7 +14,6 @@ from fastmcp.utilities.lifespan import combine_lifespans
 from loguru import logger
 
 import app.core.db as db_module
-import app.worker as worker_module
 from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError
 from app.auth.middleware import ApiKeyMiddleware
@@ -22,7 +21,10 @@ from app.core.config import assert_secret_key_configured
 from app.core.errors import NotFoundError
 from app.http import ALL_ROUTERS
 from app.mcp_facade import mcp
+from app.browser.account_locks import account_locks
 from app.publish.runtime import set_active_scheduler
+from app.publish.scheduler import PublishScheduler
+from app.services import browser_jobs_repo
 
 
 def create_app() -> FastAPI:
@@ -34,9 +36,10 @@ def create_app() -> FastAPI:
     #    (设计 docs/design/2026-07-24-api-worker-split-design.md §二):
     #    - api:只做 init_db + bootstrap_admin —— 不起调度/巡检/reaper/视频,API 进程
     #      秒级起停,部署零停机;后台消费全部由独立 worker 进程(python -m app.worker)承担。
-    #    - all(默认,单进程回滚位与测试):额外起 Supervisor 调度中枢,顶替旧
-    #      PublishScheduler(发布扫描/巡检/reaper 统一归 Supervisor,见 app/worker.py;
-    #      PublishScheduler 类保留作发布终态 policy 语义参照物,此处不再实例化)。
+    #    - all(默认,单进程回滚位与测试):**传统装配**——PublishScheduler 进程内发布
+    #      + spawn_inline 四类任务 + 60s 台账清道夫;与拆分前语义一致(共享 account_locks
+    #      同号互斥)。Supervisor/子进程派发专属 worker 角色,all 模式绝不引入(评审
+    #      裁定:两执行域不共享进程锁会同号互杀)。
     #    - worker 角色不经 server.py(独立进程入口 python -m app.worker)。
     #    session_factory 在此处读 db_module.async_session 而非 import 期绑定,使测试对
     #    async_session 的 monkeypatch 生效(落隔离库、不碰生产库)。
@@ -45,26 +48,45 @@ def create_app() -> FastAPI:
         await db_module.init_db()
         await bootstrap_admin()
         role = os.getenv("NBDPSY_ROLE", "all")
-        supervisor = None
-        supervisor_task: asyncio.Task | None = None
+        scheduler: PublishScheduler | None = None
+        janitor_task: asyncio.Task | None = None
         if role == "all":
-            # 经 worker_module 属性引用(而非 from-import),让测试可 monkeypatch
-            # app.worker.Supervisor 注入假件断言启停。视频调度不在此起
-            # (include_video 默认 False):拆分前 server 就不跑视频 worker
-            # (独立进程 python -m app.video.worker),all 模式维持该行为零回归。
-            supervisor = worker_module.Supervisor(db_module.async_session)
-            supervisor_task = asyncio.create_task(supervisor.run())
+            # all(单进程回滚位/测试位)= **传统装配**:PublishScheduler 进程内发布
+            # (与 spawn_inline 的四类 browser_jobs 共享同一把进程级 account_locks——
+            # 同号互斥的既有保障)+ 60s 台账清道夫(browser_jobs 僵死恢复,含发布外
+            # 四类任务;发布僵死由 scheduler.recover_stale 自身覆盖)。
+            # 评审裁定:all 模式绝不引入 Supervisor 子进程派发——子进程不共享父进程
+            # account_locks,与 inline 构成两个互不可见的执行域,同号双 camoufox 会被
+            # SyncClient.start() 的 kill_orphans 互杀。Supervisor 专属 worker 进程
+            # (python -m app.worker,其内无 inline,账号互斥由"同号至多 1 子进程"保证)。
+            scheduler = PublishScheduler(db_module.async_session, account_locks=account_locks)
+            scheduler.start()
+            set_active_scheduler(scheduler)
+
+            async def _ledger_janitor() -> None:
+                """all 模式台账清道夫:周期跑 browser_jobs 僵死恢复(inline 执行方
+                崩溃/进程被杀留下的 running 孤儿)。执行期心跳已在消费路径补齐,
+                正常在跑任务不会被误判。"""
+                while True:
+                    await asyncio.sleep(60)
+                    try:
+                        await browser_jobs_repo.recover_stale()
+                    except Exception:
+                        logger.exception("台账清道夫僵死恢复失败(下轮重试)")
+
+            janitor_task = asyncio.create_task(_ledger_janitor())
         try:
             yield
         finally:
-            # set_active_scheduler(None) 常态化:活跃调度器常态即 None(publish 端点的
-            # 立即投递 nudge 静默跳过,由 worker 5s 扫描兜底);此处重置只为清掉测试
-            # 注入的假调度器,防跨用例泄漏。
             set_active_scheduler(None)
-            if supervisor is not None:
-                supervisor.request_stop()
-                if supervisor_task is not None:
-                    await supervisor_task
+            if janitor_task is not None:
+                janitor_task.cancel()
+                try:
+                    await janitor_task
+                except asyncio.CancelledError:
+                    pass
+            if scheduler is not None:
+                await scheduler.stop()
 
     # 1.1 薄 MCP facade 的 Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     #      host_origin_protection=False:关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护,

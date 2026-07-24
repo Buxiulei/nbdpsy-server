@@ -196,19 +196,35 @@ async def claim_job(job_id: str, worker_tag: str) -> dict | None:
     return await get_job(job_id)
 
 
-async def finish_job(job_id: str, status: str, result: dict) -> None:
-    """async 写终态(done/error)与结果;进程内消费用。"""
-    async with get_session() as session:
-        await session.execute(
-            update(BrowserJob)
-            .where(BrowserJob.id == job_id)
-            .values(
-                status=status,
-                result=json.dumps(result, ensure_ascii=False),
-                updated_at=datetime.utcnow(),
-            )
+async def finish_job(
+    job_id: str, status: str, result: dict, worker_tag: str | None = None
+) -> bool:
+    """async 写终态(done/error)与结果;进程内消费用。
+
+    终态守卫(与 publish 侧 C1 同款纪律):只覆盖仍处 running 的行;传 worker_tag 时
+    还要求 claimed_by 是自己——被僵死恢复处置/被他方重新认领的行,迟到的原执行方
+    写不进(rowcount=0 → 告警丢弃,返回 False),unknown 人工核对语义不被静默抹除。
+    """
+    stmt = (
+        update(BrowserJob)
+        .where(BrowserJob.id == job_id, BrowserJob.status == "running")
+        .values(
+            status=status,
+            result=json.dumps(result, ensure_ascii=False),
+            updated_at=datetime.utcnow(),
         )
+    )
+    if worker_tag:
+        stmt = stmt.where(BrowserJob.claimed_by == worker_tag)
+    async with get_session() as session:
+        res = await session.execute(stmt)
         await session.commit()
+    if res.rowcount != 1:
+        logger.warning(
+            f"[browser_jobs] 迟到终态被守卫丢弃 job_id={job_id} status={status}"
+            f"(行已被恢复处置或他方认领)")
+        return False
+    return True
 
 
 # ---------------- sync 侧(account_worker 子进程 / REST 同步签名) ----------------
@@ -229,14 +245,54 @@ def claim_job_sync(db_path: str, job_id: str, worker_tag: str) -> dict | None:
     return get_job_sync(db_path, job_id)
 
 
-def finish_job_sync(db_path: str, job_id: str, status: str, result: dict) -> None:
-    """sync 写终态(done/error)与结果。"""
+def finish_job_sync(
+    db_path: str, job_id: str, status: str, result: dict,
+    worker_tag: str | None = None,
+) -> bool:
+    """sync 写终态(done/error)与结果;守卫语义同 async 侧(见 finish_job)。"""
+    sql = "UPDATE browser_jobs SET status=?, result=?, updated_at=? WHERE id=? AND status='running'"
+    params = [status, json.dumps(result, ensure_ascii=False), _now_str(), job_id]
+    if worker_tag:
+        sql += " AND claimed_by=?"
+        params.append(worker_tag)
     with sqlite3.connect(db_path, timeout=30) as conn:
-        conn.execute(
-            "UPDATE browser_jobs SET status=?, result=?, updated_at=? WHERE id=?",
-            (status, json.dumps(result, ensure_ascii=False), _now_str(), job_id),
-        )
+        cur = conn.execute(sql, params)
         conn.commit()
+        if cur.rowcount != 1:
+            logger.warning(
+                f"[browser_jobs] 迟到终态被守卫丢弃 job_id={job_id} status={status}")
+            return False
+    return True
+
+
+async def heartbeat(job_id: str) -> None:
+    """async 心跳 touch(进程内消费路径用)。"""
+    now = datetime.utcnow()
+    async with get_session() as session:
+        await session.execute(
+            update(BrowserJob)
+            .where(BrowserJob.id == job_id)
+            .values(heartbeat_at=now, updated_at=now)
+        )
+        await session.commit()
+
+
+async def heartbeat_loop(job_id: str, interval_s: float = 300.0) -> None:
+    """执行期伴生心跳循环:每 interval touch 一次,由执行方 finally cancel。
+
+    评审 F3:inline/_run_op_images 认领后若零心跳,长任务(下拉锁等待/大导出)超 900s
+    会被同进程僵死恢复误判——幂等类重置双跑、非幂等类误报 unknown。本循环与
+    account_worker 的 300s 心跳线程对等。
+    """
+    try:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await heartbeat(job_id)
+            except Exception:  # 心跳失败不杀执行,下轮再试
+                logger.warning(f"[browser_jobs] 心跳失败 job_id={job_id}(下轮重试)")
+    except asyncio.CancelledError:
+        pass
 
 
 def heartbeat_sync(db_path: str, job_id: str) -> None:
@@ -348,18 +404,25 @@ def spawn_inline(job_id: str, execute_call: Callable[[], Awaitable[dict]]) -> No
 
 async def _run_inline(job_id: str, execute_call: Callable[[], Awaitable[dict]]) -> None:
     """进程内消费体:任何异常兜底写终态,绝不留 running 悬挂、绝不让 task 未观测异常。"""
+    tag = f"inline:{os.getpid()}"
     try:
-        row = await claim_job(job_id, worker_tag=f"inline:{os.getpid()}")
+        row = await claim_job(job_id, worker_tag=tag)
         if row is None:
             return  # 已被其它消费方领走(认领纪律保证不双跑)
+        hb = asyncio.create_task(heartbeat_loop(job_id))  # 执行期心跳,防误判僵死
         try:
-            result = await execute_call()
-        except Exception as exc:  # 兜底:执行崩溃也要落终态,别让轮询方死等
-            logger.exception(f"[browser_jobs] 进程内执行崩溃 job_id={job_id}")
-            await finish_job(job_id, "error", {"error": str(exc)})
-            return
-        status = "error" if isinstance(result, dict) and "error" in result else "done"
-        await finish_job(job_id, status, result if isinstance(result, dict) else {})
+            try:
+                result = await execute_call()
+            except Exception as exc:  # 兜底:执行崩溃也要落终态,别让轮询方死等
+                logger.exception(f"[browser_jobs] 进程内执行崩溃 job_id={job_id}")
+                await finish_job(job_id, "error", {"error": str(exc)}, worker_tag=tag)
+                return
+            status = "error" if isinstance(result, dict) and "error" in result else "done"
+            await finish_job(
+                job_id, status, result if isinstance(result, dict) else {}, worker_tag=tag
+            )
+        finally:
+            hb.cancel()
     except Exception:  # 台账操作自身失败:只能记日志(重启后 recover_stale 兜底处置)
         logger.exception(f"[browser_jobs] 进程内消费台账操作失败 job_id={job_id}")
 

@@ -87,7 +87,7 @@ async def test_inline_pipeline_exception_lands_error(monkeypatch):
     async def fake_claim(job_id, worker_tag):
         return {"id": job_id, "status": "running"}
 
-    async def fake_finish(job_id, status, result):
+    async def fake_finish(job_id, status, result, worker_tag=None):
         finished["args"] = (job_id, status, result)
 
     monkeypatch.setattr(browser_jobs_repo, "claim_job", fake_claim)

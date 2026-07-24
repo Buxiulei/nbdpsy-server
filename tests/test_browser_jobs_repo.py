@@ -307,3 +307,26 @@ async def test_op_images_composite_id_roundtrip(jobs_db):
     sync_row = repo.get_job_sync(jobs_db, composite)
     assert sync_row["id"] == composite
     assert sync_row["payload"]["prompts"] == ["p1", "p2"]
+
+
+async def test_finish_guard_discards_late_writes(db_factory, monkeypatch):
+    """评审 F4 锁定:终态守卫——非 running 行/他方认领的行,迟到 finish 写不进。"""
+    import app.core.db as db_module
+    from app.services import browser_jobs_repo as repo
+
+    monkeypatch.setattr(db_module, "async_session", db_factory)
+    job_id = await repo.enqueue("note_export", {}, operator_id=1, account_id=9)
+    row = await repo.claim_job(job_id, worker_tag="owner-A")
+    assert row is not None
+
+    # 他方 tag 写不进(claimed_by 守卫)
+    assert await repo.finish_job(job_id, "done", {"note_count": 1}, worker_tag="thief-B") is False
+    assert (await repo.get_job(job_id))["status"] == "running"
+
+    # 自己 tag 写得进
+    assert await repo.finish_job(job_id, "done", {"note_count": 1}, worker_tag="owner-A") is True
+    assert (await repo.get_job(job_id))["status"] == "done"
+
+    # 已终态的行,任何迟到写全部丢弃(status 守卫)
+    assert await repo.finish_job(job_id, "error", {"error": "迟到"}, worker_tag="owner-A") is False
+    assert (await repo.get_job(job_id))["result"] == {"note_count": 1}
