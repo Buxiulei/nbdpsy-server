@@ -23,6 +23,7 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
 from app.publish.runtime import get_active_scheduler
+from app.services.quota import assert_operator_quota
 
 # 发布任务状态枚举(与 DB / 调度器生命周期一致):校验 list_publish_jobs 的 status 入参用。
 _JOB_STATUSES = ("pending", "publishing", "published", "failed", "canceled")
@@ -175,6 +176,8 @@ class PublishNoteRequest(BaseModel):
 async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
     """发布图文笔记(异步入队):函数体与 app/tools/publish.py::publish_note 逐行对齐。"""
     operator = current_operator()
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建 job。
+    await assert_operator_quota(operator)
     scheduled_at = _parse_schedule_time(payload.schedule_time)
     async with get_session() as session:
         await assert_account_access(operator, payload.account_id, session)
