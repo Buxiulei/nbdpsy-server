@@ -11,8 +11,10 @@ services/op_images.py 模块 docstring。
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from app.auth.context import current_operator
 from app.core.errors import NotFoundError
 from app.services import op_images
+from app.services.quota import assert_operator_quota
 
 router = APIRouter()
 
@@ -58,6 +60,8 @@ class ConsistentImagesRequest(BaseModel):
 @router.post("/api/op/consistent-images", status_code=202)
 async def start_consistent_images_endpoint(payload: ConsistentImagesRequest) -> dict:
     """异步触发锚点法一致性批量生图,立即返回 job_id + session_id。"""
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建生图任务。
+    await assert_operator_quota(current_operator())
     prompts = [str(p).strip() for p in payload.prompts if str(p).strip()]
     if not prompts:
         raise ValueError("prompts 为空(全部为空白串)")

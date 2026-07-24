@@ -23,6 +23,7 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
 from app.publish.runtime import get_active_scheduler
+from app.services.quota import assert_operator_quota
 
 # 发布任务状态枚举(与 DB / 调度器生命周期一致):校验 list_publish_jobs 的 status 入参用。
 _JOB_STATUSES = ("pending", "publishing", "published", "failed", "canceled")
@@ -175,6 +176,8 @@ class PublishNoteRequest(BaseModel):
 async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
     """发布图文笔记(异步入队):函数体与 app/tools/publish.py::publish_note 逐行对齐。"""
     operator = current_operator()
+    # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建 job。
+    await assert_operator_quota(operator)
     scheduled_at = _parse_schedule_time(payload.schedule_time)
     async with get_session() as session:
         await assert_account_access(operator, payload.account_id, session)
@@ -213,9 +216,12 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
         session.add(job)
         await session.commit()
         job_id = job.id
-    # 立即发布:投入调度器队列免等下个 scan 周期;定时发布由 scan 循环到期自取。
+    # 立即发布 nudge(可空):有进程内调度器(单进程 all 模式/测试注入)时投队免等扫描;
+    # 常态(api/worker 拆分)为 None → 静默跳过,由 worker 5s 扫描兜底(最坏多等 5s)。
     if scheduled_at is None:
-        get_active_scheduler().submit(job_id)
+        scheduler = get_active_scheduler()
+        if scheduler is not None:
+            scheduler.submit(job_id)
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -348,6 +354,9 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
             fresh = await session.get(PublishJob, job_id, populate_existing=True)
             return {"ok": False, "status": fresh.status if fresh else "unknown"}
         if schedule_cleared:
-            get_active_scheduler().submit(job_id)
+            # 同上:nudge 可空,无进程内调度器时靠 worker 扫描兜底。
+            scheduler = get_active_scheduler()
+            if scheduler is not None:
+                scheduler.submit(job_id)
         await session.refresh(job)
         return {"ok": True, "job": _job_view(job)}

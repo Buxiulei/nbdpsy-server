@@ -126,6 +126,19 @@ class Settings(BaseSettings):
     VIDEO_HEARTBEAT_INTERVAL: int = 300
     VIDEO_STALE_TIMEOUT: int = 900
 
+    # ── API/Worker 进程拆分(设计:docs/design/2026-07-24-api-worker-split-design.md)──
+    # 进程角色:api=只挂 REST 路由;worker=只跑任务消费;all=兼跑(开发/测试/单进程小部署)。
+    NBDPSY_ROLE: str = "all"
+    # 每 operator 未完成任务配额:browser_jobs(queued/running)+ publish_jobs
+    # (pending/publishing)合计达上限后再提交返 429;admin 不受限。
+    OPERATOR_PENDING_QUOTA: int = 30
+    # worker 调度中枢扫描 DB 队列周期(秒)
+    WORKER_SCAN_INTERVAL: int = 5
+    # 单轮派发中每账号子进程最多携带的任务数(账号间公平:先给各账号派一批再回头)
+    WORKER_BATCH_PER_ACCOUNT: int = 3
+    # 账号子进程硬超时(秒):超时视作僵死强杀,其任务由僵死恢复按 kind 语义处置
+    ACCOUNT_PROC_TIMEOUT: int = 1800
+
     @property
     def retry_delays(self) -> list[int]:
         """把逗号分隔的重试计划字符串解析为秒数列表。"""

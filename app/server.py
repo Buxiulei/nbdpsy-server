@@ -4,6 +4,8 @@ REST 装配:路由见 app/http 注册表,自描述见 GET /api/manifest。
 重挂薄 MCP facade(/mcp,Streamable HTTP,给 claude.ai);业务仍在 REST。
 """
 
+import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -15,16 +17,14 @@ import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError
 from app.auth.middleware import ApiKeyMiddleware
-from app.browser.account_locks import account_locks
-from app.browser.browser_reaper import BrowserReaper
-from app.browser.cookie_checker import CookieChecker
-from app.core.config import assert_secret_key_configured, settings
+from app.core.config import assert_secret_key_configured
 from app.core.errors import NotFoundError
 from app.http import ALL_ROUTERS
 from app.mcp_facade import mcp
+from app.browser.account_locks import account_locks
 from app.publish.runtime import set_active_scheduler
 from app.publish.scheduler import PublishScheduler
-from app.services.placeholder_reaper import PlaceholderReaper
+from app.services import browser_jobs_repo
 
 
 def create_app() -> FastAPI:
@@ -32,51 +32,61 @@ def create_app() -> FastAPI:
     # 0. 启动闸:生产必须设置非默认 SECRET_KEY(否则 Fernet 加密形同虚设),fail-fast 拒绝起服务。
     assert_secret_key_configured()
 
-    # 1. 父应用 lifespan:建表 → 引导 root 管理员 → 起发布调度器(队列 worker + scan 循环)→
-    #    可选起 cookie 周期巡检。发布调度器经模块级单例交给 publish_note 端点(投递立即发布任务)。
+    # 1. 父应用 lifespan:建表 → 引导 root 管理员 → 按 NBDPSY_ROLE 角色接缝挂后台组件
+    #    (设计 docs/design/2026-07-24-api-worker-split-design.md §二):
+    #    - api:只做 init_db + bootstrap_admin —— 不起调度/巡检/reaper/视频,API 进程
+    #      秒级起停,部署零停机;后台消费全部由独立 worker 进程(python -m app.worker)承担。
+    #    - all(默认,单进程回滚位与测试):**传统装配**——PublishScheduler 进程内发布
+    #      + spawn_inline 四类任务 + 60s 台账清道夫;与拆分前语义一致(共享 account_locks
+    #      同号互斥)。Supervisor/子进程派发专属 worker 角色,all 模式绝不引入(评审
+    #      裁定:两执行域不共享进程锁会同号互杀)。
+    #    - worker 角色不经 server.py(独立进程入口 python -m app.worker)。
     #    session_factory 在此处读 db_module.async_session 而非 import 期绑定,使测试对
-    #    async_session 的 monkeypatch 生效(落隔离库、不碰生产库)。cookie 巡检默认关闭
-    #    (COOKIE_CHECK_INTERVAL=0),测试不受影响。
+    #    async_session 的 monkeypatch 生效(落隔离库、不碰生产库)。
     @asynccontextmanager
     async def app_lifespan(_app: FastAPI):
         await db_module.init_db()
         await bootstrap_admin()
-        # 传入进程级共享 account_locks:发布链与 cookie 检测后台任务共用同一把 per-account 锁,
-        # 同号浏览器操作串行,避免 SyncClient.start() 的 kill_orphans 误杀对方在跑的浏览器。
-        scheduler = PublishScheduler(db_module.async_session, account_locks=account_locks)
-        scheduler.start()
-        set_active_scheduler(scheduler)
-        # 可选后台 cookie 巡检:仅在配置 >0 时起(逐个号跑登录检测并写回状态,号间隔防频控)。
-        cookie_checker: CookieChecker | None = None
-        if settings.COOKIE_CHECK_INTERVAL > 0:
-            cookie_checker = CookieChecker(
-                db_module.async_session, settings.COOKIE_CHECK_INTERVAL
-            )
-            cookie_checker.start()
-        # 可选孤儿 camoufox 回收:仅在配置 >0 时起(周期扫 /proc 杀无主超龄残留防内存泄露)。
-        reaper: BrowserReaper | None = None
-        if settings.BROWSER_REAP_INTERVAL > 0:
-            reaper = BrowserReaper(settings.BROWSER_REAP_INTERVAL)
-            reaper.start()
-        # 可选占位废账号 TTL 兜底回收:仅在配置 >0 时起(周期删超龄未回填 user_id 的
-        # xhs_account_ 占位行,兜底"登录失败后一直没重试"的残留)。
-        placeholder_reaper: PlaceholderReaper | None = None
-        if settings.PLACEHOLDER_REAP_INTERVAL > 0:
-            placeholder_reaper = PlaceholderReaper(
-                db_module.async_session, settings.PLACEHOLDER_REAP_INTERVAL
-            )
-            placeholder_reaper.start()
+        role = os.getenv("NBDPSY_ROLE", "all")
+        scheduler: PublishScheduler | None = None
+        janitor_task: asyncio.Task | None = None
+        if role == "all":
+            # all(单进程回滚位/测试位)= **传统装配**:PublishScheduler 进程内发布
+            # (与 spawn_inline 的四类 browser_jobs 共享同一把进程级 account_locks——
+            # 同号互斥的既有保障)+ 60s 台账清道夫(browser_jobs 僵死恢复,含发布外
+            # 四类任务;发布僵死由 scheduler.recover_stale 自身覆盖)。
+            # 评审裁定:all 模式绝不引入 Supervisor 子进程派发——子进程不共享父进程
+            # account_locks,与 inline 构成两个互不可见的执行域,同号双 camoufox 会被
+            # SyncClient.start() 的 kill_orphans 互杀。Supervisor 专属 worker 进程
+            # (python -m app.worker,其内无 inline,账号互斥由"同号至多 1 子进程"保证)。
+            scheduler = PublishScheduler(db_module.async_session, account_locks=account_locks)
+            scheduler.start()
+            set_active_scheduler(scheduler)
+
+            async def _ledger_janitor() -> None:
+                """all 模式台账清道夫:周期跑 browser_jobs 僵死恢复(inline 执行方
+                崩溃/进程被杀留下的 running 孤儿)。执行期心跳已在消费路径补齐,
+                正常在跑任务不会被误判。"""
+                while True:
+                    await asyncio.sleep(60)
+                    try:
+                        await browser_jobs_repo.recover_stale()
+                    except Exception:
+                        logger.exception("台账清道夫僵死恢复失败(下轮重试)")
+
+            janitor_task = asyncio.create_task(_ledger_janitor())
         try:
             yield
         finally:
             set_active_scheduler(None)
-            await scheduler.stop()
-            if cookie_checker is not None:
-                await cookie_checker.stop()
-            if reaper is not None:
-                await reaper.stop()
-            if placeholder_reaper is not None:
-                await placeholder_reaper.stop()
+            if janitor_task is not None:
+                janitor_task.cancel()
+                try:
+                    await janitor_task
+                except asyncio.CancelledError:
+                    pass
+            if scheduler is not None:
+                await scheduler.stop()
 
     # 1.1 薄 MCP facade 的 Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     #      host_origin_protection=False:关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护,
