@@ -28,9 +28,19 @@ nbdpsy-api.service      uvicorn(app.server, NBDPSY_ROLE=api)
   └─ 只做:REST 收发 / 鉴权 / 参数校验 / 台账写入(enqueue)/ 台账读取(poll)
      绝不起浏览器、绝不跑长任务。restart 亚秒级,随时可部署。
 
-nbdpsy-worker.service   python -m app.worker(NBDPSY_ROLE=worker)
-  └─ 唯一浏览器宿主:发布调度器 + browser_jobs 消费循环 + 视频 worker
-     + cookie 巡检/各类 reaper。SIGTERM → 停领新任务 → ≤15s 退出。
+nbdpsy-worker.service   python -m app.worker(NBDPSY_ROLE=worker,supervisor)
+  └─ 调度中枢,自身不起账号浏览器:扫描 DB 队列 → 按账号派生独立子进程
+     + op_images 执行(无账号,API 调用型)+ 视频 worker + 各类 reaper。
+     SIGTERM → 停派新进程 → ≤15s 退出。
+
+account_worker 子进程   python -m app.account_worker --account-id N ...(supervisor 派生)
+  └─ **每账号独立 OS 进程 + 独立 camoufox 真屏 headed 会话**(用户硬性要求):
+     该账号本批任务(验活/拉数据/发布/删除)串行执行完即退出。
+     进程隔离收益:单账号浏览器崩溃不殃及他号;内存随进程回收;拟人化鼠标时序
+     不受他号 GIL 负载抖动(反检测保真);kill 语义干净。
+     supervisor 保证同账号同一时刻至多 1 个子进程(顶替进程内 account_locks 语义)。
+     **拟人化红线:app/browser/ 的 SyncHumanActions/sync_client/atomic_tasks 拟人层
+     一行不改,account_worker 只是换了宿主进程调用它们。**
 
 通信:共享 SQLite(WAL)。API 写任务行,worker 扫描认领;结果写回行,API 读行。
 无 Redis、无 RPC——沿用发布调度器/视频 worker 已验证的 DB 扫描模式(5s 周期)。
@@ -70,7 +80,7 @@ browser_jobs
 
 ## 四、多账号并行调度(核心)
 
-worker 内单一 `AccountLaneScheduler` 统筹全部浏览器任务(发布 + browser_jobs):
+supervisor 统筹全部浏览器任务(发布 + browser_jobs),以**账号子进程**为派发单元:
 
 1. **同账号严格串行**:沿用进程级 `account_locks`(kill_orphans 互杀与风控节律的
    既有保障,不变)。
