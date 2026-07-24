@@ -213,9 +213,12 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
         session.add(job)
         await session.commit()
         job_id = job.id
-    # 立即发布:投入调度器队列免等下个 scan 周期;定时发布由 scan 循环到期自取。
+    # 立即发布 nudge(可空):有进程内调度器(单进程 all 模式/测试注入)时投队免等扫描;
+    # 常态(api/worker 拆分)为 None → 静默跳过,由 worker 5s 扫描兜底(最坏多等 5s)。
     if scheduled_at is None:
-        get_active_scheduler().submit(job_id)
+        scheduler = get_active_scheduler()
+        if scheduler is not None:
+            scheduler.submit(job_id)
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -348,6 +351,9 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
             fresh = await session.get(PublishJob, job_id, populate_existing=True)
             return {"ok": False, "status": fresh.status if fresh else "unknown"}
         if schedule_cleared:
-            get_active_scheduler().submit(job_id)
+            # 同上:nudge 可空,无进程内调度器时靠 worker 扫描兜底。
+            scheduler = get_active_scheduler()
+            if scheduler is not None:
+                scheduler.submit(job_id)
         await session.refresh(job)
         return {"ok": True, "job": _job_view(job)}
