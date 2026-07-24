@@ -96,9 +96,6 @@ class PublishResult:
     error: Optional[str] = None
     need_manual_login: bool = False
     account_restricted: bool = False
-    # 只存草稿模式:内容已录入并存为草稿,未真发布,待用户手动发布。
-    draft_saved: bool = False
-    message: str = ""
 
 
 # sameSite 兜底映射(上游 cookie_service 已 normalize,这里防御性再收口一次)
@@ -424,32 +421,21 @@ class SyncClient:
         user_info = self._get_user_info(detect.get("profile_url"))
         return {"status": "valid", "user_info": user_info}
 
-    @staticmethod
-    def _resolve_draft_only(draft_only: Optional[bool]) -> bool:
-        """draft_only 为 None 时回落到 settings.PUBLISH_DRAFT_ONLY(默认 True=只存草稿)。"""
-        if draft_only is not None:
-            return bool(draft_only)
-        try:
-            from app.core.config import settings
-            return bool(getattr(settings, "PUBLISH_DRAFT_ONLY", True))
-        except Exception:
-            return True
-
     def publish_note(
         self,
         title: str,
         content: str,
         image_paths: List[str],
         topics: Optional[List[str]] = None,
-        draft_only: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """走 step1-6 录入内容;``draft_only`` 时**不点发布**只存草稿,否则 step7 真发布。
+        """走 step1-6 录入内容 + step7 真发布。
 
         step1 会打开新窗口并把内部 page 引用切到创作中心;这里发布结束后把
         ``self.page`` 同步到 atomic 的最终 page,供 stop() 正确收尾。
 
-        draft_only(默认取 settings.PUBLISH_DRAFT_ONLY):内容录入后由小红书编辑器自动存
-        草稿、不点发布,规避"点发布提交"这一刻的「人机发布」风控;用户到草稿箱手动真人发布。
+        (历史:曾有"只存草稿"模式规避点发布时刻的人机检测——已删除:网页版草稿只存在
+        服务器浏览器本地,用户手机/其它设备看不到,毫无交付价值;且拟人化链路多轮真发
+        验证后该保险已无必要。)
         """
         atomic = XHSPublishAtomicTasks(self.page)
         try:
@@ -502,21 +488,6 @@ class SyncClient:
                 r6 = atomic.step6_set_publish_options(tags=topics)
                 if not r6.get("success"):
                     logger.warning(f"步骤6警告: {r6.get('error')}")
-
-            # —— 只存草稿模式:内容已录入(标题/图/正文/话题),**不点发布**——
-            # 小红书编辑器会自动把当前内容存为草稿;稍等让自动存草稿落定,然后由 stop() 关页
-            # 收尾。不触发"点发布提交",从根上规避「人机发布」检测;用户到草稿箱手动真人发布。
-            if self._resolve_draft_only(draft_only):
-                self.page = atomic.page
-                atomic.human.wait(3.0, 5.0, context="等待编辑器自动存草稿")
-                logger.info("📝 只存草稿:内容已录入,编辑器自动存草稿;跳过发布,待用户手动发布")
-                return {
-                    "success": True,
-                    "draft_saved": True,
-                    "note_url": "",
-                    "note_id": "",
-                    "message": "已录入全部内容并存为草稿,请到小红书 App/网页版草稿箱手动发布。",
-                }
 
             # step7 点击发布并等待
             r = atomic.step7_click_publish_and_wait(max_wait=30)
@@ -573,12 +544,10 @@ def publish_once(
     content: str,
     image_paths: List[str],
     topics: Optional[List[str]] = None,
-    draft_only: Optional[bool] = None,
 ) -> PublishResult:
-    """一次性:建 client → start → 录入内容 →(draft_only 存草稿 / 否则 step7 真发)→ stop。
+    """一次性:建 client → start → 录入内容 → step7 真发布 → stop。
 
-    供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。``draft_only`` 为 None 时回落
-    ``settings.PUBLISH_DRAFT_ONLY``(默认 True=只存草稿)。任何阶段失败都落到 ``PublishResult``。
+    供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。任何阶段失败都落到 ``PublishResult``。
     """
     client = SyncClient(account_id, cookies)
     try:
@@ -586,7 +555,7 @@ def publish_once(
         if not start.get("success"):
             return PublishResult(success=False, error=start.get("error"))
 
-        result = client.publish_note(title, content, image_paths, topics, draft_only=draft_only)
+        result = client.publish_note(title, content, image_paths, topics)
         return PublishResult(
             success=bool(result.get("success")),
             note_id=result.get("note_id", "") or "",
@@ -594,8 +563,6 @@ def publish_once(
             error=result.get("error"),
             need_manual_login=bool(result.get("need_manual_login", False)),
             account_restricted=bool(result.get("account_restricted", False)),
-            draft_saved=bool(result.get("draft_saved", False)),
-            message=result.get("message", "") or "",
         )
     except Exception as e:
         logger.error(f"[publish_once] 异常 account_id={account_id}: {e}")
