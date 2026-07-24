@@ -140,7 +140,11 @@ async def _run_job(
         for i, r in enumerate(results):
             if r.success and r.path:
                 final_path = Path(await dewatermark(r.path))
-                serve_path = out_dir / f"{i + 1:02d}.png"
+                # 扩展名跟随真实格式(去水印后为 .jpg;免鉴权路由白名单 png/jpg/webp)
+                ext = final_path.suffix.lower()
+                if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                    ext = ".png"
+                serve_path = out_dir / f"{i + 1:02d}{ext}"
                 final_path.rename(serve_path)
                 urls.append(f"/uploads/{dirname}/{serve_path.name}")
                 errors.append("")

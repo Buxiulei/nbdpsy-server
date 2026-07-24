@@ -136,3 +136,29 @@ def test_materialize_missing_b64_raises(tmp_path):
     with pytest.raises(ValueError):
         images.materialize_images([{"ext": "png"}], tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_materialize_local_uploads_shortcut(tmp_path, monkeypatch):
+    """本服务 /uploads 直链(绝对 URL 或相对路径)走本地文件短路,不发网络请求;
+    路径穿越/不存在的相对路径 fail-loud。"""
+    import pytest
+    from app.browser.images import materialize_images
+
+    uploads = tmp_path / "uploads" / "opimg_abc"
+    uploads.mkdir(parents=True)
+    (uploads / "01.jpg").write_bytes(b"\xff\xd8fakejpg")
+    monkeypatch.setattr("app.core.config.settings.DATA_DIR", str(tmp_path))
+
+    def no_net(*a, **k):  # 命中短路后绝不应走 http 下载
+        raise AssertionError("不应发起网络请求")
+    monkeypatch.setattr("app.browser.images._materialize_http", no_net)
+
+    out = materialize_images(
+        ["https://mcp.nbdpsy.com/uploads/opimg_abc/01.jpg",
+         "/uploads/opimg_abc/01.jpg"],
+        tmp_path / "wd")
+    assert len(out) == 2 and all(p.is_file() for p in out)
+    assert out[0].read_bytes().startswith(b"\xff\xd8")
+
+    with pytest.raises(ValueError):
+        materialize_images(["/uploads/opimg_abc/nope.jpg"], tmp_path / "wd2")

@@ -25,17 +25,19 @@ async def dewatermark(path: str) -> str:
     if rr.success:
         return rr.path
     logger.warning(f"[postprocess] reraster 失败({rr.error}),退回 PIL 像素重存兜底")
-    # 兜底:PIL 像素级拷贝重存(剥全部元数据,不动像素)
+    # 兜底:PIL 像素级拷贝重存(剥全部元数据,不动像素)。同 reraster 存 JPEG q92
+    # (体积 ~1/7,视觉无损),JPEG 无 alpha 故先归 RGB。
     try:
         from PIL import Image
 
         stem, _ext = os.path.splitext(path)
-        out_path = f"{stem}.clean.png"
+        out_path = f"{stem}.clean.jpg"
         with Image.open(path) as im:
-            mode, size, data = im.mode, im.size, list(im.getdata())
+            rgb = im.convert("RGB")
+            mode, size, data = rgb.mode, rgb.size, list(rgb.getdata())
         clean = Image.new(mode, size)
         clean.putdata(data)
-        clean.save(out_path, format="PNG")
+        clean.save(out_path, format="JPEG", quality=92)
         return out_path
     except Exception as e:  # noqa: BLE001 — 绝不阻断:兜底也失败就原图交付
         logger.warning(f"[postprocess] 元数据剥离兜底失败({e}),原图交付")

@@ -45,6 +45,29 @@ def _norm_ext(ext: str) -> str:
     return ext if ext in _KNOWN_EXTS else ".jpg"
 
 
+def _local_uploads_file(item: str) -> Union[Path, None]:
+    """若 ``item`` 是指向本服务 ``/uploads/...`` 的 URL/相对路径,解析回本地文件。
+
+    仅接受路径段以 ``/uploads/`` 开头、realpath 落在 DATA_DIR/uploads 内(防穿越)且
+    真实存在的文件;其余(外站 URL / 不存在)返回 None 交由 http 分支处理。
+    """
+    from urllib.parse import urlparse
+
+    try:
+        path = urlparse(item).path if "://" in item else item
+        if not path.startswith("/uploads/"):
+            return None
+        from app.core.config import settings
+
+        root = (Path(settings.DATA_DIR) / "uploads").resolve()
+        target = (root / path[len("/uploads/"):]).resolve()
+        if not str(target).startswith(str(root) + "/"):
+            return None
+        return target if target.is_file() else None
+    except Exception:  # noqa: BLE001 — 解析失败交 http 分支,不在此吞正当报错路径
+        return None
+
+
 def _write(data: bytes, ext: str, workdir: Path, index: int) -> Path:
     """把字节写入 ``workdir/img_{index:02d}{ext}`` 并返回路径。"""
     target = workdir / f"img_{index:02d}{ext}"
@@ -126,7 +149,19 @@ def materialize_images(images: list, workdir: Union[str, Path]) -> list:
         elif isinstance(item, str) and item.startswith("data:"):
             paths.append(_materialize_data_uri(item, workdir, index))
         elif isinstance(item, str) and (item.startswith("http://") or item.startswith("https://")):
-            paths.append(_materialize_http(item, workdir, index))
+            # 本服务 /uploads 直链短路:一致性生图/图床产物本就在本机磁盘,直接读文件,
+            # 免去"经公网(CF)绕一圈下载"——大图 payload 是发布提交 524 超时的元凶之一。
+            local = _local_uploads_file(item)
+            if local is not None:
+                paths.append(_write(local.read_bytes(), _norm_ext(local.suffix), workdir, index))
+            else:
+                paths.append(_materialize_http(item, workdir, index))
+        elif isinstance(item, str) and item.startswith("/uploads/"):
+            # 相对 /uploads 路径(免拼 base 的最省形态):本地解析,不存在即失败不静默
+            local = _local_uploads_file(item)
+            if local is None:
+                raise ValueError(f"图片项[{index}] /uploads 路径不存在: {item[:60]}")
+            paths.append(_write(local.read_bytes(), _norm_ext(local.suffix), workdir, index))
         else:
             raise ValueError(
                 f"无法识别的图片项[{index}]: {type(item).__name__} {str(item)[:40]}"

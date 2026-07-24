@@ -51,7 +51,9 @@ async def reraster_image(path: str) -> ReRasterResult:
         return ReRasterResult(False, path, error="source file missing")
 
     stem, _ext = os.path.splitext(path)
-    out_path = f"{stem}.shot.png"
+    # 产物存 JPEG q92:gpt-image 的连续色调图用 PNG(无损)每张 ~2MB,5 张近 10MB,
+    # 拖垮下游发布提交(实测 CF 524);q92 JPEG 视觉无损、体积 ~1/7(实测 9.5MB→1.4MB)。
+    out_path = f"{stem}.shot.jpg"
     tmp_html = None
     try:
         from PIL import Image
@@ -92,7 +94,7 @@ async def reraster_image(path: str) -> ReRasterResult:
         # 2x 截图降采样回原尺寸:第二次重采样 + 保持下游尺寸不变 + 再次丢弃元数据
         with Image.open(io.BytesIO(shot)) as big:
             final = big.convert("RGB").resize((w, h), Image.LANCZOS)
-            final.save(out_path, format="PNG")
+            final.save(out_path, format="JPEG", quality=92)
 
         if not os.path.isfile(out_path):
             return ReRasterResult(False, path, error="screenshot not saved")
