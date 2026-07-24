@@ -135,37 +135,37 @@ class _FakeReaper:
 
 
 async def _drive_lifespan_with_interval(tmp_path, monkeypatch, interval):
-    """用隔离库驱动一次 create_app 的真实 lifespan,返回捕获的假 reaper 实例列表。"""
+    """驱动 Supervisor 组件装配(组件接线已从 server lifespan 迁入 app.worker,断言随迁)。
+
+    语义与旧 lifespan 驱动等价:interval>0 构造并 start,停机时 stop;=0 完全不构造。
+    """
+    import app.worker as worker_mod
+
     tmp_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/l.db", future=True)
     tmp_smk = async_sessionmaker(tmp_engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(db_module, "engine", tmp_engine)
-    monkeypatch.setattr(db_module, "async_session", tmp_smk)
-    monkeypatch.setattr(server_mod.settings, "PLACEHOLDER_REAP_INTERVAL", interval)
+    monkeypatch.setattr(worker_mod.settings, "PLACEHOLDER_REAP_INTERVAL", interval)
 
-    _FakeReaper.instances = []
-    monkeypatch.setattr(server_mod, "PlaceholderReaper", _FakeReaper)
+    _Fake = _FakeReaper
+    _Fake.instances = []
+    monkeypatch.setattr(worker_mod, "PlaceholderReaper", _Fake)
 
-    app = server_mod.create_app()
+    sup = worker_mod.Supervisor(tmp_smk, include_video=False)
     try:
-        async with app.router.lifespan_context(app):
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://t"
-            ) as c:
-                r = await c.get("/healthz")
-                assert r.status_code == 200
+        await sup._start_components()
+        await sup._stop_components()
     finally:
         await tmp_engine.dispose()
-    return _FakeReaper.instances
+    return _Fake.instances
 
 
 async def test_lifespan_no_reaper_when_interval_zero(tmp_path, monkeypatch):
-    """PLACEHOLDER_REAP_INTERVAL=0:lifespan 完全不构造 reaper。"""
+    """PLACEHOLDER_REAP_INTERVAL=0:supervisor 完全不构造 reaper。"""
     instances = await _drive_lifespan_with_interval(tmp_path, monkeypatch, 0)
     assert instances == []
 
 
 async def test_lifespan_starts_and_stops_reaper_when_positive(tmp_path, monkeypatch):
-    """PLACEHOLDER_REAP_INTERVAL>0:lifespan 构造并 start,shutdown 时 stop。"""
+    """PLACEHOLDER_REAP_INTERVAL>0:supervisor 构造并 start,停机时 stop。"""
     instances = await _drive_lifespan_with_interval(tmp_path, monkeypatch, 42)
     assert len(instances) == 1
     reaper = instances[0]
