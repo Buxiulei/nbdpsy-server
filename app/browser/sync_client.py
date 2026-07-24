@@ -123,6 +123,18 @@ def normalize_cookies_for_injection(cookies: List[Dict[str, Any]]) -> List[Dict[
     if not cookies:
         return []
 
+    # 同名双份坑(实测 RCA 2026-07-24,acc2 发布必败根因):插件快照里同一 name 常
+    # 同时存在 `.xiaohongshu.com`(域 cookie,www/creator 实际在用的活凭据)与
+    # `xiaohongshu.com`(host-only,只发给裸域,常是陈旧值)两份。旧逻辑把 host-only
+    # 强制加点 → 与 `.域` 同名同域**撞车**(后写覆盖先写),陈旧值排后面就赢 →
+    # creator SSO 中途 401 → 编辑器自动存草稿弹回/点草稿编辑被踢登录页。
+    # 修:同名在 `.域` 已有一份时,host-only 保持原样(真浏览器里它对 www/creator
+    # 本就不可见);孤立的 host-only 维持旧的加点归一(不改变既有账号的可用路径)。
+    dotted_names = {
+        c.get("name") for c in cookies
+        if str(c.get("domain", "")).startswith(".")
+    }
+
     result: List[Dict[str, Any]] = []
     for cookie in cookies:
         name = cookie.get("name")
@@ -130,11 +142,12 @@ def normalize_cookies_for_injection(cookies: List[Dict[str, Any]]) -> List[Dict[
             continue
 
         domain = cookie.get("domain", ".xiaohongshu.com")
-        # 确保域名以 . 开头(应用到所有子域名);www.xiaohongshu.com 归一为 .xiaohongshu.com
-        if not domain.startswith("."):
-            domain = "." + domain.lstrip("www.")
         if "www.xiaohongshu.com" in domain:
             domain = ".xiaohongshu.com"
+        elif not domain.startswith(".") and name not in dotted_names:
+            # 孤立 host-only:沿旧行为加点归一(域 cookie 对全子域生效)
+            domain = "." + domain
+        # else:同名 `.域` 已存在 → host-only 保持原样,绝不与活凭据撞车
 
         same_site = _coerce_same_site(cookie.get("sameSite"))
         entry: Dict[str, Any] = {

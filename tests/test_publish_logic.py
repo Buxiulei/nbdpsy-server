@@ -231,3 +231,30 @@ def test_publish_modules_import_and_public_surface():
         "step7_click_publish_and_wait",
     ):
         assert hasattr(atomic_tasks.XHSPublishAtomicTasks, step)
+
+
+def test_normalize_cookies_hostonly_dup_not_collide():
+    """同名双份(RCA 2026-07-24 acc2 发布必败根因):`.域` 与 host-only 并存时,
+    host-only 保持原样不加点——绝不与活凭据同名同域撞车(后写覆盖先写),
+    且 creator 子域 fallback 只克隆 `.域` 那份(host-only 不混入)。"""
+    out = normalize_cookies_for_injection([
+        {"name": "id_token", "value": "LIVE", "domain": ".xiaohongshu.com"},
+        {"name": "id_token", "value": "STALE", "domain": "xiaohongshu.com"},
+    ])
+    # 3 条:`.域`主站 + creator fallback + host-only 原样
+    assert len(out) == 3
+    dotted = [c for c in out if c.get("domain") == ".xiaohongshu.com"]
+    hostonly = [c for c in out if c.get("domain") == "xiaohongshu.com"]
+    creator = [c for c in out if "url" in c]
+    assert len(dotted) == 1 and dotted[0]["value"] == "LIVE"
+    assert len(hostonly) == 1 and hostonly[0]["value"] == "STALE"  # 保持 host-only,不撞车
+    assert len(creator) == 1 and creator[0]["value"] == "LIVE"      # creator 只拿活凭据
+
+
+def test_normalize_cookies_solitary_hostonly_still_dotted():
+    """孤立 host-only(无同名 `.域` 份)沿旧行为加点归一,既有账号路径不回归。"""
+    out = normalize_cookies_for_injection(
+        [{"name": "solo", "value": "x", "domain": "xiaohongshu.com"}]
+    )
+    assert out[0]["domain"] == ".xiaohongshu.com"
+    assert any("url" in c for c in out)  # 加点后照常触发 creator fallback
