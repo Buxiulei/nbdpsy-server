@@ -19,6 +19,12 @@ ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/python /home/roots/nbdpsy-serve
 ExecStart=/home/roots/nbdpsy-server/.venv/bin/uvicorn app.server:create_app --factory --host 0.0.0.0 --port 8848
 Restart=always
 RestartSec=3
+# 停止超时收紧到 15s:in-flight 浏览器线程会挡住优雅退出,默认 90s 才强杀——实测让每次
+# restart 变成近 2 分钟停机窗口(2026-07-24 晚 skill 侧发布重试 ~20 连败的主凶)。
+# 15s 内退不掉就 SIGKILL(mixed:先只对主进程 SIGTERM,超时后全进程组 SIGKILL,
+# 连带清掉 camoufox 子进程树);被杀的 in-flight 发布 job 由重试机制自动接续。
+TimeoutStopSec=15
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
