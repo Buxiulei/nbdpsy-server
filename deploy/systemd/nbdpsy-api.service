@@ -1,0 +1,33 @@
+[Unit]
+Description=nbdpsy-api - 小红书运营能力 REST 后台(API 角色,只收发不跑浏览器)
+# API/Worker 拆分架构(docs/design/2026-07-24-api-worker-split-design.md):
+# 本单元只做 REST 收发/鉴权/台账写读(NBDPSY_ROLE=api),绝不起浏览器、绝不跑长任务,
+# restart 亚秒级——部署常态 = 只重启本单元。浏览器负载见 nbdpsy-worker.service。
+# 保留 gdm 之后启动与真屏环境变量:与原单进程单元(nbdpsy-server.service)逐项对齐,
+# 便于用 NBDPSY_ROLE=all 单 unit 一键回滚。
+After=network.target gdm.service
+
+[Service]
+Type=simple
+User=roots
+WorkingDirectory=/home/roots/nbdpsy-server
+# 与原单元同款环境:DISPLAY/XAUTHORITY 指向 roots :0 图形会话(api 角色自身不用屏,
+# 保留是为了回滚位对齐,避免两套单元环境撕裂)。
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+Environment=NBDPSY_ROLE=api
+# ExecStartPre 三件套只在 api 侧跑(worker 单元不跑 alembic,避免双迁移竞争):
+ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/alembic upgrade head
+ExecStartPre=/bin/bash /home/roots/nbdpsy-server/scripts/pack_extension.sh
+# 幂等修补 Playwright Firefox 驱动的 pageError 崩溃 bug(venv 重建后自动重打)
+ExecStartPre=/home/roots/nbdpsy-server/.venv/bin/python /home/roots/nbdpsy-server/scripts/patch_playwright_driver.py
+ExecStart=/home/roots/nbdpsy-server/.venv/bin/uvicorn app.server:create_app --factory --host 0.0.0.0 --port 8848
+Restart=always
+RestartSec=3
+# api 角色无浏览器线程,正常 1-2s 内退净;15s + mixed 兜底(与原单元语义一致:
+# 先只对主进程 SIGTERM,超时后全进程组 SIGKILL)。
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
