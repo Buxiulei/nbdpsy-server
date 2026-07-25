@@ -347,9 +347,16 @@ class SyncClient:
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
-            time.sleep(3)
-
-            self._last_detect = self._detect_login()
+            # 条件等待登录态渲染(命中即走,最多 3s),替代固定 sleep(3)。命中=真登录(安全);
+            # invalid 号轮询满 3s 退化到原状,不比原来差。SPA 渲染好后 detect 才准。
+            detect = {}
+            _deadline = time.monotonic() + 3.0
+            while time.monotonic() < _deadline:
+                detect = self._detect_login()
+                if detect.get("is_logged_in"):
+                    break
+                time.sleep(0.3)
+            self._last_detect = detect
             logged_in = bool(self._last_detect.get("is_logged_in"))
             logger.info(f"[SyncClient] 登录检测: {logged_in} reason={self._last_detect.get('reason')}")
             return {"success": True, "logged_in": logged_in}
@@ -388,8 +395,15 @@ class SyncClient:
             return None
         try:
             self.page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(2)
-            return self.page.evaluate(GET_USER_INFO_JS)
+            # 条件等待:主页渲染出昵称即走(最多 2s),替代固定 sleep(2)
+            info = None
+            _deadline = time.monotonic() + 2.0
+            while time.monotonic() < _deadline:
+                info = self.page.evaluate(GET_USER_INFO_JS)
+                if info and info.get("nickname"):
+                    break
+                time.sleep(0.3)
+            return info
         except Exception as e:
             logger.warning(f"[SyncClient] 获取用户信息失败: {e}")
             return None

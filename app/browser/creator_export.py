@@ -200,8 +200,10 @@ def _goto_creator(page, url: str) -> None:
         page.goto(url, wait_until="domcontentloaded", timeout=40000)
     except Exception as exc:
         logger.debug("[creator_export] goto %s 被重定向中断: %s", url, exc)
+    # networkidle 在 XHS SPA(持续轮询/长连接)常吃满超时;缩到 3s——调用方都有正向元素等待
+    # (等数据看板/笔记管理菜单可见)兜底,不靠 networkidle 判就绪。export+delete warm-up 共用提速。
     try:
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
         pass
 
@@ -268,7 +270,7 @@ def export_notes(
                 timeout=30000,
             )
             try:
-                page.wait_for_load_state("networkidle", timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=3000)  # SPA 常吃满,缩短(见 _goto_creator)
             except Exception:
                 pass
             human.wait(0.8, 2.0, context="主站预热握手")

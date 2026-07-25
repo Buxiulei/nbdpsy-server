@@ -628,11 +628,13 @@ class XHSPublishAtomicTasks:
                     tab_y = image_upload_tab["y"]
                     logger.info(f"✓ 找到'上传图文' tab 坐标: ({tab_x:.0f}, {tab_y:.0f})(第 {attempt+1} 次尝试)")
                     self.human.click((tab_x, tab_y), reason="上传图文 tab")
-                    self.human.wait(1.0, 2.0, context="等待 tab 切换")
+                    # 条件等待 file input 就绪(命中即走,最多 2.5s),缩短原「固定 wait(1,2)+5s 探测」;
+                    # 图文模式真校验交下游 _ensure_image_mode 兜底,这里不必久等。
                     try:
-                        self.page.wait_for_selector("input[type='file']", timeout=5000, state="attached")
+                        self.page.wait_for_selector("input[type='file']", timeout=2500, state="attached")
                     except Exception:
                         pass
+                    self.human.wait(0.4, 0.8, context="tab 切换后短停顿")
                     self._take_screenshot("03_01_after_click_image_upload")
                     logger.info("✓ 已切换到图文上传模式")
                     tab_clicked = True
@@ -1080,7 +1082,8 @@ class XHSPublishAtomicTasks:
                 # 拟人化逐字键盘输入(已聚焦,不再重复 click)
                 # clear_first:键盘输入是追加语义,重试时会叠加上一轮残留 → 先 Ctrl+a→Backspace
                 # 清空恢复幂等;空框首次清空无副作用。
-                self.human.type_text(None, value, click_first=False, clear_first=True)
+                # 首次(attempt==1)是空框,免 Ctrl+a→Backspace;仅重试时清残留保幂等。
+                self.human.type_text(None, value, click_first=False, clear_first=(attempt > 1))
                 logger.info(f"[{intent_key}] 拟人输入成功 selector={box['sel']}({len(value)}字)")
                 return True, None
             except Exception as e:  # noqa: BLE001
