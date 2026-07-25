@@ -139,4 +139,9 @@ async def _write_back(account_id: int, status: str, user_info: dict | None) -> N
                     value = user_info.get(field)
                     if value:
                         setattr(account, field, value)
+                # 内部展示名跟随小红书昵称实时更新:运营在小红书 App 改了账号名后,
+                # 一次检测即把 name 同步为最新昵称(前端/插件展示 name),名称随平台侧收敛。
+                nickname = user_info.get("nickname")
+                if nickname:
+                    account.name = nickname
             await session.commit()

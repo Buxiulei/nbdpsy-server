@@ -140,6 +140,11 @@ class CookieChecker:
                         value = user_info.get(field)
                         if value:
                             setattr(account, field, value)
+                    # 内部展示名跟随小红书昵称实时更新:后台巡检拿到最新昵称即同步 name
+                    # (前端/插件展示 name),运营在小红书改名后无需手工改。
+                    nickname = user_info.get("nickname")
+                    if nickname:
+                        account.name = nickname
                 await session.commit()
         return True
 

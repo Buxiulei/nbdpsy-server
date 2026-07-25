@@ -87,6 +87,7 @@ async def test_check_once_only_valid_and_writes_back(smk, monkeypatch):
         assert v.cookie_status == "captcha"  # 三态写回
         assert v.last_check_at is not None
         assert v.nickname == "小明"  # 回填资料
+        assert v.name == "小明"  # 内部展示名跟随昵称实时更新(原名"有效号"被最新昵称覆盖)
         assert v.user_id == "u1"
         iv = await s.get(XhsAccount, invalid_id)
         assert iv.cookie_status == "invalid"  # 未被巡检,保持原状

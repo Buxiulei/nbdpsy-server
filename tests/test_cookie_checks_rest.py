@@ -64,6 +64,13 @@ async def test_start_check_returns_202_check_id_then_valid(tmp_path, monkeypatch
         assert fb["status"] == "valid"
         assert fb["user_info"]["nickname"] == "小蓝"
 
+        # 内部展示名跟随昵称实时更新:检测写回后 name 应被最新昵称覆盖(原名"号1")
+        from app.models.xhs_account import XhsAccount
+        async with db_module.async_session() as s:
+            acc = await s.get(XhsAccount, acc1)
+            assert acc.nickname == "小蓝"
+            assert acc.name == "小蓝"
+
 
 async def test_start_check_denied_without_access(tmp_path, monkeypatch):
     """无该号 access 的 operator POST → 403,且不触发后台检测。"""
