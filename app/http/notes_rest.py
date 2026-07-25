@@ -19,7 +19,7 @@ from app.core.errors import NotFoundError
 from app.http.cookies_rest import _decrypt_account_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import note_delete, note_export
-from app.services.note_metrics_service import list_notes, note_trend
+from app.services.note_metrics_service import account_trends, list_notes, note_trend
 from app.services.quota import assert_operator_quota
 
 router = APIRouter()
@@ -69,6 +69,21 @@ MANIFEST_ENTRIES = [
                  "error(reason 如 note_not_found/need_manual_login)/unknown(server 重启"
                  "打断了删除,结果未知,按 reason 指引人工核对)。台账已持久化:重启后终态"
                  "仍可查,不再 404。",
+    },
+    {
+        "method": "GET", "path": "/api/accounts/{account_id}/note-trends",
+        "summary": "一次拉取该号完整趋势分析包(数分 agent 专用,免二次组装)",
+        "admin_only": False, "params": {"account_id": "path,int"},
+        "returns": "{account:{id,name,nickname,cookie_status}, meta:{snapshot_dates,"
+                   "latest_snapshot_date,notes_tracked,field_notes(口径说明)}, "
+                   "account_daily:[{snapshot_date,note_count,7量指标合计,delta:{增量,days_between}}], "
+                   "notes:[{title,publish_time,days_since_publish,latest(11指标),"
+                   "rates(like/collect/comment/engage/follow_rate),series:[逐日行+delta]}]}",
+        "errors": "403=无该号授权",
+        "notes": "为数据分析设计:指标全是快照日累计值;delta=与上一快照日的差,带 days_between"
+                 "(快照可能断档,日均要除以它);rates 分母是最新 views,views=0 时 null;"
+                 "notes 按最新 views 降序。数据来自每日自动采集(note_metrics_scheduler)+"
+                 "手动 note-exports;某天没快照=当天没采到(断档),不是数据为 0。",
     },
     {
         "method": "GET", "path": "/api/accounts/{account_id}/notes",
@@ -190,3 +205,14 @@ async def list_account_notes_endpoint(
             return {"trend": rows}
         rows = await list_notes(session, operator, account_id)
         return {"notes": rows}
+
+
+@router.get("/api/accounts/{account_id}/note-trends")
+async def account_note_trends_endpoint(account_id: int) -> dict:
+    """一次拉取该号完整趋势分析包(账号级日汇总+每篇笔记序列/增量/率值+口径说明)。
+
+    RBAC 由 note_metrics_service.account_trends 内部 assert_account_access 收窄。
+    """
+    operator = current_operator()
+    async with get_session() as session:
+        return await account_trends(session, operator, account_id)
