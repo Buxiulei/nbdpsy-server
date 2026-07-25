@@ -14,6 +14,12 @@
     ``result.errors`` 为与 urls 等长的消息数组(成功位空串);
 - ``result.urls`` 是相对 ``/uploads/{dir}/{name}`` 路径,拼 base 即公网直链、免鉴权
   (不可猜目录名即访问控制,与视频/发布产物同款);
+- ``result.orig_urls``(2026-07-26 新增)与 prompts **同样等长、下标对齐**:去水印**前**的
+  provider 原图直链(``NN.orig.png``,无原图处空串)。原图始终留在盘上,即便该页去水印
+  失败(``urls[i]==""``)原图依然可取,只是不占"默认交付"那个位;
+- **去水印失败 = 该页失败**:``urls[i]=""`` + ``errors[i]`` 写明去水印失败。绝不拿带
+  水印的原图冒充默认交付(旧的"只剥元数据"兜底已删,理由见 imagegen/postprocess.py),
+  运营按需用 --pages 重出该页,或直接取 ``orig_urls[i]`` 自行处置;
 - ``anchor_url``(P1 闸门):非空时解析回本地 uploads 文件让全部页锚定它(不再重画
   P1);解析不到 → 整批失败位 + errors,不静默降级;
 - execute(payload) 为契约执行函数(不碰 browser_jobs 台账):正常返回
@@ -40,6 +46,12 @@ def _uploads_root() -> Path:
 def _ledger_id(session_id: str, job_id: int) -> str:
     """(session_id, job_id) 二元组 → browser_jobs 复合主键串。"""
     return f"opimg_{session_id}_{job_id}"
+
+
+def _safe_ext(path: Path) -> str:
+    """取落盘扩展名,收进 /uploads 免鉴权路由白名单(非法一律当 .png)。"""
+    ext = path.suffix.lower()
+    return ext if ext in (".png", ".jpg", ".jpeg", ".webp") else ".png"
 
 
 def resolve_anchor_path(anchor_url: str) -> Optional[str]:
@@ -98,8 +110,8 @@ def get_images_job(session_id: str, job_id: int) -> dict | None:
 async def execute(payload: dict) -> dict:
     """执行一次锚点法批量生图(契约函数,不碰 browser_jobs 台账)。
 
-    正常(含额度错/单页失败/锚点解析失败)返回 {"urls","errors"}(下标对齐);
-    任务级意外崩溃返回 {"error": str},不抛出。
+    正常(含额度错/单页失败/锚点解析失败)返回 {"urls","errors","orig_urls"}(三者
+    等长且与 prompts 下标对齐);任务级意外崩溃返回 {"error": str},不抛出。
     """
     prompts: List[str] = (payload or {}).get("prompts") or []
     anchor_url: Optional[str] = (payload or {}).get("anchor_url")
@@ -113,6 +125,7 @@ async def execute(payload: dict) -> dict:
                 return {
                     "urls": ["" for _ in prompts],
                     "errors": [msg for _ in prompts],
+                    "orig_urls": ["" for _ in prompts],
                 }
 
         # job 专属产物目录:不可猜 token 目录名即访问控制(/uploads 免鉴权直链)。
@@ -123,33 +136,59 @@ async def execute(payload: dict) -> dict:
         results = await provider.generate_batch(
             prompts, anchor_path=anchor_path, save_prefix="p")
 
-        # 逐张去水印(reraster 主路 + PIL 兜底,绝不阻断),终名改页序 NN.png——
-        # /uploads/{batch}/{name} 免鉴权路由的 _NAME_RE 只放行两位数字文件名
-        # (上传批次既有约定),生图产物遵守同一约定,不放宽安全白名单。
+        # 逐张去水印(只有 reraster 一条路,失败即该页失败,不拿带水印图冒充交付),
+        # 终名改页序 NN.ext 作默认交付;去水印前的原图另存 NN.orig.ext 供提取——
+        # /uploads/{batch}/{name} 免鉴权路由的 _NAME_RE 只放行 NN.ext 与 NN.orig.ext
+        # 两种形态,生图产物遵守同一约定,不放宽安全白名单。
         urls: List[str] = []
         errors: List[str] = []
+        orig_urls: List[str] = []
         for i, r in enumerate(results):
-            if r.success and r.path:
-                final_path = Path(await dewatermark(r.path))
-                # 扩展名跟随真实格式(去水印后为 .jpg;免鉴权路由白名单 png/jpg/webp)
-                ext = final_path.suffix.lower()
-                if ext not in (".png", ".jpg", ".jpeg", ".webp"):
-                    ext = ".png"
-                serve_path = out_dir / f"{i + 1:02d}{ext}"
-                final_path.rename(serve_path)
-                urls.append(f"/uploads/{dirname}/{serve_path.name}")
-                errors.append("")
-            else:
+            if not (r.success and r.path):
                 urls.append("")
                 errors.append(r.error or "unknown")
+                orig_urls.append("")
+                continue
+            # 先去水印(要读原图),再把原图改名归档——两个不同文件,别把原图 rename 没了
+            cleaned = await dewatermark(r.path)
+            if cleaned:
+                # 扩展名跟随真实格式(去水印后为 .jpg;免鉴权路由白名单 png/jpg/webp)
+                cleaned_path = Path(cleaned)
+                serve_path = out_dir / f"{i + 1:02d}{_safe_ext(cleaned_path)}"
+                # rename 单独兜底:改名炸了(权限/目标占用等)只塌这一位,绝不冒泡到
+                # execute 顶层把整批(含已成功、已付费的页)一起判崩——与 openai_image
+                # 的 _edit_one/_fallback_one「保证该下标位不塌陷」同款纪律。
+                try:
+                    cleaned_path.rename(serve_path)
+                    urls.append(f"/uploads/{dirname}/{serve_path.name}")
+                    errors.append("")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[op_images] 交付改名失败[{i}](本页塌陷,不影响其它页): {exc}")
+                    urls.append("")
+                    errors.append(f"交付改名失败: {exc}")
+            else:
+                urls.append("")
+                errors.append("去水印失败(reraster 重栅格化未产出),本页未交付;"
+                              "原图见 orig_urls,或用 --pages 重出该页")
+            # 原图无论去水印成功与否都保留可取(用户明确要求的提取通道);
+            # 同样单独兜底——原图归档失败只让本位 orig_urls 空,不牵连交付与其它页。
+            orig_path = Path(r.path)
+            orig_serve = out_dir / f"{i + 1:02d}.orig{_safe_ext(orig_path)}"
+            try:
+                orig_path.rename(orig_serve)
+                orig_urls.append(f"/uploads/{dirname}/{orig_serve.name}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[op_images] 原图归档失败[{i}](不影响交付): {exc}")
+                orig_urls.append("")
         # 结果长度与 prompts 对齐的兜底(provider 契约本就对齐,此处防御截断)
         while len(urls) < len(prompts):
             urls.append("")
             errors.append("result_missing")
+            orig_urls.append("")
 
         ok = sum(1 for u in urls if u)
         logger.info(f"[op_images] job 完成: {ok}/{len(prompts)} 成功")
-        return {"urls": urls, "errors": errors}
+        return {"urls": urls, "errors": errors, "orig_urls": orig_urls}
     except Exception as exc:  # noqa: BLE001 — 任务级意外崩溃才 failed
         logger.exception("[op_images] job 崩溃")
         return {"error": str(exc)}

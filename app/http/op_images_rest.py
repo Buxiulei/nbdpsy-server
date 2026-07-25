@@ -30,8 +30,9 @@ MANIFEST_ENTRIES = [
         "notes": "202 异步契约:拿 job_id+session_id 后每 10s 轮询 GET "
                  "/api/op/drafts/{session_id}/jobs/{job_id}。锚点法:anchor_url 为空则第 1 张"
                  "(P1)当锚点、其余页各自锚定它;非空则全部页锚定该已确认 P1(不重画 P1)。"
-                 "产物自动过去水印工作流(截图重栅格化+元数据剥离)。批量出图耗时约每页 "
-                 "30-60s,8 页 medium 质量约 $0.7。",
+                 "产物自动过去水印工作流(无头浏览器截图重栅格化,同时丢弃 C2PA/EXIF);"
+                 "该步失败即判该页失败(不返回带水印图),原图仍可从 orig_urls 取。"
+                 "批量出图耗时约每页 30-60s,8 页 medium 质量约 $0.7。",
     },
     {
         "method": "GET", "path": "/api/op/drafts/{session_id}/jobs/{job_id}",
@@ -40,11 +41,14 @@ MANIFEST_ENTRIES = [
         "params": {"session_id": "path,str", "job_id": "path,int"},
         "returns": '{"status": "queued|running|done|failed", "result": {...}}',
         "errors": "404=任务不存在或已过期",
-        "notes": "done 时 result.urls 与提交 prompts 按下标对齐(失败位空串),"
-                 "result.errors 为等长消息数组(成功位空串);**额度错表现为 done+errors "
-                 "有值**(不是整任务 failed),需逐页读 errors 判定。urls 是相对 /uploads/…"
-                 "路径,拼 base 即公网直链(免鉴权,不可猜目录名即访问控制)。进程内存台账,"
-                 "重启即丢(404 时重新发起);终态留存 2 小时。",
+        "notes": "done 时 result.urls / result.errors / result.orig_urls 三者等长且与提交 "
+                 "prompts 按下标对齐(urls 失败位空串、errors 成功位空串);**额度错表现为 "
+                 "done+errors 有值**(不是整任务 failed),需逐页读 errors 判定。"
+                 "**去水印失败也算该页失败**(urls 空 + errors 写明),绝不返回带水印的图。"
+                 "orig_urls 是去水印前的 provider 原图(NN.orig.png),即便该页去水印失败也可取。"
+                 "urls/orig_urls 都是相对 /uploads/… 路径,拼 base 即公网直链(免鉴权,"
+                 "不可猜目录名即访问控制)。进程内存台账,重启即丢(404 时重新发起);"
+                 "终态留存 2 小时。",
     },
 ]
 

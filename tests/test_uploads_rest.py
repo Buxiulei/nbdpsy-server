@@ -182,6 +182,32 @@ async def test_serve_bad_batch_id_404(tmp_path, monkeypatch):
         assert r.status_code == 404
 
 
+async def test_serve_orig_name_allowed_others_rejected(tmp_path, monkeypatch):
+    """白名单只多放行 NN.orig.ext(生图原图提取通道),其余变体一律 404。
+
+    关键:被拒的文件**都真实存在于盘上**,404 只能来自正则白名单,不是"文件缺失"。
+    """
+    _patch_data_dir(tmp_path, monkeypatch)
+    batch = "opimg_abcdef123456"
+    batch_dir = tmp_path / "data" / "uploads" / batch
+    batch_dir.mkdir(parents=True)
+    for name in ("01.jpg", "01.orig.jpg", "01.src.jpg", "a.jpg", "01.orig.orig.jpg"):
+        (batch_dir / name).write_bytes(_jpeg_bytes())
+
+    async with rest_client(tmp_path, monkeypatch) as client:
+        for name in ("01.jpg", "01.orig.jpg"):
+            r = await client.get(f"/uploads/{batch}/{name}")
+            assert r.status_code == 200, f"{name} 应放行,得 {r.status_code}"
+            assert r.headers["content-type"] == "image/jpeg"
+        # 只放 .orig 这一种额外形态:别的中缀 / 无页序 / 叠加 .orig 全拒
+        for name in ("01.src.jpg", "a.jpg", "01.orig.orig.jpg", "..%2Fetc%2Fpasswd"):
+            r = await client.get(f"/uploads/{batch}/{name}")
+            assert r.status_code == 404, f"{name} 应 404,得 {r.status_code}"
+        # 未编码的相对穿越被客户端/网关先归一化成别的路径,打不到本路由,总之取不到文件
+        r = await client.get(f"/uploads/{batch}/../../etc/passwd")
+        assert r.status_code != 200
+
+
 # ---------------- GET /upload(上传页) ----------------
 
 

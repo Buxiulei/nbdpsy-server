@@ -35,6 +35,11 @@ _RULE_MARKERS = ("camoufox-bin", "camoufox")
 _EGRESS_PROBE_URL = "https://myip.ipip.net"
 # 期望出口地区关键词:命中即视为直连正常
 _EXPECTED_REGION = "中国"
+# 首检延迟(秒):**不在 start() 瞬间探测**。理由有二——①每次 worker 重启都立刻拉起一个
+# camoufox 纯属浪费(开发期频繁重启会白起十几次);②启动瞬间探测会在测试里真的拉起
+# playwright 进程,污染 Supervisor 相关用例(实测打红 test_request_stop_halts_dispatch)。
+# 60s 足够避开这两者,又能在代理重装+重启后一分钟内就给出信号。
+_FIRST_DELAY_S = 60.0
 
 
 def check_singbox_rule(config_path: str | None = None) -> tuple[bool, str]:
@@ -112,6 +117,9 @@ class EgressGuard:
         self._loop_task = asyncio.create_task(self._run_loop())
 
     async def _run_loop(self) -> None:
+        # 先睡 _FIRST_DELAY_S 再首检(不在 start() 瞬间拉浏览器,理由见常量注释);
+        # 期间收到停止信号则一次都不探测,直接退出。
+        await self._sleep(min(_FIRST_DELAY_S, self._interval))
         while self._stop_event is not None and not self._stop_event.is_set():
             try:
                 await self.check_once()

@@ -7,9 +7,12 @@
 - 额度错/单页失败 = done + errors 有值(不是 failed);任务级崩溃才 failed
 - anchor_url 解析不到 → done + 全失败位(不静默降级)
 - 无鉴权 → 401
+- result.orig_urls 与 urls/errors 等长同序:去水印前原图 NN.orig.ext;
+  去水印失败 = 该页失败(urls 空 + errors 写明),但原图照样可取
 """
 
 import asyncio
+from pathlib import Path
 
 from app.imagegen.openai_image import ImageGenResult
 from app.services import op_images
@@ -21,6 +24,14 @@ def _fake_batch(results_map):
     async def fake(self, prompts, *, anchor_path=None, aspect_ratio="3:4", save_prefix="p"):
         return [results_map(i, p, anchor_path) for i, p in enumerate(prompts)]
     return fake
+
+
+async def _fake_dewatermark_ok(path):
+    """假去水印成功:照真 reraster 契约另存 ``{stem}.shot.jpg``,原图原地不动。"""
+    src = Path(path)
+    out = src.with_suffix(".shot.jpg")
+    out.write_bytes(b"\xff\xd8dewatermarked-" + src.name.encode())
+    return str(out)
 
 
 async def _wait_terminal(sid, jid, timeout=5.0):
@@ -48,10 +59,9 @@ async def test_post_contract_202_and_poll_done(tmp_path, monkeypatch):
             "app.imagegen.openai_image.OpenAIImageProvider.generate_batch",
             _fake_batch(mapper),
         )
-        # 去水印后处理直通(不起浏览器)
-        async def fake_dewatermark(path):
-            return path
-        monkeypatch.setattr("app.services.op_images.dewatermark", fake_dewatermark)
+        # 假去水印(不起浏览器):照真契约另存一个产物文件,原图留在原地
+        monkeypatch.setattr(
+            "app.services.op_images.dewatermark", _fake_dewatermark_ok)
 
         r = await c.post(
             "/api/op/consistent-images",
@@ -138,6 +148,118 @@ async def test_poll_unknown_404_and_auth_401(tmp_path, monkeypatch):
         assert r2.status_code == 401
 
 
+# ---------------- 双产物:默认交付(去水印图)+ 原图提取通道 ----------------
+
+
+def _patch_uploads(tmp_path, monkeypatch) -> Path:
+    """把 uploads 根指到 tmp,返回该根路径(execute 的产物落这里)。"""
+    monkeypatch.setattr("app.services.op_images.settings.DATA_DIR", str(tmp_path))
+    return tmp_path / "uploads"
+
+
+def _disk(uploads_root: Path, url: str) -> Path:
+    """/uploads/{dir}/{name} 相对直链 → 本地磁盘路径。"""
+    return uploads_root / url[len("/uploads/"):]
+
+
+def _gen_ok(tmp_path):
+    """假 provider:每页都成功,落一张内容各异的 png 原图。"""
+    def mapper(i, prompt, anchor):
+        p = tmp_path / f"raw{i}.png"
+        p.write_bytes(b"\x89PNGraw-original-" + str(i).encode())
+        return ImageGenResult(success=True, path=str(p))
+    return mapper
+
+
+async def test_success_page_has_both_delivery_and_orig(tmp_path, monkeypatch):
+    """成功页:urls 指 NN.jpg(去水印图)、orig_urls 指 NN.orig.png(原图),两文件都在且内容不同。"""
+    uploads = _patch_uploads(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "app.imagegen.openai_image.OpenAIImageProvider.generate_batch",
+        _fake_batch(_gen_ok(tmp_path)),
+    )
+    monkeypatch.setattr("app.services.op_images.dewatermark", _fake_dewatermark_ok)
+
+    res = await op_images.execute({"prompts": ["p1", "p2"]})
+
+    assert res["urls"][0].endswith("/01.jpg") and res["urls"][1].endswith("/02.jpg")
+    assert res["orig_urls"][0].endswith("/01.orig.png")
+    assert res["orig_urls"][1].endswith("/02.orig.png")
+    for i in range(2):
+        served = _disk(uploads, res["urls"][i])
+        orig = _disk(uploads, res["orig_urls"][i])
+        assert served.is_file() and orig.is_file()
+        # 交付图是去水印产物,原图是 provider 原始字节:两者内容必须不同
+        assert served.read_bytes() != orig.read_bytes()
+        assert orig.read_bytes().startswith(b"\x89PNGraw-original-")
+
+
+async def test_dewatermark_failure_fails_page_but_keeps_orig(tmp_path, monkeypatch):
+    """去水印失败页:urls[i]="" + errors[i] 写明失败;原图仍落盘可取(绝不拿带水印图冒充交付)。"""
+    uploads = _patch_uploads(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "app.imagegen.openai_image.OpenAIImageProvider.generate_batch",
+        _fake_batch(_gen_ok(tmp_path)),
+    )
+
+    async def fake_dewatermark(path):
+        return None  # reraster 整条主路失败
+
+    monkeypatch.setattr("app.services.op_images.dewatermark", fake_dewatermark)
+
+    res = await op_images.execute({"prompts": ["p1"]})
+
+    assert res["urls"] == [""]
+    assert "去水印失败" in res["errors"][0]
+    assert res["orig_urls"][0].endswith("/01.orig.png")
+    orig = _disk(uploads, res["orig_urls"][0])
+    assert orig.is_file() and orig.read_bytes().startswith(b"\x89PNGraw-original-")
+    # 带水印的原图绝不能占默认交付位
+    assert not (orig.parent / "01.png").exists()
+    assert not (orig.parent / "01.jpg").exists()
+
+
+async def test_three_arrays_aligned_with_middle_page_failures(tmp_path, monkeypatch):
+    """urls/errors/orig_urls 三者等长且与 prompts 严格同序——中间页失败不许移位。"""
+    uploads = _patch_uploads(tmp_path, monkeypatch)
+
+    def mapper(i, prompt, anchor):
+        if i == 2:  # 第 3 页 provider 直接失败(无原图)
+            return ImageGenResult(success=False, error="billing_hard_limit_reached")
+        p = tmp_path / f"raw{i}.png"
+        p.write_bytes(b"\x89PNGraw-original-" + str(i).encode())
+        return ImageGenResult(success=True, path=str(p))
+
+    monkeypatch.setattr(
+        "app.imagegen.openai_image.OpenAIImageProvider.generate_batch",
+        _fake_batch(mapper),
+    )
+
+    async def fake_dewatermark(path):
+        if path.endswith("raw1.png"):  # 第 2 页去水印失败(有原图)
+            return None
+        return await _fake_dewatermark_ok(path)
+
+    monkeypatch.setattr("app.services.op_images.dewatermark", fake_dewatermark)
+
+    res = await op_images.execute({"prompts": ["p1", "p2", "p3", "p4"]})
+
+    assert len(res["urls"]) == len(res["errors"]) == len(res["orig_urls"]) == 4
+    # 第 1/4 页成功;第 2 页去水印失败;第 3 页 provider 失败
+    assert res["urls"][0].endswith("/01.jpg") and res["urls"][3].endswith("/04.jpg")
+    assert res["urls"][1] == "" and res["urls"][2] == ""
+    assert res["errors"][0] == "" and res["errors"][3] == ""
+    assert "去水印失败" in res["errors"][1]
+    assert "billing" in res["errors"][2]
+    # 原图:有 provider 产物的三页都可取,provider 失败那页空串占位(不移位)
+    assert res["orig_urls"][0].endswith("/01.orig.png")
+    assert res["orig_urls"][1].endswith("/02.orig.png")
+    assert res["orig_urls"][2] == ""
+    assert res["orig_urls"][3].endswith("/04.orig.png")
+    for i in (0, 1, 3):
+        assert _disk(uploads, res["orig_urls"][i]).is_file()
+
+
 def test_resolve_anchor_path_guards(tmp_path, monkeypatch):
     """anchor 解析:uploads 内真实文件通过;路径穿越/域外/不存在全拒。"""
     uploads = tmp_path / "uploads" / "batch1"
@@ -153,3 +275,47 @@ def test_resolve_anchor_path_guards(tmp_path, monkeypatch):
     assert op_images.resolve_anchor_path("/uploads/../secrets.txt") is None
     assert op_images.resolve_anchor_path("/downloads/x.png") is None
     assert op_images.resolve_anchor_path("/uploads/batch1/none.png") is None
+
+
+async def test_rename_failure_only_collapses_that_slot(tmp_path, monkeypatch):
+    """单页 rename 炸掉只塌该位,不得冒泡把整批(含已成功已付费的页)判崩。
+
+    评审确认的纪律不一致:openai_image 的 _edit_one/_fallback_one 显式 try/except
+    「保证该下标位不塌陷」,而这里两处 rename 裸奔——一炸整个 job 变 {"error"},
+    之前已成功的页结果随返回值一起丢。
+    """
+    import app.services.op_images as oi
+
+    monkeypatch.setattr(oi.settings, "DATA_DIR", str(tmp_path))
+
+    async def fake_batch(self, prompts, *, anchor_path=None, save_prefix="p"):
+        out = []
+        for i, _ in enumerate(prompts):
+            p = tmp_path / f"raw{i}.png"
+            p.write_bytes(b"orig")
+            out.append(type("R", (), {"success": True, "path": str(p), "error": None})())
+        return out
+
+    monkeypatch.setattr(oi.OpenAIImageProvider, "generate_batch", fake_batch)
+
+    async def fake_dw(path):
+        clean = Path(path).with_suffix(".shot.jpg")
+        clean.write_bytes(b"cleaned")
+        return str(clean)
+
+    monkeypatch.setattr(oi, "dewatermark", fake_dw)
+
+    real_rename = Path.rename
+    def flaky_rename(self, target):
+        if str(target).endswith("02.jpg"):          # 只让第 2 页的交付改名炸
+            raise OSError("rename boom")
+        return real_rename(self, target)
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+
+    res = await oi.execute({"prompts": ["a", "b", "c"]})
+
+    assert "error" not in res, f"整批不该崩:{res}"
+    assert len(res["urls"]) == len(res["errors"]) == len(res["orig_urls"]) == 3
+    assert res["urls"][0] and res["urls"][2], "其余页照常交付"
+    assert res["urls"][1] == "" and "改名失败" in res["errors"][1], "只塌第 2 位"
+    assert res["orig_urls"][1], "原图仍可取"

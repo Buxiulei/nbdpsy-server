@@ -4,6 +4,7 @@
 覆盖掉;规则一丢 camoufox 出国 → 小红书风控 401 踢登录,症状与 ark-401 一模一样极易误判。
 本组件让它当天暴露。
 """
+import asyncio
 import json
 
 import pytest
@@ -109,3 +110,18 @@ async def test_probe_failure_does_not_judge(tmp_path, monkeypatch):
 
     result = await EgressGuard(interval=999).check_once()
     assert result["egress_ok"] is None
+
+
+async def test_start_does_not_probe_immediately(monkeypatch):
+    """start() 后**不得立刻探测**:否则每次 worker 重启白起一个 camoufox,
+    且会在 Supervisor 相关测试里真的拉起 playwright 进程(实测打红过 supervisor 用例)。"""
+    probed = {"n": 0}
+    monkeypatch.setattr(egress_guard, "_probe_egress_sync",
+                        lambda: (probed.__setitem__("n", probed["n"] + 1), "")[1])
+
+    g = EgressGuard(interval=999)
+    g.start()
+    await asyncio.sleep(0.2)      # 远小于 _FIRST_DELAY_S
+    await g.stop()
+
+    assert probed["n"] == 0, "start() 瞬间不应探测(首检须延迟)"

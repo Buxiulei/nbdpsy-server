@@ -3,8 +3,9 @@
 四个入口(消费 app.services.upload_service 的 save_images/list_batches):
 - POST /api/uploads/images(鉴权):收 multipart 图片 → 落盘得图床直链,供发布 image_urls 用。
 - GET /uploads/{batch_id}/{name}(白名单免鉴权):按页序取回落盘图片。**防路径穿越**——
-  batch_id 只允许 token_urlsafe 字符集、name 只允许 NN.(png|jpg|jpeg|webp),否则 404;
-  拼 DATA_DIR/uploads/{batch_id}/{name},非文件 404;FileResponse(media_type 按扩展名)。
+  batch_id 只允许 token_urlsafe 字符集、name 只允许 NN.(png|jpg|jpeg|webp) 或
+  NN.orig.(同扩展名)(生图去水印前的原图),否则 404;拼 DATA_DIR/uploads/{batch_id}/{name},
+  非文件 404;FileResponse(media_type 按扩展名)。
 - GET /upload(白名单免鉴权):内联单文件上传页(apikey 输入 + 拖拽/选图 → fetch 上传)。
 - GET /api/uploads(鉴权):列自己当前未过期的上传批次。
 
@@ -27,10 +28,14 @@ from app.services.upload_service import list_batches, save_images
 
 router = APIRouter()
 
-# 防路径穿越:batch_id 只允许 secrets.token_urlsafe 的字符集;name 只允许页序 NN.ext。
-# 二者均为单路径段(FastAPI 路径参数不跨 /),叠加正则白名单后 ../ 类 name 无法匹配 → 404。
+# 防路径穿越:batch_id 只允许 secrets.token_urlsafe 的字符集;name 只允许页序 NN.ext
+# 或生图原图 NN.orig.ext。二者均为单路径段(FastAPI 路径参数不跨 /),叠加正则白名单后
+# ../ 类 name 无法匹配 → 404。
+# .orig 是**唯一**放行的额外形态(一致性生图的去水印前原图提取通道,见
+# services/op_images.py);这是免鉴权路由,白名单本身就是访问控制的一部分,
+# 严禁放宽成任意文件名/任意中缀。
 _BATCH_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_NAME_RE = re.compile(r"^\d{2}\.(png|jpe?g|webp)$")
+_NAME_RE = re.compile(r"^\d{2}(\.orig)?\.(png|jpe?g|webp)$")
 
 # 落盘扩展名 → 取图响应 content-type。
 _MEDIA_TYPES = {
