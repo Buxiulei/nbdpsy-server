@@ -403,7 +403,7 @@ def test_concurrency_setting_default():
     """新增配置项必须带默认值(缺省即可用,不依赖 .env;故断言字段默认而非实例值)。"""
     from app.core.config import Settings
 
-    assert Settings.model_fields["OPENAI_IMAGE_CONCURRENCY"].default == 5
+    assert Settings.model_fields["OPENAI_IMAGE_CONCURRENCY"].default == 10
 
 
 @pytest.mark.parametrize("bad", [0, -3])

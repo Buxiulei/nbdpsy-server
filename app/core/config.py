@@ -118,9 +118,12 @@ class Settings(BaseSettings):
     # 单张生图调用超时(秒):gpt-image 单张常 30-120s,留足余量
     OPENAI_IMAGE_TIMEOUT: int = 300
     OPENAI_IMAGE_PROXY: str = ""
-    # 单批次内并发路数(有界):锚点法各页互不依赖,逐张串行 9 页约 7.5min,
-    # 并发 5 压到约 1min。调高易撞上游 429(有退避重试兜底但整体变慢)。
-    OPENAI_IMAGE_CONCURRENCY: int = 5
+    # 单批次内并发路数(有界):锚点法各页互不依赖。此值决定**一篇要跑几波**——
+    # 9 页 5 路要 2 波(约 100s),10 路 1 波(约 50s),故取 10 覆盖常见 6-9 页一波出完。
+    # 与调用方的"篇级并行"相乘才是打到上游的总在飞:10 篇 × 10 路 = 100 并发
+    # ≈ 120 张/分,占 gpt-image-2 Tier 5 上限(250 IPM)的 48%,留一半余量。
+    # 换低 tier 或调用方提高篇级并行时必须同步下调此值(Tier 3 仅 50 IPM)。
+    OPENAI_IMAGE_CONCURRENCY: int = 10
 
     # ── 视频 worker 调度(方案 C 独立 asyncio worker,scheduler.py 消费)──
     # 单机 CPU 编码,并发 1 足够(排队语义与源一致);阶段内 300s 周期 touch heartbeat_at;
