@@ -238,10 +238,60 @@ class XHSPublishAtomicTasks:
 
     # ==================== 步骤1: 打开发布页面 ====================
 
+    def _fast_open_publish_page(self) -> bool:
+        """Fast-path:直连 creator 发布页,上传区就绪即成功;否则 False 交慢路径兜底。
+
+        提速依据(2026-07-25):start() 已在 explore 验证登录,且 cookie 双域注入
+        (normalize_cookies_for_injection 含 .xiaohongshu.com + creator 子域)已让
+        creator 子域带登录态,故绝大多数情况可直接 goto 发布页秒进——**跳过慢路径的
+        explore 重导航 + 8×2s 弹窗串行探测 + 开新窗口 + SSO 认证轮询(合计 ~25s)**。
+        判据用 ``input[type='file']``(发布页必有、登录页必无,比宽泛 upload 类可靠):
+        就绪即登录态生效;落到 /login 或 8s 内上传区未现 → 回退慢路径(cookie 未覆盖
+        creator / 需 SSO / 风控),最坏退化到原状,不会更糟。
+        """
+        try:
+            self.page.goto(
+                "https://creator.xiaohongshu.com/publish/publish?source=official",
+                wait_until="domcontentloaded", timeout=30000,
+            )
+        except Exception as e:
+            logger.info(f"[fast-path] goto 发布页异常,回退慢路径: {e}")
+            return False
+        # 换页后复位虚拟光标(与慢路径切窗口后一致),避免沿用 explore 页坐标画错贝塞尔轨迹
+        self.human.last_mouse_pos = None
+        # 条件等待「发布页真可交互」再返回:判据 = file input 存在 **且「上传图文」tab 已渲染**。
+        # 只看 input 存在会进得太快(页面 tab 栏未 hydrate)→ 把等待转嫁给 step2 的 tab 查找循环
+        # 空转(实测 fast-path 后 step2 达 19.8s vs 慢路径 2s)。等 tab 就绪再走,step2 第一轮即命中。
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            url = (self.page.url or "").lower()
+            if "login" in url:
+                logger.info("[fast-path] 落到登录页,回退慢路径")
+                return False
+            try:
+                ready = self.page.evaluate(r"""() => {
+                    if (!document.querySelector("input[type='file']")) return false;
+                    return Array.from(document.querySelectorAll('span,div,a,li')).some(el => {
+                        if (el.textContent.trim() !== '上传图文') return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+                }""")
+                if ready:
+                    self.human.wait(0.3, 0.7, context="发布页就绪")  # 真人看一眼页面的自然短停顿
+                    logger.info("✓ [fast-path] 直达发布页,上传区+图文tab 就绪(跳过慢链路)")
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
+        logger.info("[fast-path] 12s 内发布页未就绪,回退慢路径")
+        return False
+
     def step1_open_publish_page(self) -> Dict[str, Any]:
         """步骤1: 打开发布页面。
 
-        策略:先访问主站探索页,点击右上角「发布笔记」link 进入创作中心(会打开
+        策略:**先走 fast-path 直连 creator 发布页**(双域 cookie 带登录态,~3-5s 秒进);
+        失败才回退慢路径——访问主站探索页,点击右上角「发布笔记」link 进入创作中心(会打开
         新窗口并触发 SSO 自动认证);SSO 失败时回主站再走一次 SSO 入口,仍失败则
         返回 ``need_manual_login=True``(独立信号,见 §6.4 坑#6)。
         """
@@ -251,6 +301,12 @@ class XHSPublishAtomicTasks:
         logger.info("=" * 60)
 
         try:
+            # 1.0 Fast-path:直连发布页(双域 cookie 已带登录态),成功即跳过整条慢链路
+            if self._fast_open_publish_page():
+                self._take_screenshot("02_fast_publish_page")
+                return {"success": True, "url": self.page.url}
+            logger.info("fast-path 未命中,回退传统慢路径(explore→点发布→SSO)...")
+
             # 1.1 访问主站探索页,验证登录状态
             logger.info("1.1 访问小红书探索页,验证登录状态...")
             self.human.navigate("https://www.xiaohongshu.com/explore")
