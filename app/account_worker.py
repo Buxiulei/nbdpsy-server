@@ -190,6 +190,10 @@ def _apply_publish_decision(
                 " WHERE id = ? AND status = 'publishing'",
                 (note_id, note_url, job_id),
             )
+            conn.commit()  # 终态先落定,再事后归档(归档失败不回滚发布)
+            # 内容资产库:发布成功自动归档(幂等 + 绝不抛错阻断)。
+            from app.services.content_archive import archive_published_job
+            archive_published_job(db_path, job_id)
         elif decision["status"] == "pending":
             # 排重试:retries 递增 + next_retry_at 排期 + 回 pending
             next_retry = now + timedelta(seconds=decision["next_retry_delta_s"])

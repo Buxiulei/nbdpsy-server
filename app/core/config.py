@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     VIDEO_HEARTBEAT_INTERVAL: int = 300
     VIDEO_STALE_TIMEOUT: int = 900
 
+    # ── 内容资产库(content_archive,设计 2026-07-25-content-archive-design.md)──
+    # 发布成功自动归档;取详情即刷新 last_used_at;距最后使用超 TTL 天由 ArchiveReaper 删除。
+    ARCHIVE_TTL_DAYS: int = 90
+    # 归档 TTL 巡检间隔(秒,0=关闭);默认 6h,归档量低无需高频。
+    ARCHIVE_REAP_INTERVAL: int = 21600
+
     # ── API/Worker 进程拆分(设计:docs/design/2026-07-24-api-worker-split-design.md)──
     # 进程角色:api=只挂 REST 路由;worker=只跑任务消费;all=兼跑(开发/测试/单进程小部署)。
     NBDPSY_ROLE: str = "all"
