@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from app.core.config import settings
+from app.imagegen.image_gate import image_slot
 
 # 宽高比 → gpt-image size 映射(gpt-image-2 仅支持三种尺寸)。
 ASPECT_RATIO_TO_OPENAI_SIZE = {
@@ -129,8 +130,12 @@ async def _call_with_backoff(make_call, *, tag: str):
     """
     for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
         try:
-            return await asyncio.wait_for(
-                make_call(), timeout=settings.OPENAI_IMAGE_TIMEOUT)
+            # 进程级闸只包住**真正在飞的那次请求**:退避 sleep 期间名额归还给别的任务
+            # (被限流时占着名额干等纯属浪费吞吐)。获取顺序恒为 页级 sem → 本闸,
+            # 全局一致故无循环等待、无死锁。
+            async with image_slot():
+                return await asyncio.wait_for(
+                    make_call(), timeout=settings.OPENAI_IMAGE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
             retryable = _is_rate_limit_error(exc) and not _is_moderation_error(exc)
             if not retryable or attempt >= _RATE_LIMIT_MAX_RETRIES:

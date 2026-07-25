@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     # ≈ 120 张/分,占 gpt-image-2 Tier 5 上限(250 IPM)的 48%,留一半余量。
     # 换低 tier 或调用方提高篇级并行时必须同步下调此值(Tier 3 仅 50 IPM)。
     OPENAI_IMAGE_CONCURRENCY: int = 10
+    # 进程级生图并发闸(image_gate):封顶**全进程**同时在飞的上游图像请求,不依赖调用方守约。
+    # 页级 × 篇级是相乘的(10 路 × 10 篇 = 100),一旦有人一次提交几十篇就会冲破 tier 限额;
+    # 本闸是兜底,超出的排队而非拒绝。100 = 约定稳态(≈120 张/分,占 Tier 5 250 IPM 的 48%)。
+    OPENAI_IMAGE_GLOBAL_CONCURRENCY: int = 100
 
     # ── 视频 worker 调度(方案 C 独立 asyncio worker,scheduler.py 消费)──
     # 单机 CPU 编码,并发 1 足够(排队语义与源一致);阶段内 300s 周期 touch heartbeat_at;

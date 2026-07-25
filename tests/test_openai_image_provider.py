@@ -417,3 +417,78 @@ async def test_concurrency_floor_is_one(tmp_path, monkeypatch, bad):
     p = _provider(tmp_path, handler)
     results = await p.generate_batch(["page-0", "page-1"], anchor_path=_anchor(tmp_path))
     assert all(r.success for r in results)
+
+
+# ── 进程级生图闸(image_gate)────────────────────────────────────────────────
+
+async def test_global_gate_caps_across_batches(tmp_path, monkeypatch):
+    """进程级闸封顶**跨批次**总在飞:两批各 4 路同时跑,全局闸=3 时峰值不得超 3。
+
+    这是"不依赖调用方守约"的兜底:页级并发只管一篇之内,篇级并行由调用方决定,
+    二者相乘可能冲破 tier 限额;本闸是进程内最后一道。
+    """
+    from app.imagegen import image_gate
+
+    monkeypatch.setattr(openai_image.settings, "OPENAI_IMAGE_CONCURRENCY", 4)
+    monkeypatch.setattr(image_gate.settings, "OPENAI_IMAGE_GLOBAL_CONCURRENCY", 3)
+    image_gate._reset_for_test()
+    try:
+        cur = {"n": 0, "peak": 0}
+
+        async def handler(prompt: str):
+            cur["n"] += 1
+            cur["peak"] = max(cur["peak"], cur["n"])
+            await asyncio.sleep(0.05)
+            cur["n"] -= 1
+            return _FakeResponse(f"img-{prompt}")
+
+        p1 = _provider(tmp_path / "a", handler)
+        p2 = _provider(tmp_path / "b", handler)
+        anchor = _anchor(tmp_path)
+        r1, r2 = await asyncio.gather(
+            p1.generate_batch([f"a{i}" for i in range(4)], anchor_path=anchor),
+            p2.generate_batch([f"b{i}" for i in range(4)], anchor_path=anchor),
+        )
+
+        assert len(r1) == 4 and len(r2) == 4
+        assert all(r.success for r in r1 + r2), "排队而非拒绝:全部应成功"
+        assert cur["peak"] <= 3, f"全局在飞峰值 {cur['peak']} 超过闸值 3"
+        assert cur["peak"] > 1, "闸不该把并发压成串行"
+    finally:
+        image_gate._reset_for_test()
+
+
+async def test_global_gate_released_during_backoff(tmp_path, monkeypatch):
+    """429 退避期间必须**归还**全局名额:否则限流时占着坑干等,拖垮其他任务。"""
+    from app.imagegen import image_gate
+
+    monkeypatch.setattr(openai_image, "_RATE_LIMIT_BACKOFF_BASE", 0.05)
+    monkeypatch.setattr(image_gate.settings, "OPENAI_IMAGE_GLOBAL_CONCURRENCY", 1)
+    image_gate._reset_for_test()
+    try:
+        order: list[str] = []
+
+        async def handler(prompt: str):
+            if prompt == "slow" and order.count("slow-429") < 1:
+                order.append("slow-429")
+                raise RuntimeError("rate limit exceeded")
+            order.append(prompt)
+            return _FakeResponse(f"img-{prompt}")
+
+        p = _provider(tmp_path, handler)
+        anchor = _anchor(tmp_path)
+
+        async def other():
+            await asyncio.sleep(0.01)          # 让 slow 先撞 429 进入退避
+            return await p.generate_batch(["other"], anchor_path=anchor)
+
+        slow_res, other_res = await asyncio.gather(
+            p.generate_batch(["slow"], anchor_path=anchor), other())
+
+        assert slow_res[0].success and other_res[0].success
+        # 闸值=1;若退避期间仍占名额,other 只能等 slow 全部重试完 → other 必在最后。
+        # 归还了名额,other 就能插在 slow 的两次尝试之间。
+        assert order.index("other") < order.index("slow"), (
+            f"退避期间未归还全局名额(顺序 {order})")
+    finally:
+        image_gate._reset_for_test()
