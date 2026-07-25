@@ -1279,6 +1279,36 @@ class XHSPublishAtomicTasks:
 
     # ==================== 步骤7: 点击发布并等待 ====================
 
+    def _scan_blocking_notice(self) -> Optional[str]:
+        """扫可见 toast/dialog,返回阻断性提示文案(封禁/违规/失败/频繁等);无则 None。
+
+        RCA 2026-07-25(账号1封禁):点发布后 0.2s 即弹 d-new-toast
+        「因违反社区规范禁止发笔记」,~7.8s 消失。旧逻辑 12s 轮询跑完才在 14s 抓 forensic,
+        toast 早没了 → 扑空 → 干等 30s 超时报「未检测到成功标志」。故抽成方法级,供 step7
+        点发布后密集轮询(一现即捕捉)与超时兜底(收口前再扫一次)共用。"""
+        try:
+            return self.page.evaluate(r"""() => {
+                const sel = '[class*=toast],[class*=Toast],[role=dialog],'
+                  + '[class*=dialog],[class*=Dialog],[class*=modal],'
+                  + '[class*=Modal],[class*=message],[class*=Message],'
+                  + '[class*=notice],[class*=Notice],[class*=alert]';
+                const KW = /违反社区规范|禁止发笔记|账号异常|违规|封禁|已被封|限制发布|无法发布|发布失败|操作(过于)?频繁|请稍后(重试)?|内容(审核|违规)|未通过|风险|需要验证|拦截/;
+                for (const el of document.querySelectorAll(sel)) {
+                    if (el.offsetParent === null) continue;
+                    const t = (el.innerText || '').trim();
+                    if (t && t.length < 120 && KW.test(t)) return t;
+                }
+                return null;
+            }""")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _notice_is_ban(notice: str) -> bool:
+        """判定阻断文案是否为账号级封禁/限制(vs 临时频繁/网络类),据此置 account_restricted。"""
+        return any(k in notice for k in (
+            "违反社区规范", "禁止发笔记", "账号异常", "封禁", "已被封", "限制发布", "违规"))
+
     def step7_click_publish_and_wait(self, max_wait: int = 30) -> Dict[str, Any]:
         """步骤7: 点击发布按钮并等待发布完成。
 
@@ -1431,6 +1461,8 @@ class XHSPublishAtomicTasks:
                         except Exception:
                             return False
 
+                    _blocking_notice = self._scan_blocking_notice
+
                     rc = _red_centroid_css()
                     fx = h['x'] + h['w'] * 0.59
                     fy = h['y'] + h['h'] * 0.55
@@ -1472,6 +1504,7 @@ class XHSPublishAtomicTasks:
                         except Exception:
                             return False
 
+                    blocked_notice = None  # 点发布后捕捉到的阻断提示(封禁/违规/失败等)
                     for idx, (name, act) in enumerate(attempts):
                         # 补点前先确认上次点击**未被接收**;已接收则停手,绝不重复发布
                         if idx > 0 and _click_registered():
@@ -1484,13 +1517,19 @@ class XHSPublishAtomicTasks:
                             self.human.wait(0.3, 0.7, context="确认发布内容")
                             act()
                             logger.info(f"✓ [closed shadow] 尝试[{name}] @({tx:.0f},{ty:.0f})")
-                            # 长窗口轮询成功页(发布慢/并发/网络摩擦时 sleep 2s 远不够)
+                            # 长窗口轮询成功页(发布慢/并发/网络摩擦时 sleep 2s 远不够);
+                            # **每轮同步扫阻断 toast**——封禁/违规回执一出现即捕捉,不等超时。
                             published = False
                             for _ in range(12):
                                 time.sleep(1.0)
+                                blocked_notice = _blocking_notice()
+                                if blocked_notice:
+                                    break
                                 if _published():
                                     published = True
                                     break
+                            if blocked_notice:
+                                break  # 命中阻断:跳出补点循环,下方统一以明确原因收口
                             if published:
                                 logger.info(f"✓ [{name}] 发布生效(页面已变化)")
                                 publish_clicked = True
@@ -1507,6 +1546,18 @@ class XHSPublishAtomicTasks:
                             logger.info(f"… [{name}] 点击未被接收(疑似点空),换手段补点")
                         except Exception as ae:
                             logger.info(f"[{name}] 执行异常: {ae}")
+                    if blocked_notice:
+                        # 点发布后小红书弹阻断回执(封禁/违规/失败/频繁等):以明确原因立即收口,
+                        # 不干等 30 秒超时。封禁类置 account_restricted=True(状态机据此直接 failed
+                        # 不重试——重发也发不出且是更强高频封号信号);其余(失败/频繁)带原文返回。
+                        is_ban = self._notice_is_ban(blocked_notice)
+                        logger.warning(f"❌ 发布被阻断: {blocked_notice!r} restricted={is_ban}")
+                        return {
+                            "success": False,
+                            "error": f"发布被小红书阻断:{blocked_notice}",
+                            "account_restricted": is_ban,
+                            "screenshot": self._take_screenshot("13_blocked_notice"),
+                        }
                     if not publish_clicked:
                         # 全手段后未确认生效:仍进入等待逻辑兜底(可能延迟跳转)
                         click_strategy = "closed shadow:多手段(未确认)"
@@ -1660,6 +1711,20 @@ class XHSPublishAtomicTasks:
                 waited += 2
                 current_url = self.page.url
 
+                # 每轮先扫阻断回执(封禁/违规/失败/频繁):light/open-shadow 路径不走上面
+                # closed-shadow 密集轮询,ban toast(~7.8s 灭)必须在此循环里一现即捕捉,
+                # 否则又拖到 30s 超时误报。命中即以明确原因收口,封禁类置 account_restricted。
+                _notice = self._scan_blocking_notice()
+                if _notice:
+                    is_ban = self._notice_is_ban(_notice)
+                    logger.warning(f"❌ 发布被阻断: {_notice!r} restricted={is_ban}")
+                    return {
+                        "success": False,
+                        "error": f"发布被小红书阻断:{_notice}",
+                        "account_restricted": is_ban,
+                        "screenshot": self._take_screenshot("13_blocked_notice"),
+                    }
+
                 # 页面文字命中成功(小红书可能不跳转而是显示 toast)
                 try:
                     body_text = self.page.inner_text("body")
@@ -1748,6 +1813,19 @@ class XHSPublishAtomicTasks:
                     logger.info(f"仍在等待发布完成... ({waited}/{max_wait}秒)")
                     self._take_screenshot(f"16_waiting_{waited}s")
 
+            # 超时兜底:收口前再扫一次阻断回执(轮询间隙外新弹的 toast/迟到的处罚回执),
+            # 命中则带明确原因返回,不再报笼统"未检测到成功标志"。
+            _final_notice = self._scan_blocking_notice()
+            if _final_notice:
+                is_ban = self._notice_is_ban(_final_notice)
+                logger.warning(f"❌ 发布被阻断(超时收口扫得): {_final_notice!r} restricted={is_ban}")
+                return {
+                    "success": False,
+                    "error": f"发布被小红书阻断:{_final_notice}",
+                    "account_restricted": is_ban,
+                    "current_url": self.page.url,
+                    "screenshot": self._take_screenshot("13_blocked_notice"),
+                }
             return {
                 "success": False,
                 "error": f"发布超时({max_wait}秒),未检测到成功标志",
