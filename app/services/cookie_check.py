@@ -145,3 +145,13 @@ async def _write_back(account_id: int, status: str, user_info: dict | None) -> N
                 if nickname:
                     account.name = nickname
             await session.commit()
+    # 新账号首次基底:cookie 确认 valid 且从未有快照 → 立即 enqueue 一次数据采集。
+    # 绝不打断检测主流程(基底失败只记日志,调度器每小时兜底)。
+    if status == "valid":
+        try:
+            import app.core.db as db_module
+            from app.services.note_metrics_scheduler import ensure_baseline
+
+            await ensure_baseline(db_module.async_session, account_id)
+        except Exception:
+            logger.exception(f"基底采集 enqueue 失败(不影响检测)account_id={account_id}")
