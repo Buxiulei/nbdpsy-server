@@ -36,10 +36,26 @@ from app.browser.profile_guard import (
     sanitize_launch_options,
 )
 
-# 注:曾用 Firefox PAC 把 ark.xiaohongshu.com 指向死代理规避其 401 跳登录,但实测该 PAC
-# 会让真发布时 ark 网络失败 → 崩 Playwright driver、且挡住发布。sing-box 现已把
-# .xiaohongshu.com + camoufox 进程全路由 direct-out(直连),ark 与会话同 IP 直连返回 200
-# 不再 401,PAC 已弃用(见 start() 处 firefox_user_prefs 注释)。
+def _build_ark_blackhole_pac() -> str:
+    """构造把 ``ark.xiaohongshu.com`` 指向死代理、其余全 DIRECT 的 PAC data URL。
+
+    千帆商家后台 ark 的带货权限探测对"曾绑过千帆"的号返 401,而创作页把任意 401 当成整体
+    登录失效 → 跳 login → 编辑器被摧毁(详见 start() 处注释)。把该单域打进死代理,请求变成
+    **网络错误**而非 401,前端就不跳登录。PAC 作用于浏览器全局代理层,SW/iframe/主线程全覆盖
+    —— 这正是它不可替代的原因:实测 Playwright 的 page/context.route 都拦不到这些 ark 请求。
+    """
+    import base64
+
+    pac = (
+        "function FindProxyForURL(url, host){"
+        " if (host == 'ark.xiaohongshu.com') return 'PROXY 127.0.0.1:1';"
+        " return 'DIRECT'; }"
+    )
+    return ("data:application/x-ns-proxy-autoconfig;base64,"
+            + base64.b64encode(pac.encode()).decode())
+
+
+_ARK_BLACKHOLE_PAC_URL = _build_ark_blackhole_pac()
 
 
 def _resolve_headed_display() -> Optional[Tuple[str, str]]:
@@ -287,13 +303,24 @@ class SyncClient:
                     "navigator.platform": fp.platform or "Win32",
                 },
                 window=(fp.viewport["width"], fp.viewport["height"]),
-                # 【去掉 ark PAC 死代理】sing-box 现已把 .xiaohongshu.com + camoufox 进程全
-                # 路由到 direct-out(直连,绕 tun),ark 走直连与会话同 IP → 返回 200 不再 401,
-                # 无需 PAC blackhole;而 PAC 反而让真发布时 ark 网络失败 → 崩 Playwright driver。
-                # 故不设代理(走系统 tun+sing-box 路由)。仅关地理位置,避免发布页弹权限授权框卡流程。
+                # 【恢复 ark PAC 死代理】07-21 曾因"会崩 driver"弃用,但那个崩溃(ark 网络错误
+                # 冒泡成 location 为空的 pageerror → Playwright Firefox driver 读 location.url
+                # 崩)后来已被下方 add_init_script 的全局错误吞噬根治,前提不再成立;而弃用时
+                # 认定的替代方案("sing-box 直连后 ark 就返 200")经 2026-07-25 实测**不成立**:
+                # camoufox 27/27 走 direct-out、出口北京联通,ark 仍稳定 401。
+                # 机理:编辑器一打开,创作页就去问千帆商家后台 ark 的带货权限,曾绑过千帆的号
+                # (NBDpsy聊心理 / NBDpsy 官号)收到 401,而创作页把**任意 401 当整体登录失效**,
+                # 0.6s 内跳 login?redirectReason=401 → 编辑器连同已上传的图一起没了,只剩草稿。
+                # 没绑过千帆的号(NBDpsy-聊创伤)不触发该探测,故一直正常。
+                # PAC 把 ark 单域指向死代理,让它变成**网络错误而非 401**,前端遂不跳登录;其余
+                # 全 DIRECT(camoufox 出网本就由 sing-box process_path 规则直连,不受影响)。
+                # 实测(严格测法:上传后连续观察 18s 再复检):聊心理 由"+2.0s 被踢、编辑器丢失"
+                # 转为"不被踢、20s 后编辑器在、12 张缩略图",与健康号表现一致。
                 firefox_user_prefs={
                     "permissions.default.geo": 2,   # 2=拒绝:不弹"允许获取位置"授权框
                     "geo.enabled": False,
+                    "network.proxy.type": 2,        # 2=用 PAC(autoconfig)
+                    "network.proxy.autoconfig_url": _ARK_BLACKHOLE_PAC_URL,
                 },
             )
             # 持久化参数注入(NewBrowser 通过 from_options 展开传给 launch_persistent_context)
