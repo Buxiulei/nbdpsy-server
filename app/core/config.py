@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     # 归档 TTL 巡检间隔(秒,0=关闭);默认 6h,归档量低无需高频。
     ARCHIVE_REAP_INTERVAL: int = 21600
 
+    # ── 笔记数据定时采集(note_metrics_scheduler)──
+    # 扫描间隔(秒,0=关闭)。语义是"每天每号最多自动采 1 次"(今天有快照/已尝试即跳过),
+    # 间隔只决定断档后多快补上,默认 1h。
+    NOTE_METRICS_INTERVAL: int = 3600
+
     # ── API/Worker 进程拆分(设计:docs/design/2026-07-24-api-worker-split-design.md)──
     # 进程角色:api=只挂 REST 路由;worker=只跑任务消费;all=兼跑(开发/测试/单进程小部署)。
     NBDPSY_ROLE: str = "all"
