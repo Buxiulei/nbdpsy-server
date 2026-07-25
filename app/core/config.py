@@ -147,6 +147,13 @@ class Settings(BaseSettings):
     # 间隔只决定断档后多快补上,默认 1h。
     NOTE_METRICS_INTERVAL: int = 3600
 
+    # ── 出口链路自检(egress_guard)──
+    # 防"代理重装/更新覆盖掉 sing-box 里 camoufox 直连规则"静默复发:规则一丢,camoufox
+    # 出国 → 小红书风控 401 踢登录,症状与 ark-401 一模一样极易误判。两级自检(读配置 +
+    # 起一次性空 cookie camoufox 实测出口地区),间隔秒(0=关闭),默认 6h。
+    EGRESS_CHECK_INTERVAL: int = 21600
+    SINGBOX_CONFIG_PATH: str = "/opt/hysteria-client/singbox-tun.json"
+
     # ── 草稿箱周清理(draft_clean_scheduler)──
     # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
     DRAFT_CLEAN_INTERVAL: int = 86400

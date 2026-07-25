@@ -29,6 +29,7 @@ from sqlalchemy import update, or_, select
 import app.core.db as db_module
 from app.browser.browser_reaper import BrowserReaper
 from app.browser.cookie_checker import CookieChecker
+from app.browser.egress_guard import EgressGuard
 from app.core.config import settings
 from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
@@ -119,6 +120,7 @@ class Supervisor:
         self._archive_reaper: ArchiveReaper | None = None
         self._note_metrics_scheduler: NoteMetricsScheduler | None = None
         self._draft_clean_scheduler: DraftCleanScheduler | None = None
+        self._egress_guard: EgressGuard | None = None
         self._video_scheduler = None
 
     # ---------------- 生命周期 ----------------
@@ -173,6 +175,9 @@ class Supervisor:
                 self._session_factory, settings.NOTE_METRICS_INTERVAL
             )
             self._note_metrics_scheduler.start()
+        if settings.EGRESS_CHECK_INTERVAL > 0:
+            self._egress_guard = EgressGuard(settings.EGRESS_CHECK_INTERVAL)
+            self._egress_guard.start()
         if settings.DRAFT_CLEAN_INTERVAL > 0:
             self._draft_clean_scheduler = DraftCleanScheduler(
                 self._session_factory, settings.DRAFT_CLEAN_INTERVAL
@@ -198,6 +203,9 @@ class Supervisor:
         if self._video_scheduler is not None:
             await self._video_scheduler.stop()
             self._video_scheduler = None
+        if self._egress_guard is not None:
+            await self._egress_guard.stop()
+            self._egress_guard = None
         if self._draft_clean_scheduler is not None:
             await self._draft_clean_scheduler.stop()
             self._draft_clean_scheduler = None
