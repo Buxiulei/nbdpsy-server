@@ -32,6 +32,7 @@ from app.browser.cookie_checker import CookieChecker
 from app.core.config import settings
 from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
+from app.services.content_archive import ArchiveReaper
 from app.services.placeholder_reaper import PlaceholderReaper
 
 # browser_jobs 台账 repo(P1 产物):集成前分支上可能尚不存在,容缺导入 —— repo 为 None 时
@@ -113,6 +114,7 @@ class Supervisor:
         self._cookie_checker: CookieChecker | None = None
         self._browser_reaper: BrowserReaper | None = None
         self._placeholder_reaper: PlaceholderReaper | None = None
+        self._archive_reaper: ArchiveReaper | None = None
         self._video_scheduler = None
 
     # ---------------- 生命周期 ----------------
@@ -157,6 +159,11 @@ class Supervisor:
                 self._session_factory, settings.PLACEHOLDER_REAP_INTERVAL
             )
             self._placeholder_reaper.start()
+        if settings.ARCHIVE_REAP_INTERVAL > 0:
+            self._archive_reaper = ArchiveReaper(
+                self._session_factory, settings.ARCHIVE_REAP_INTERVAL
+            )
+            self._archive_reaper.start()
         if self._include_video:
             # 平移自 app/video/worker.py:必须先 import stages 注册七阶 handler
             # (原地 mutate STAGE_HANDLERS),否则自链首阶段即 KeyError。延迟导入:
@@ -177,6 +184,9 @@ class Supervisor:
         if self._video_scheduler is not None:
             await self._video_scheduler.stop()
             self._video_scheduler = None
+        if self._archive_reaper is not None:
+            await self._archive_reaper.stop()
+            self._archive_reaper = None
         if self._placeholder_reaper is not None:
             await self._placeholder_reaper.stop()
             self._placeholder_reaper = None

@@ -308,11 +308,13 @@ class PublishScheduler:
             # C1 守卫:非 publishing 态不落 —— 复活的重复 runner / 已 cancel 的 job 不被覆盖
             if job.status != "publishing":
                 return
+            _archive_after_publish = False
             if result.success:
                 job.status = "published"
                 job.note_id = result.note_id
                 job.note_url = result.note_url
                 job.error = None
+                _archive_after_publish = True  # 提交后事后归档(见 commit 之后)
             elif getattr(result, "need_manual_login", False):
                 # I1:需人工登录 —— 重试也只会反复 SSO 失败,直接终态 failed,不排重试、不增 retries
                 job.status = "failed"
@@ -341,6 +343,18 @@ class PublishScheduler:
                     job.started_at = None
                     job.error = result.error
             await session.commit()
+        # 内容资产库:发布成功自动归档(all 模式回滚位;终态已 commit,归档事后独立,
+        # sync 归档下沉线程不卡事件循环;幂等 + 绝不抛错阻断)。
+        if _archive_after_publish:
+            try:
+                from app.services import browser_jobs_repo
+                from app.services.content_archive import archive_published_job
+
+                await asyncio.to_thread(
+                    archive_published_job, browser_jobs_repo.current_db_path(), job_id
+                )
+            except Exception:  # noqa: BLE001 — 归档绝不阻断发布终态
+                logger.warning(f"[content_archive] scheduler 归档 job={job_id} 异常(忽略)")
 
     def start(self) -> None:
         """启动 lifespan 循环:起队列 worker,后台协程每 poll 周期 recover_stale→scan→submit。"""

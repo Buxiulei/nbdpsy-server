@@ -5,6 +5,7 @@
 """
 
 from app.models.browser_job import BrowserJob
+from app.models.content_archive import ContentArchive
 from app.models.note_deletion import NoteDeletion
 from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
@@ -20,6 +21,7 @@ __all__ = [
     "XhsAccount",
     "PublishJob",
     "BrowserJob",
+    "ContentArchive",
     "NoteDeletion",
     "NoteMetric",
     "NoteMetricDaily",
