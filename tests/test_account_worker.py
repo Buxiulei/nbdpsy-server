@@ -591,3 +591,45 @@ def test_publish_materializes_images_before_publish(wdb, monkeypatch):
     assert image_paths == ["/local/a.png"]
     assert topics == ["#心理"]
     assert _get_job(engine, job_id).status == "published"
+
+
+def test_publish_success_triggers_auto_archive(wdb, monkeypatch):
+    """自动归档钩子:发布 published 后,account_worker 自动把内容归档进 content_archive
+    (source_publish_job_id=该 job),归档函数收到正确 db_path+job_id。绝不阻断发布终态。"""
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(engine, account_id)
+    _patch_publish_once(monkeypatch, PublishResult(success=True, note_url="https://xhs/9"))
+
+    seen = {}
+
+    def fake_archive(dbp, jid):
+        seen["args"] = (dbp, jid)
+        return 42
+
+    # account_worker 在 published 分支内 from ... import archive_published_job 后调用,
+    # patch 源模块函数即命中(延迟 import 取的是模块属性)。
+    monkeypatch.setattr(
+        "app.services.content_archive.archive_published_job", fake_archive
+    )
+
+    aw.run_publish_job(db_path, account_id, job_id)
+
+    assert _get_job(engine, job_id).status == "published"  # 发布正常终态
+    assert seen["args"] == (db_path, job_id)  # 归档钩子被调,参数正确
+
+
+def test_auto_archive_failure_does_not_break_publish(wdb, monkeypatch):
+    """归档抛异常绝不回滚发布:钩子炸了,job 仍稳定 published(终态已先落定)。"""
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(engine, account_id)
+    _patch_publish_once(monkeypatch, PublishResult(success=True))
+
+    def boom(dbp, jid):
+        raise RuntimeError("归档炸了")
+
+    monkeypatch.setattr("app.services.content_archive.archive_published_job", boom)
+
+    aw.run_publish_job(db_path, account_id, job_id)  # 不应抛
+    assert _get_job(engine, job_id).status == "published"  # 发布仍成功
