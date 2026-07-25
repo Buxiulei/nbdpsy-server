@@ -28,6 +28,16 @@ from app.core.config import settings
 _LOCK_FILES = ("lock", ".parentlock")
 # 需一并清理的 cookie 数据库及其 WAL/SHM 边车(否则 WAL 可回放出旧 cookie)
 _COOKIE_FILES = ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm")
+# 需一并清理的站点侧状态:HTTP 缓存 + Web 存储
+# ``cache2`` 是**必清项**(2026-07-25 RCA 实测的真凶):Firefox 会把 ark 的 401 响应缓存下来,
+# 之后每次启动都从缓存重放 401 → 创作页判"登录失效"踢人。其余为 Web 存储残留,一并清干净。
+_STORAGE_PATHS = (
+    "cache2",                     # HTTP 缓存(缓存住的 401 会被重放,必清)
+    "storage",                    # localStorage / IndexedDB / cacheStorage 全家
+    "storage.sqlite",             # 存储配额与站点条目索引
+    "serviceworker.txt",          # Service Worker 注册表
+    "webappsstore.sqlite",        # 老式 localStorage 库
+)
 
 
 def browser_profiles_root() -> Path:
@@ -87,6 +97,37 @@ def delete_cookies_db(profile_dir: Path) -> None:
                 logger.info(f"[profile_guard] 已删除旧 cookie 文件: {cookie_path}")
         except OSError as e:
             logger.warning(f"[profile_guard] 删除 cookie 文件失败: {cookie_path} - {e}")
+
+
+def delete_web_storage(profile_dir: Path) -> None:
+    """启动前清站点侧状态(HTTP 缓存 cache2 + localStorage/IndexedDB/SW),缺失不报错。
+
+    RCA 2026-07-25(账号2 发布连败,同码同网同时刻账号5 却秒过):创作页上传成功、编辑器
+    已打开,但 0.6s 内被踢到 ``login?redirectReason=401``(触发者是千帆商家后台
+    ``ark.xiaohongshu.com`` 权限探测返 401,创作页把任意 401 当成登录态失效)。逐项证伪了
+    图片体积/张数/格式、上传方式(set_input_files 与真点按钮+file_chooser 同样被踢)、
+    网络出口(sing-box 实证 camoufox 27/27 走 direct-out、出口北京)、cookie/token
+    (剔除 access-token-* 无效)。**决定性对照**:同码同网同时刻,账号5 秒过、账号2 必挂;
+    清掉账号2 的 ``cache2`` 后立刻转好(step3 0.0s 驻留,token 一个没动)——**真凶是 Firefox
+    把 ark 的 401 响应缓存进了 cache2**,之后每次启动都从缓存重放 401,页面遂判登录失效踢人。
+    账号5 从没打过 ark、缓存里没有那条 401,所以一直正常。
+
+    与既有 ``delete_cookies_db`` 同源纪律(每次启动清站点侧残留、只认本次注入的 cookie),
+    把清理面从 cookie 扩到 HTTP 缓存 + Web 存储。代价是每次重下静态资源(秒级),换发布可靠。
+    """
+    import shutil
+
+    for name in _STORAGE_PATHS:
+        target = profile_dir / name
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+                logger.info(f"[profile_guard] 已清 Web 存储目录: {target}")
+            elif target.exists():
+                target.unlink()
+                logger.info(f"[profile_guard] 已清 Web 存储文件: {target}")
+        except OSError as e:
+            logger.warning(f"[profile_guard] 清 Web 存储失败: {target} - {e}")
 
 
 def sanitize_launch_options(opts: dict) -> dict:

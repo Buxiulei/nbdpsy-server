@@ -31,6 +31,7 @@ from app.browser.login_detector import DETECT_LOGIN_JS, GET_USER_INFO_JS
 from app.browser.profile_guard import (
     clean_locks,
     delete_cookies_db,
+    delete_web_storage,
     kill_orphans,
     profile_dir,
     sanitize_launch_options,
@@ -238,6 +239,9 @@ class SyncClient:
             pdir.mkdir(parents=True, exist_ok=True)
             clean_locks(pdir)
             delete_cookies_db(pdir)
+            # 站点侧陈旧存储(SW 缓存/旧登录残留)会让创作页按过期商家身份打 ark → 401 踢登录
+            # → 上传后编辑器被摧毁(job14 RCA,详见 delete_web_storage 文档串)
+            delete_web_storage(pdir)
 
             # headed 模式:动态把 DISPLAY/XAUTHORITY 指向 roots 当前真实图形会话(真屏 4090),
             # 不依赖 systemd 硬编码——会话 display 号/auth 变动或回落 greeter 时自动跟随/告警。

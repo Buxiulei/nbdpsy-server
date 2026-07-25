@@ -824,6 +824,10 @@ class XHSPublishAtomicTasks:
                     logger.info(f"仍在等待... ({waited}/{max_wait}秒)")
                     self._take_screenshot(f"06_waiting_{waited}s")
 
+            # 编辑器没等到:走草稿箱恢复(图已上传成 XHS 草稿,把它继续编辑即可拿回编辑器)
+            if self._recover_editor_from_draft():
+                return {"success": True, "edit_page_loaded": True, "recovered_from_draft": True}
+
             return {
                 "success": False,
                 "error": f"等待超时({max_wait}秒),未找到编辑界面或继续编辑按钮",
@@ -932,6 +936,84 @@ class XHSPublishAtomicTasks:
                     logger.warning(f"URL 兜底失败: {e}")
             self.human.wait(1.2, 2.0, context="等图文模式渲染")
         return self._image_mode_ready()
+
+    def _recover_editor_from_draft(self) -> bool:
+        """草稿箱恢复:进草稿箱点最新图文草稿的「编辑」,拿回带图的编辑器。成功返 True。
+
+        RCA 2026-07-25(job14 连败,抓包实证):set_input_files 上传其实**成功**,编辑器也
+        确实打开了(实测 +0.3s 标题框在位、缩略图已渲染);但编辑器一打开,创作页会去问
+        千帆商家后台 ``ark.xiaohongshu.com/api/edith/.../trade_note/permission`` 与商品实验
+        开关——我们是普通内容号无商家权限,ark 返 **401**,而创作页的全局拦截器把任意 401
+        当成"整个登录态失效",同一毫秒跳 ``login?redirectReason=401``;SSO 秒回发布页,但
+        编辑器状态已丢、页面重置回视频 tab,只在草稿箱留下一篇带图草稿。
+
+        401 拦不住(实测 page/context.route 都拦不到这些请求;cookie 也确实带全了,是 ark
+        真拒绝),故不与平台对抗:直接把那篇草稿捡回来继续编辑——图已在里面,后续
+        step5/6/7 照常。只点**最上面一篇**(刚建的那篇);点不动就放弃走原失败路径。
+        """
+        try:
+            entry = self.page.evaluate(r"""() => {
+                for (const el of document.querySelectorAll('span,div')) {
+                    const m = (el.textContent || '').trim().match(/^草稿箱\((\d+)\)$/);
+                    if (m) { const r = el.getBoundingClientRect();
+                        if (r.width > 0) return {n: +m[1], x: r.x + r.width/2, y: r.y + r.height/2}; }
+                }
+                return null;
+            }""")
+            if not entry or entry["n"] <= 0:
+                logger.info("[草稿恢复] 草稿箱为空,放弃恢复")
+                return False
+            logger.info(f"[草稿恢复] 草稿箱 {entry['n']} 篇,进箱找最新图文草稿")
+            self.human.click((entry["x"], entry["y"]), reason="草稿箱")
+            self.human.wait(1.5, 2.2, context="草稿箱加载")
+
+            tab = self.page.evaluate(r"""() => {
+                for (const el of document.querySelectorAll('div,span,li')) {
+                    const m = (el.textContent || '').trim().match(/^图文笔记\((\d+)\)$/);
+                    if (m) { const r = el.getBoundingClientRect();
+                        if (r.width > 0) return {n: +m[1], x: r.x + r.width/2, y: r.y + r.height/2}; }
+                }
+                return null;
+            }""")
+            if not tab or tab["n"] <= 0:
+                logger.info("[草稿恢复] 无图文草稿,放弃恢复")
+                return False
+            self.human.click((tab["x"], tab["y"]), reason="图文笔记 tab")
+            self.human.wait(1.2, 1.8, context="图文草稿列表")
+
+            # 取最上面(最新)一篇的「编辑/继续编辑」按钮
+            btns = self.page.evaluate(r"""() => {
+                const out = [];
+                for (const el of document.querySelectorAll('*')) {
+                    const own = Array.from(el.childNodes).filter(n => n.nodeType === 3)
+                        .map(n => n.nodeValue.trim()).join('');
+                    if (own === '继续编辑' || own === '编辑') {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0)
+                            out.push({x: r.x + r.width/2, y: r.y + r.height/2, y0: r.y});
+                    }
+                }
+                out.sort((a, b) => a.y0 - b.y0);
+                return out.slice(0, 1);
+            }""")
+            if not btns:
+                logger.info("[草稿恢复] 未找到「编辑」按钮,放弃恢复")
+                return False
+            self.human.click((btns[0]["x"], btns[0]["y"]), reason="继续编辑最新草稿")
+
+            # 条件等待编辑器回来(命中即走,最多 20s)
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                time.sleep(0.5)
+                if self._check_edit_page_loaded():
+                    logger.info("✓ [草稿恢复] 编辑器已恢复(草稿内图片在位)")
+                    self._take_screenshot("06_recovered_from_draft")
+                    return True
+            logger.warning("[草稿恢复] 点了继续编辑但编辑器未出现,放弃")
+            return False
+        except Exception as e:  # noqa: BLE001 — 恢复是兜底,失败不额外制造异常
+            logger.warning(f"[草稿恢复] 异常(忽略,走原失败路径): {e}")
+            return False
 
     def _find_continue_edit_button(self) -> Optional[ElementHandle]:
         """查找'继续编辑'按钮。"""
