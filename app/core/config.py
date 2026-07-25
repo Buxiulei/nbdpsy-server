@@ -133,9 +133,13 @@ class Settings(BaseSettings):
     ARCHIVE_REAP_INTERVAL: int = 21600
 
     # ── 笔记数据定时采集(note_metrics_scheduler)──
-    # 扫描间隔(秒,0=关闭)。语义是"每天每号最多自动采 1 次"(今天有快照/已尝试即跳过),
+    # 扫描间隔(秒,0=关闭)。语义:每号每天最多自动采 3 次,失败等比退避(1h→2h);
     # 间隔只决定断档后多快补上,默认 1h。
     NOTE_METRICS_INTERVAL: int = 3600
+
+    # ── 草稿箱周清理(draft_clean_scheduler)──
+    # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
+    DRAFT_CLEAN_INTERVAL: int = 86400
 
     # ── API/Worker 进程拆分(设计:docs/design/2026-07-24-api-worker-split-design.md)──
     # 进程角色:api=只挂 REST 路由;worker=只跑任务消费;all=兼跑(开发/测试/单进程小部署)。

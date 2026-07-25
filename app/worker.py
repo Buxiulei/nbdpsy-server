@@ -33,6 +33,7 @@ from app.core.config import settings
 from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
 from app.services.content_archive import ArchiveReaper
+from app.services.draft_clean import DraftCleanScheduler
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
 
@@ -117,6 +118,7 @@ class Supervisor:
         self._placeholder_reaper: PlaceholderReaper | None = None
         self._archive_reaper: ArchiveReaper | None = None
         self._note_metrics_scheduler: NoteMetricsScheduler | None = None
+        self._draft_clean_scheduler: DraftCleanScheduler | None = None
         self._video_scheduler = None
 
     # ---------------- 生命周期 ----------------
@@ -171,6 +173,11 @@ class Supervisor:
                 self._session_factory, settings.NOTE_METRICS_INTERVAL
             )
             self._note_metrics_scheduler.start()
+        if settings.DRAFT_CLEAN_INTERVAL > 0:
+            self._draft_clean_scheduler = DraftCleanScheduler(
+                self._session_factory, settings.DRAFT_CLEAN_INTERVAL
+            )
+            self._draft_clean_scheduler.start()
         if self._include_video:
             # 平移自 app/video/worker.py:必须先 import stages 注册七阶 handler
             # (原地 mutate STAGE_HANDLERS),否则自链首阶段即 KeyError。延迟导入:
@@ -191,6 +198,9 @@ class Supervisor:
         if self._video_scheduler is not None:
             await self._video_scheduler.stop()
             self._video_scheduler = None
+        if self._draft_clean_scheduler is not None:
+            await self._draft_clean_scheduler.stop()
+            self._draft_clean_scheduler = None
         if self._note_metrics_scheduler is not None:
             await self._note_metrics_scheduler.stop()
             self._note_metrics_scheduler = None

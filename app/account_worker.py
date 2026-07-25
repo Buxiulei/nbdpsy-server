@@ -323,6 +323,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_delete
 
         return lambda account_id, payload: note_delete.execute(account_id, payload)
+    if kind == "draft_clean":
+        from app.services import draft_clean
+
+        return lambda account_id, payload: draft_clean.execute(account_id, payload)
     if kind == "op_images":
         from app.services import op_images
 
