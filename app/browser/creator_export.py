@@ -219,6 +219,17 @@ def _open_data_board(page, account_id: int, max_attempts: int = 3) -> None:
     publish_url = "https://creator.xiaohongshu.com/publish/publish?source=official"
     home_url = "https://creator.xiaohongshu.com/creator/home"
 
+    # Fast-path:cookie 双域已登录 creator,直接 goto 数据看板首页,菜单就绪即返回
+    # (实测 ~1.3s vs 传统 publish_url 预热+重试 warm-up 36s)。失败才回退慢 warm-up。
+    try:
+        page.goto(home_url, wait_until="domcontentloaded", timeout=40000)
+        page.locator(_DATA_MENU_SELECTOR).first.wait_for(state="visible", timeout=6000)
+        logger.info("[creator_export] 账号%s: 数据看板就绪(fast-path 直连)", account_id)
+        return
+    except Exception:
+        logger.info(
+            "[creator_export] 账号%s: fast-path 未就绪,回退 publish_url 预热 warm-up", account_id)
+
     for attempt in range(1, max_attempts + 1):
         _goto_creator(page, publish_url)  # 触发 creator SSO
         _goto_creator(page, home_url)     # 数据看板首页
@@ -262,25 +273,8 @@ def export_notes(
     # 合规:导出流程也是真实账号上的 XHS 交互,所有点击走 SyncHumanActions 拟人化。
     human = SyncHumanActions(page)
     try:
-        # 1) 主站预热:让浏览器对主站 cookies 完成一次握手(失败不致命)。
-        try:
-            page.goto(
-                "https://www.xiaohongshu.com",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            try:
-                page.wait_for_load_state("networkidle", timeout=3000)  # SPA 常吃满,缩短(见 _goto_creator)
-            except Exception:
-                pass
-            human.wait(0.8, 2.0, context="主站预热握手")
-        except Exception as exc:
-            logger.warning(
-                "[creator_export] 账号%s: 主站预热异常: %s;继续 warm-up",
-                account_id, exc,
-            )
-
-        # 2) creator warm-up + 等数据看板就绪(≤3 轮,失败抛 need_manual_login)。
+        # start() 已 goto explore 完成主站 cookie 握手,无需在此重复预热(省 goto 主站+等待
+        # ~5-8s);直接进 creator warm-up —— _open_data_board 内 fast-path 直连数据看板。
         _open_data_board(page, account_id)
 
         # 3) 点「数据看板」→「内容分析」。

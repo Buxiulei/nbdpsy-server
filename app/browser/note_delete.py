@@ -144,6 +144,17 @@ _FIND_CONFIRM_JS = r"""
 
 def _open_note_manage(page, human: SyncHumanActions, account_id: int) -> None:
     """creator warm-up 建 SSO(goto publish 页)→ goto 笔记管理页 → 等状态 tab 就绪。"""
+    # Fast-path:cookie 双域已登录 creator,直接 goto 笔记管理页,状态 tab 就绪即返回
+    # (与 export 数据看板同理,实测直连 ~1.3s vs publish_url 预热 warm-up 数十秒)。失败才回退。
+    try:
+        page.goto("https://creator.xiaohongshu.com/new/note-manager",
+                  wait_until="domcontentloaded", timeout=40000)
+        page.locator(_MANAGE_READY_SELECTOR).first.wait_for(state="visible", timeout=6000)
+        logger.info(f"[note_delete] 账号{account_id}: 笔记管理页就绪(fast-path 直连)")
+        return
+    except Exception:
+        logger.info(f"[note_delete] 账号{account_id}: fast-path 未就绪,回退 publish_url 预热 warm-up")
+
     for attempt in range(1, 4):
         _goto_creator(
             page, "https://creator.xiaohongshu.com/publish/publish?source=official")
