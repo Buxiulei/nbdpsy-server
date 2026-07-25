@@ -302,14 +302,24 @@ def export_notes(
         #    自愈即便定位成功也已超时。故 with 体内只做 click。
         # 空表 fail-fast:当天新发的笔记次日才进数据看板;表无数据行时点「导出数据」
         # 不产生任何下载 → 30s download 超时,报错语义误导(实测 RCA 2026-07-23 生意经)。
-        # 先数表格数据行,空表直接以明确 reason 收口,不再点导出白等。
-        try:
-            row_cnt = page.evaluate(
-                "() => document.querySelectorAll("
-                "'.d-table tbody tr, table tbody tr, [class*=table] [class*=row]').length"
-            )
-        except Exception:
-            row_cnt = -1  # 数不出来不拦路,照旧走导出
+        # ⚠️ 必须**轮询**而非单发快照(实测 RCA 2026-07-25 聊心理 28 篇误报 no_data):
+        # 表格数据是点「内容分析」后异步 API 加载,渲染时刻波动(实测有时 1s 内、有时 >2.2s);
+        # 单次数行撞上未渲染窗口 → 数到 0 → 有数据的账号被误判空表。故条件等待:行一出现
+        # 立即通过,满 12s 仍 0 行才判真空表(空表账号多付 12s 属错误路径,可接受)。
+        row_cnt = -1
+        _row_deadline = time.monotonic() + 12.0
+        while time.monotonic() < _row_deadline:
+            try:
+                row_cnt = page.evaluate(
+                    "() => document.querySelectorAll("
+                    "'.d-table tbody tr, table tbody tr, [class*=table] [class*=row]').length"
+                )
+            except Exception:
+                row_cnt = -1  # 数不出来不拦路,照旧走导出
+                break
+            if row_cnt > 0:
+                break
+            time.sleep(0.5)
         if row_cnt == 0:
             raise CreatorExportError(
                 "no_data: 数据看板暂无笔记数据(新发笔记通常次日才入看板),无文件可导出"
