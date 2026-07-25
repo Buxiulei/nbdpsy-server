@@ -10,6 +10,7 @@ HTTP 代理。核心是 ``generate_batch`` 的**锚点法**:第 1 张(P1)当高�
 """
 import asyncio
 import base64
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -45,6 +46,21 @@ _MODERATION_KEYWORDS = (
     "rejected as a result of our safety",
 )
 
+# 限流(429)的兜底文案关键词,同 moderation 的双层判定理由:走国内中转时结构化
+# error 常被拍扁成纯文本,只认 openai.RateLimitError 会漏判成系统级失败直接判死。
+_RATE_LIMIT_KEYWORDS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "too many requests",
+    "限流",
+)
+
+# 429 退避重试:最多重试 3 次,基数 2s 指数退避(2s/4s/8s)+ 抖动。
+# 只对 429 重试——moderation 是 prompt 本身的问题,重试纯烧钱。
+_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_BACKOFF_BASE = 2.0
+
 
 @dataclass
 class ImageGenResult:
@@ -67,6 +83,87 @@ def _is_moderation_error(exc: Exception) -> bool:
         pass
     msg = str(exc).lower()
     return any(kw in msg for kw in _MODERATION_KEYWORDS)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """判定异常是否为上游限流 429(结构化类型/状态码/code,再兜底文案关键词)。"""
+    try:
+        from openai import RateLimitError
+
+        if isinstance(exc, RateLimitError):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and "rate_limit" in code.lower():
+        return True
+    msg = str(exc).lower()
+    return any(kw in msg for kw in _RATE_LIMIT_KEYWORDS)
+
+
+def _ratelimit_headers(exc: Exception) -> str:
+    """从 429 异常里摘出 OpenAI 的 x-ratelimit-* 响应头,拼成日志后缀(取不到返回空串)。
+
+    这些头是**我们这把 key 真实限额的唯一权威来源**(官方分档表只是参考,实际以组织
+    limits 面板/响应头为准),记下来就能据实调并发,不必靠猜。全防御:日志辅助信息
+    绝不能反过来把重试搞崩。
+    """
+    try:
+        headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+        picked = {k: v for k, v in headers.items() if "ratelimit" in k.lower()}
+        retry_after = headers.get("retry-after")
+        if retry_after:
+            picked["retry-after"] = retry_after
+        return f" | 限额头: {picked}" if picked else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _call_with_backoff(make_call, *, tag: str):
+    """执行一次上游图像调用(带超时),仅对 429 做指数退避重试。
+
+    ``make_call`` 是零参协程工厂(每次重试重新发起请求)。moderation 与其它异常
+    一律原样抛出交由调用方分层;重试耗尽也抛出最后一次异常。
+    """
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            return await asyncio.wait_for(
+                make_call(), timeout=settings.OPENAI_IMAGE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            retryable = _is_rate_limit_error(exc) and not _is_moderation_error(exc)
+            if not retryable or attempt >= _RATE_LIMIT_MAX_RETRIES:
+                raise
+            # 抖动:并发多路同时撞限额时错开重试,避免整齐撞回同一秒再次 429
+            delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+            delay += random.uniform(0, delay / 2)
+            logger.warning(
+                f"[openai_image] 限流 429 {tag},{delay:.1f}s 后重试"
+                f"({attempt + 1}/{_RATE_LIMIT_MAX_RETRIES}): {exc}{_ratelimit_headers(exc)}")
+            await asyncio.sleep(delay)
+
+
+def _log_usage(response: Any, *, kind: str, index: int) -> None:
+    """把上游返回的 usage 落一行日志(成本核算用)。
+
+    中转实现常不返回 usage(为 None 或缺字段),此处全防御——记录 usage 绝不能
+    反过来把一次已成功的生图弄失败。
+    """
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            logger.info(f"[openai_image] usage({kind}[{index}]): 上游未返回")
+            return
+        logger.info(
+            f"[openai_image] usage({kind}[{index}]): "
+            f"input={getattr(usage, 'input_tokens', None)} "
+            f"output={getattr(usage, 'output_tokens', None)} "
+            f"total={getattr(usage, 'total_tokens', None)} "
+            f"input_details={getattr(usage, 'input_tokens_details', None)}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[openai_image] usage 记录失败(忽略): {exc}")
 
 
 class OpenAIImageProvider:
@@ -133,15 +230,15 @@ class OpenAIImageProvider:
             return ImageGenResult(success=False, error="openai_image_client_unavailable")
         size = ASPECT_RATIO_TO_OPENAI_SIZE.get(aspect_ratio, "1024x1024")
         try:
-            response = await asyncio.wait_for(
-                client.images.generate(
+            response = await _call_with_backoff(
+                lambda: client.images.generate(
                     model=settings.OPENAI_IMAGE_MODEL,
                     prompt=prompt,
                     size=size,
                     quality=settings.OPENAI_IMAGE_QUALITY,
                     n=1,
                 ),
-                timeout=settings.OPENAI_IMAGE_TIMEOUT,
+                tag="generate",
             )
         except Exception as exc:  # noqa: BLE001
             # 错误分层:安全审查拦截是"prompt 本身有问题"的业务信号;其余是系统级失败。
@@ -150,6 +247,7 @@ class OpenAIImageProvider:
                 return ImageGenResult(success=False, error=f"moderation_blocked: {exc}")
             logger.error(f"[openai_image] 生成失败: {exc}")
             return ImageGenResult(success=False, error=f"openai_image_call_failed: {exc}")
+        _log_usage(response, kind="generate", index=0)
         if not response.data:
             return ImageGenResult(success=False, error="empty_response")
         result = self._save(response.data[0].b64_json, save_prefix)
@@ -173,6 +271,8 @@ class OpenAIImageProvider:
         - ``anchor_path`` 非空(外部已确认 P1,P1 闸门契约):跳过生成 P1,全部页
           edit 锚定该文件,返回张数 == len(prompts)。
         - 单张失败只影响该位(success=False + error),不阻断其它张。
+        - edit 段按 ``OPENAI_IMAGE_CONCURRENCY`` 有界并发发出(信号量),结果仍严格
+          按下标对齐:失败位是 success=False 占位,绝不跳过/丢弃导致后续位左移。
         """
         if not prompts:
             return []
@@ -182,6 +282,9 @@ class OpenAIImageProvider:
                     for _ in prompts]
 
         size = ASPECT_RATIO_TO_OPENAI_SIZE.get(aspect_ratio, "1024x1024")
+        # 有界并发:各页都锚同一张 P1、彼此无依赖,可并发发出;但路数必须封顶,
+        # 齐发会撞上游 429(且中转带宽有限)。信号量同时管 edit 段与降级段。
+        sem = asyncio.Semaphore(max(1, settings.OPENAI_IMAGE_CONCURRENCY))
 
         # ── 锚点来源二选一 ──
         if anchor_path:
@@ -200,49 +303,87 @@ class OpenAIImageProvider:
                 # 锚点 P1 失败 → 整批降级独立并行(标注 consistency_fallback)
                 logger.warning(
                     f"[openai_image] 锚点 P1 生成失败,整批降级独立并行: {anchor_result.error}")
-                fallback = await asyncio.gather(*[
-                    self.generate(p, aspect_ratio=aspect_ratio, save_prefix=save_prefix)
-                    for p in prompts
-                ])
-                for r in fallback:
+
+                async def _fallback_one(p: str) -> ImageGenResult:
+                    """降级单张;失败就地转失败结果,保证该下标位不塌陷。
+
+                    与 _edit_one 同款纪律:``generate`` 里 ``_save`` 的落盘
+                    (write_bytes)在 try 之外,磁盘满/目录被并发清理会原样抛出;
+                    若让它冲进 gather,整批(含已成功、已付费的张)会一起丢。
+                    """
+                    async with sem:
+                        try:
+                            return await self.generate(
+                                p, aspect_ratio=aspect_ratio, save_prefix=save_prefix)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(f"[openai_image] 降级生成异常: {exc}")
+                            return ImageGenResult(
+                                success=False, error=f"openai_image_call_failed: {exc}")
+
+                fallback = await asyncio.gather(
+                    *[_fallback_one(p) for p in prompts], return_exceptions=True)
+                out: List[ImageGenResult] = []
+                for item in fallback:
+                    if isinstance(item, BaseException):
+                        out.append(ImageGenResult(
+                            success=False, error=f"openai_image_call_failed: {item}"))
+                    else:
+                        out.append(item)
+                for r in out:
                     r.metadata["consistency_fallback"] = True
-                return list(fallback)
+                return out
             results = [anchor_result]
             anchor_bytes = Path(anchor_result.path).read_bytes()
             edit_start = 1
 
         # anchor bytes 只读一次,所有 edit 复用同一载荷(每张都锚同一张 P1)。
+        # 是不可变 bytes 三元组而非文件句柄,并发复用不存在读游标竞争。
         anchor_file = ("anchor.png", anchor_bytes, "image/png")
 
-        for i in range(edit_start, len(prompts)):
-            try:
-                response = await asyncio.wait_for(
-                    client.images.edit(
-                        model=settings.OPENAI_IMAGE_MODEL,
-                        image=anchor_file,
-                        prompt=prompts[i],
-                        size=size,
-                        quality=settings.OPENAI_IMAGE_QUALITY,
-                        n=1,
-                    ),
-                    timeout=settings.OPENAI_IMAGE_TIMEOUT,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if _is_moderation_error(exc):
-                    logger.warning(f"[openai_image] edit 内容审查拦截[{i}]: {exc}")
-                    results.append(ImageGenResult(
-                        success=False, error=f"moderation_blocked: {exc}"))
-                else:
+        async def _edit_one(i: int) -> ImageGenResult:
+            """第 i 张 edit;失败就地转成失败结果返回,保证该下标位不塌陷。"""
+            async with sem:
+                try:
+                    response = await _call_with_backoff(
+                        lambda: client.images.edit(
+                            model=settings.OPENAI_IMAGE_MODEL,
+                            image=anchor_file,
+                            prompt=prompts[i],
+                            size=size,
+                            quality=settings.OPENAI_IMAGE_QUALITY,
+                            n=1,
+                        ),
+                        tag=f"edit[{i}]",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if _is_moderation_error(exc):
+                        logger.warning(f"[openai_image] edit 内容审查拦截[{i}]: {exc}")
+                        return ImageGenResult(
+                            success=False, error=f"moderation_blocked: {exc}")
                     logger.error(f"[openai_image] edit 失败[{i}]: {exc}")
-                    results.append(ImageGenResult(
-                        success=False, error=f"openai_image_edit_failed: {exc}"))
-                continue
-            if not response.data:
-                results.append(ImageGenResult(success=False, error="empty_response"))
-                continue
-            r = self._save(response.data[0].b64_json, save_prefix)
-            if r.success:
-                r.metadata = {"size": size, "consistency": "anchor"}
-            results.append(r)
+                    return ImageGenResult(
+                        success=False, error=f"openai_image_edit_failed: {exc}")
+                _log_usage(response, kind="edit", index=i)
+                if not response.data:
+                    return ImageGenResult(success=False, error="empty_response")
+                r = self._save(response.data[0].b64_json, save_prefix)
+                if r.success:
+                    r.metadata = {"size": size, "consistency": "anchor"}
+                return r
+
+        # gather 保序:edits[k] 恒对应 prompts[edit_start + k]。return_exceptions 兜住
+        # per-item try 之外的漏网异常,一律转失败占位——下标位绝不可被跳过/丢弃,
+        # 否则下游按下标落 P01.png…PNN.png 会整体错位。
+        edits = await asyncio.gather(
+            *[_edit_one(i) for i in range(edit_start, len(prompts))],
+            return_exceptions=True,
+        )
+        for offset, item in enumerate(edits):
+            if isinstance(item, BaseException):
+                logger.error(f"[openai_image] edit 未捕获异常[{edit_start + offset}]: {item}")
+                results.append(ImageGenResult(
+                    success=False, error=f"openai_image_edit_failed: {item}"))
+            else:
+                results.append(item)
 
         return results
