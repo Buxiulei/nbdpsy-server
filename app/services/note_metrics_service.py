@@ -303,6 +303,10 @@ async def account_trends(
             "field_notes": {
                 "指标口径": "所有指标为快照日的累计值(非当日增量);exposure=曝光,views=观看,"
                           "cover_ctr=封面点击率(XHS 原生百分数),avg_view_duration=人均观看时长(秒)",
+                "⚠️三者不可互算": "exposure/cover_ctr 是**截至昨日**的口径,views 是**实时**;"
+                            "且 cover_ctr 分子是「封面点击次数」(点了秒退计点击不计观看)、"
+                            "并排除视频下滑曝光。故 views/exposure **算不出** cover_ctr,"
+                            "两者不等是正常的,不要据此判定数据有误或互相校验。",
                 "delta": "与上一快照日的差;days_between=两快照间隔天数(快照可能断档,"
                          "日均请除以 days_between,不要默认间隔 1 天)",
                 "rates": "率值分母均为最新 views:engage_rate=(likes+collects+comments)/views;"
