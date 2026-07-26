@@ -72,9 +72,9 @@ facade 每个工具 = 读 MCP 请求头里的 apikey → httpx 打**本机** RES
 **REST 是唯一真源**,facade 不碰 DB、不复制端点逻辑(publish 的图片校验/建 job/入队全在 REST)。
 
 - 内部基址:`http://127.0.0.1:{settings.API_PORT}`(默认 8848),避免绕公网隧道。
-- apikey 获取:`from fastmcp.server.dependencies import get_http_headers`;取 `Authorization`/`X-API-Key`。
-  **实现前先小验** `get_http_headers()` 是否含 Authorization;若被默认剔除,用 `get_http_headers(include_all=True)`。
-  取不到 → 工具返回明确错误(未认证),不静默。
+- apikey 获取(已核实):`from fastmcp.server.dependencies import get_http_headers`;`get_http_headers()`
+  **默认剔除 authorization**(源码排除集含 authorization),但有 `include=` 参数专给代理转发放行——
+  用 `get_http_headers(include={"authorization", "x-api-key"})` 拿到。取不到 → 工具返回明确错误(未认证),不静默。
 - 转发:async `httpx.AsyncClient` 把 apikey 头透传到本机 REST;REST 的 ApiKeyMiddleware 再校验一次(cheap)。
 - 错误映射:REST 返回非 2xx 时,facade 把 `{"error"/"detail"}` 文案原样带回工具结果(不吞、不裸 500)。
 - 单条 tool result 控制在 claude.ai 上限(~150k 字符)内;list 类端点 REST 本就有 limit。
