@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.0 (2026-07-26)
+
+**每用户风格档案**(style profile):视觉调性从写死在 skill 里的全局常量,变成按 apikey
+认人的个人资产 —— 现有莫兰迪三色 + 固定人物卡降级为「管理员默认档案」,每个运营可有
+完全自主的一套(配色 / 人物形象 / 版式 / 语气 / 信息密度)。
+
+- 两表:`style_profiles`(当前态,operator 唯一)+ `style_profile_versions`
+  (append-only 完整快照,`(operator_id, version)` 唯一)。存快照而非 diff,回退一步到位。
+- 5 端点:`GET /api/style-profile`(带 **`exists`** 区分「有个人档案」与「没有、这是
+  管理员的」——skill 安装引导据此决定说哪句话)/ `PUT`(乐观锁)/ `GET /versions`(轻,
+  不含全文)/ `GET /versions/{v}`(预览)/ `POST /rollback`。
+- **回退 = 以旧版内容造新版本,不是拨版本指针**:回退 v3 产生 v8,v4–v7 仍在历史里,
+  「回退后又后悔」还能回去。历史长期保存不清理,只在删除运营账号时级联清空
+  (SQLite 不开 `PRAGMA foreign_keys` 就不真级联,故清空在 `delete_operator` 应用层显式做)。
+- **乐观锁补 TOCTOU 兜底**:前置校验「读 current_version → 比对 base_version」与写入
+  不是原子的,两个会话同时带同版本时**双方都能通过校验**,最后只有唯一约束拦得住 ——
+  但它抛 `IntegrityError` 会冒成 **500**,而契约承诺 409。现撞唯一键转正牌
+  `VersionConflict`(带 `current_version` 供 skill 提示重读)。变异验证:摘掉该分支
+  新增的竞态回归测试立刻变红。
+- `profile` **原样存取**、不校验语义、不做 key 规范化:`density` 那五个中文 key
+  (信息密度档位 / 每页文字量 / 每页信息点 / 版式档 / 运营原话)是 skill 侧 v1.37.0
+  定死的跨端契约,改写成英文即断链。仅校大小(64 KB 上限,超限报错**不静默截断**)。
+
 ## 0.9.0 (2026-07-26)
 
 笔记数据**逐字段口径随数据下发**(`meta.field_meta`),防 LLM 数分 agent 望文生义。

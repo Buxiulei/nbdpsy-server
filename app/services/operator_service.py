@@ -6,7 +6,8 @@ RBAC 管理面的业务核心。约定:
 - apikey 只在 create/rotate 时返回一次明文;库内仅存 SHA256 hash
   (见 app.core.security),明文永不落库。
 - grant_access 幂等:命中既有授权即返回,不违反 (operator_id, xhs_account_id) 唯一约束。
-- delete_operator 先清该运营者的全部 access 行再删本体(应用层级联,不依赖 DB 外键)。
+- delete_operator 先清该运营者的全部 access 行与风格档案(当前档案 + 历史版本)再删本体
+  (应用层级联,不依赖 DB 外键)。
 """
 
 from sqlalchemy import delete, select
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import NotFoundError
 from app.core.security import generate_apikey, hash_apikey
 from app.models.operator import Operator, OperatorAccountAccess
+from app.models.style_profile import StyleProfile, StyleProfileVersion
 
 
 async def create_operator(
@@ -62,12 +64,21 @@ async def update_operator(
 
 
 async def delete_operator(session: AsyncSession, id: int) -> None:
-    """删除运营者并级联清除其全部账号授权行;运营者不存在时静默(幂等)。"""
+    """删除运营者并级联清除其全部账号授权行 + 风格档案(当前档案与全部历史版本)。
+
+    运营者不存在时静默(幂等)。风格档案的 FK 虽已声明 ondelete=CASCADE,但 SQLite 只有
+    在连接上执行 PRAGMA foreign_keys=ON 才真正执行级联,而本仓 app/core/db.py 的连接
+    pragma 只设 journal_mode/busy_timeout——**不能只靠 DB 约束**,否则删号后档案变孤儿行。
+    """
     await session.execute(
         delete(OperatorAccountAccess).where(
             OperatorAccountAccess.operator_id == id
         )
     )
+    await session.execute(
+        delete(StyleProfileVersion).where(StyleProfileVersion.operator_id == id)
+    )
+    await session.execute(delete(StyleProfile).where(StyleProfile.operator_id == id))
     op = await session.get(Operator, id)
     if op is not None:
         await session.delete(op)

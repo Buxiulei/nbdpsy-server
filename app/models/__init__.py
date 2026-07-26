@@ -11,6 +11,7 @@ from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.psych_glossary import PsychGlossary
 from app.models.publish_job import PublishJob
+from app.models.style_profile import StyleProfile, StyleProfileVersion
 from app.models.upload_batch import UploadBatch
 from app.models.video_job import VideoJob
 from app.models.xhs_account import XhsAccount
@@ -28,4 +29,6 @@ __all__ = [
     "UploadBatch",
     "VideoJob",
     "PsychGlossary",
+    "StyleProfile",
+    "StyleProfileVersion",
 ]
