@@ -122,3 +122,70 @@ async def test_trends_empty_account(smk):
         pkg = await account_trends(s, _admin(), acc.id)
     assert pkg["account_daily"] == [] and pkg["notes"] == []
     assert pkg["meta"]["latest_snapshot_date"] is None
+
+
+# ── 逐字段口径元数据(field_meta)随数据下发 ──────────────────────────────
+
+async def test_field_meta_ships_with_data(smk):
+    """13 个字段 + 派生字段都要有口径;未核实的必须显式 unknown 而非留空或猜。"""
+    from app.services.note_metrics_service import _METRIC_FIELDS
+
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        pkg = await account_trends(s, _admin(), acc_id)
+
+    fm = pkg["meta"]["field_meta"]
+    # 11 个平台指标字段全覆盖
+    for f in _METRIC_FIELDS:
+        assert f in fm, f"字段 {f} 缺口径"
+        assert fm[f]["window"] in ("T", "T-1", "unknown"), fm[f]
+        assert fm[f]["source"] in ("platform", "derived")
+        assert fm[f].get("label")
+    # 派生字段也要标口径
+    for f in ("engage_rate", "follow_rate", "delta", "days_between"):
+        assert f in fm, f"派生字段 {f} 缺口径"
+
+
+async def test_verified_windows_match_official_wording(smk):
+    """已核实字段的 window 必须与平台原文一致(抄错等于埋雷)。"""
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        fm = (await account_trends(s, _admin(), acc_id))["meta"]["field_meta"]
+
+    # 实时(截止目前)
+    for f in ("views", "likes", "comments", "collects"):
+        assert fm[f]["window"] == "T", f
+        assert "实时" in fm[f]["desc"], f
+    # 每天更新(截至昨日)
+    for f in ("exposure", "cover_ctr", "follows"):
+        assert fm[f]["window"] == "T-1", f
+        assert "每天更新" in fm[f]["desc"], f
+
+
+async def test_unverified_fields_are_explicit_unknown(smk):
+    """未核实的字段:window=unknown 且 desc 为 None——绝不猜一个值糊弄 agent。"""
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        fm = (await account_trends(s, _admin(), acc_id))["meta"]["field_meta"]
+
+    # reposts 是唯一未核实的:当前导出表根本没有这列,恒为 0
+    assert fm["reposts"]["window"] == "unknown"
+    assert "无此列" in fm["reposts"]["desc"]
+    # 其余 10 个平台字段都已从平台 ⓘ 抄到原文,不得留 unknown
+    for f in ("exposure", "views", "cover_ctr", "likes", "comments", "collects",
+              "follows", "shares", "avg_view_duration", "danmu"):
+        assert fm[f]["window"] in ("T", "T-1"), f
+        assert fm[f]["desc"], f
+
+
+async def test_follow_rate_cross_window_trap_is_flagged(smk):
+    """follow_rate 是 T-1 分子 ÷ T 分母,必须显式标出这个陷阱(否则 agent 会当真实转化率)。"""
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        fm = (await account_trends(s, _admin(), acc_id))["meta"]["field_meta"]
+
+    assert "T-1" in fm["follow_rate"]["window"] or "混合" in fm["follow_rate"]["window"]
+    assert "不同期" in fm["follow_rate"]["desc"]
+    # engage_rate 反之:四者同为 T,不该被标成陷阱
+    assert fm["engage_rate"]["window"] == "T"
+    assert "口径一致" in fm["engage_rate"]["desc"]

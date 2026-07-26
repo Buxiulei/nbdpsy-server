@@ -218,6 +218,100 @@ def _rates(m: dict) -> dict:
     }
 
 
+# ── 逐字段口径元数据(随数据下发,LLM 数分 agent 直接读,不必外部文档)──────────
+#
+# **纪律:desc/window 只写在创作中心「内容分析」表头悬停 ⓘ **抄来的官方原文**;
+# 抄不到的一律 window="unknown" + desc=None,绝不猜——猜一个 T-1 比留空更危险,
+# agent 会当真据此推算(这正是 cover_ctr 那类误判的成因)。
+#
+# window 取值:"T"=实时(截止目前) / "T-1"=每天更新(截至昨日) / "unknown"=未核实
+# source 取值:"platform"=平台导出原生列 / "derived"=我们算的
+_FIELD_META: dict = {
+    # ── 平台原生列(2026-07-26 逐个悬停 ⓘ 抄录)──
+    "exposure": {
+        "label": "曝光", "unit": "次", "window": "T-1", "source": "platform",
+        "desc": "每天更新数据,该篇笔记截至昨日获得的曝光数之和",
+    },
+    "views": {
+        "label": "观看", "unit": "次", "window": "T", "source": "platform",
+        "desc": "实时更新数据,笔记截止目前的观看数",
+    },
+    "cover_ctr": {
+        "label": "封面点击率", "unit": "百分数(如 18.7 表示 18.7%)",
+        "window": "T-1", "source": "platform",
+        "desc": "每天更新数据,该篇笔记截至昨日的封面点击次数÷封面曝光次数(视频下滑不计入)",
+    },
+    "likes": {
+        "label": "点赞", "unit": "个", "window": "T", "source": "platform",
+        "desc": "实时更新数据,笔记截止目前的点赞数",
+    },
+    "comments": {
+        "label": "评论", "unit": "条", "window": "T", "source": "platform",
+        "desc": "实时更新数据,笔记截止目前的评论数",
+    },
+    "collects": {
+        "label": "收藏", "unit": "个", "window": "T", "source": "platform",
+        "desc": "实时更新数据,笔记截止目前的收藏数",
+    },
+    "follows": {
+        "label": "涨粉", "unit": "人", "window": "T-1", "source": "platform",
+        "desc": "每天更新数据,当前作品截至目前每日新增直接涨粉数的加和",
+    },
+    "shares": {
+        "label": "分享", "unit": "次", "window": "T", "source": "platform",
+        "desc": "实时更新数据,当前作品截至目前累计分享数",
+    },
+    "avg_view_duration": {
+        "label": "人均观看时长", "unit": "秒", "window": "T-1", "source": "platform",
+        "desc": "每天更新数据,笔记被观看的平均时长",
+    },
+    "danmu": {
+        "label": "弹幕", "unit": "条", "window": "T", "source": "platform",
+        "desc": "实时更新数据,笔记截止目前的弹幕数(竖屏视频弹幕来自老版本用户)",
+    },
+    "reposts": {
+        "label": "转载", "unit": "次", "window": "unknown", "source": "platform",
+        "desc": "当前导出表中无此列,恒为 0(保留字段,勿据此分析)",
+    },
+    # ── 我们算的派生字段 ──
+    "like_rate": {
+        "label": "点赞率(派生)", "unit": "比率(0-1)", "window": "T", "source": "derived",
+        "desc": "likes / views;分子分母同为实时 T,口径一致",
+    },
+    "collect_rate": {
+        "label": "收藏率(派生)", "unit": "比率(0-1)", "window": "T", "source": "derived",
+        "desc": "collects / views;分子分母同为实时 T,口径一致",
+    },
+    "comment_rate": {
+        "label": "评论率(派生)", "unit": "比率(0-1)", "window": "T", "source": "derived",
+        "desc": "comments / views;分子分母同为实时 T,口径一致",
+    },
+    "engage_rate": {
+        "label": "互动率(派生)", "unit": "比率(0-1)", "window": "T", "source": "derived",
+        "desc": "(likes+collects+comments) / views;四者同为实时 T,口径一致",
+    },
+    "follow_rate": {
+        "label": "涨粉率(派生)", "unit": "比率(0-1)", "window": "混合(T-1/T)",
+        "source": "derived",
+        "desc": "⚠️ follows(T-1,每天更新) / views(T,实时)——**分子分母不同期**,"
+                "会系统性偏低,且笔记越新偏得越多。与 cover_ctr 同类陷阱,"
+                "仅可用于同一快照日内横向比较,不可当作真实转化率的绝对值。",
+    },
+    "delta": {
+        "label": "相邻快照增量(派生)", "unit": "同各字段", "window": "跨快照差",
+        "source": "derived",
+        "desc": "本快照日各量指标减去上一快照日;**务必配合 days_between 日均化**"
+                "(快照可能断档,不能默认间隔 1 天)。注意 T-1 口径字段(exposure/follows)"
+                "与 T 口径字段(views/likes/…)的增量含义不同期,不要跨口径相除。",
+    },
+    "days_between": {
+        "label": "两快照间隔天数(派生)", "unit": "天", "window": "跨快照差",
+        "source": "derived",
+        "desc": "本快照日与上一快照日相差的天数;为 null 表示无上一快照或日期不可解析",
+    },
+}
+
+
 async def account_trends(
     session: AsyncSession, operator: Operator, account_id: int
 ) -> dict:
@@ -300,17 +394,17 @@ async def account_trends(
             "snapshot_dates": snapshot_dates,
             "latest_snapshot_date": snapshot_dates[-1] if snapshot_dates else None,
             "notes_tracked": len(notes),
+            # 逐字段口径随数据下发:agent 拿到字段名不必望文生义,也不必查外部文档。
+            "field_meta": _FIELD_META,
             "field_notes": {
-                "指标口径": "所有指标为快照日的累计值(非当日增量);exposure=曝光,views=观看,"
-                          "cover_ctr=封面点击率(XHS 原生百分数),avg_view_duration=人均观看时长(秒)",
-                "⚠️三者不可互算": "exposure/cover_ctr 是**截至昨日**的口径,views 是**实时**;"
-                            "且 cover_ctr 分子是「封面点击次数」(点了秒退计点击不计观看)、"
-                            "并排除视频下滑曝光。故 views/exposure **算不出** cover_ctr,"
-                            "两者不等是正常的,不要据此判定数据有误或互相校验。",
-                "delta": "与上一快照日的差;days_between=两快照间隔天数(快照可能断档,"
-                         "日均请除以 days_between,不要默认间隔 1 天)",
-                "rates": "率值分母均为最新 views:engage_rate=(likes+collects+comments)/views;"
-                         "views=0 时为 null",
+                "读法": "所有指标为快照日的**累计值**(非当日增量);逐字段的官方口径、"
+                       "时间窗(window)、单位、来源见 meta.field_meta。",
+                "⚠️时间窗不一致": "平台各指标更新频率不同:window='T' 是实时(截止目前),"
+                            "'T-1' 是每天更新(截至昨日),'unknown' 表示我们**未核实**"
+                            "(绝非默认值,不要当成 T 或 T-1 去推算)。"
+                            "**跨不同 window 的字段相除得到的比率不可当真实转化率**"
+                            "——分子分母不同期。已知踩坑:views/exposure 算不出 cover_ctr;"
+                            "follow_rate(follows T-1 ÷ views T)系统性偏低。",
                 "排序": "notes 按最新 views 降序;series 按 snapshot_date 升序",
             },
         },

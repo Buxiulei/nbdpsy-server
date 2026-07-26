@@ -152,8 +152,14 @@ async def test_retry_backoff_geometric(smk):
 async def test_daily_attempts_capped_at_three(smk):
     """当日已 3 次(全 error 且退避早已过)→ 次数用尽,不再补采。"""
     acc = await _add_account(smk, "耗尽号", "valid")
+    # ⚠️ 偏移必须小到「无论几点跑都还在今天(UTC)」:原写 600/500/400 分钟前,凌晨跑时
+    # 这些落到昨天被今日窗口过滤掉 → 次数不足 3 → 测试变红(实测 UTC 04:25 红)。
+    # 次数上限在 scan_once 里先于退避判定,故记录多久以前无关紧要,只要属于今天。
+    now = datetime.utcnow()
+    day_start = datetime(now.year, now.month, now.day)
     for i in range(3):
-        await _add_export_job(smk, acc, "error", minutes_ago=600 - i * 100, job_id=f"x{i}")
+        ago = min(i + 1, max(0, int((now - day_start).total_seconds() // 60) - 1))
+        await _add_export_job(smk, acc, "error", minutes_ago=ago, job_id=f"x{i}")
 
     sched = NoteMetricsScheduler(smk, interval=999)
     assert await sched.scan_once() == 0
