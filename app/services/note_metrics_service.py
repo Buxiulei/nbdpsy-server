@@ -368,16 +368,53 @@ _FIELD_NOTES: dict = {
                 "**跨不同 window 的字段相除得到的比率不可当真实转化率**"
                 "——分子分母不同期。已知踩坑:views/exposure 算不出 cover_ctr;"
                 "follow_rate(follows T-1 ÷ views T)系统性偏低。",
-    "排序": "notes 按最新 views 降序;series 按 snapshot_date 升序",
 }
+# 注:排序**不写在这里**。排序是跟端点走的(同一份 meta 挂在 /notes 与 /note-trends 上,
+# 两者 order_by 根本不同),写进共用常量就成了放之四海皆准的散文,迟早和某个端点的真实
+# order_by 不符——曾经这里写着"notes 按最新 views 降序",而 /notes 实际是入库序,数分 agent
+# 照着取 notes[:5] 当「Top5 高表现笔记」全错。现由每个调用点经 ordering= 自报真实口径。
 
 
-def field_meta_block() -> dict:
+# 只下发平台原生列的端点(/notes 两种形态)额外挂的指路条:率值只在 note-trends 有。
+# 没这句时 agent 在 field_meta 里见过 follow_rate_t1、去 notes[] 找不到,会当成数据缺失。
+_NO_RATES_NOTE = (
+    "本端点只下发平台原生指标列,**不含**派生率值(like_rate/collect_rate/comment_rate/"
+    "engage_rate/follow_rate/follow_rate_t1)与 delta 增量——field_meta 里也相应不声明它们。"
+    "要率值请调 GET /api/accounts/{account_id}/note-trends,在 notes[].rates 里取;"
+    "在本端点的 notes[] 里找不到率值**不是数据缺失**,也不是你的取值路径写错了。"
+)
+
+
+def field_meta_block(*, include_derived: bool = True, ordering: str) -> dict:
     """口径说明块(field_meta + field_notes),供任何下发指标的响应挂到 meta 里复用。
 
     口径要随数据一起下发:消费 agent 拿到裸字段名不必望文生义,也不必查外部文档。
+
+    include_derived=False 供只下发平台原生列的端点用(/notes):field_meta 收窄到它
+    **实际下发**的字段,并挂一句去哪取率值。声明了却不下发比不声明更误导——agent 会
+    照着口径去找,找不到就当数据缺失白排查一轮。
+
+    收窄的筛子是 _METRIC_FIELDS(_note_view/_daily_view 正是按它产出指标键的),不另抄
+    一份字段清单:手抄清单迟早和实际下发内容漂移,那正是本 bug 的成因。
+
+    ordering 是**必填**关键字参数:排序跟端点走,只有调用点知道自己真实的 order_by,
+    所以由它自报(必填 = 新增下发端点时想漏也漏不掉,不会默默继承一句别人的排序)。
     """
-    return {"field_meta": _FIELD_META, "field_notes": _FIELD_NOTES}
+    keys = [f for f in _FIELD_META if include_derived or f in _METRIC_FIELDS]
+    field_notes = {**_FIELD_NOTES, "排序": ordering}
+    if not include_derived:
+        field_notes["率值不在本端点"] = _NO_RATES_NOTE
+    return {
+        "field_meta": {f: _FIELD_META[f] for f in keys},
+        "field_notes": field_notes,
+    }
+
+
+# 本端点(/note-trends)的真实排序口径,随 meta 下发(见 field_meta_block 的 ordering)。
+_ORDER_ACCOUNT_TRENDS = (
+    "notes 按最新 views **降序**(notes[0] 就是当前观看最高的一篇,notes[:5] 即 Top5);"
+    "每篇的 series 按 snapshot_date 升序(最早在前);account_daily 同样按 snapshot_date 升序。"
+)
 
 
 async def account_trends(
@@ -465,7 +502,7 @@ async def account_trends(
             "snapshot_dates": snapshot_dates,
             "latest_snapshot_date": snapshot_dates[-1] if snapshot_dates else None,
             "notes_tracked": len(notes),
-            **field_meta_block(),
+            **field_meta_block(ordering=_ORDER_ACCOUNT_TRENDS),
         },
         "account_daily": account_daily,
         "notes": notes,

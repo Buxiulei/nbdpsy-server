@@ -263,6 +263,21 @@ async def save_profile(
     )
 
 
+async def get_admin_default(session: AsyncSession) -> dict:
+    """读管理员默认档案本身(operator_id IS NULL 那一行);缺行回落常量、版本记 0。
+
+    存在的理由是**留底**:这一行不进版本历史表、改了不可回退,而在此之前根本没有端点能
+    读回它——manifest 里那句"改之前请自行留底"实际做不到。回落行为与 get_profile 的
+    exists:false 分支逐字一致(同一份内容、同一个版本号),不新造一套口径。
+    """
+    row = await _admin_default_row(session)
+    return {
+        "profile": row.profile if row else ADMIN_DEFAULT_PROFILE,
+        "admin_default_version": row.version if row else 0,
+        "updated_at": _iso(row.updated_at) if row else None,
+    }
+
+
 async def save_admin_default(
     session: AsyncSession,
     *,

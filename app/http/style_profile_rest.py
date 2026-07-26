@@ -1,12 +1,14 @@
-"""style-profile 分组 REST(6 端点):每运营一份风格档案的读 / 写新版 / 列历史 / 取某版 /
-回退,外加管理员默认档案的维护入口。
+"""style-profile 分组 REST(7 端点):每运营一份风格档案的读 / 写新版 / 列历史 / 取某版 /
+回退,外加管理员默认档案的读与写。
 
 需求 /home/roots/NBDpsy/文档/2026-07-26-每用户风格档案-server需求.md。消费方是
 nbdpsy-skills 全套内容创作 skill(安装引导回读、拆解参考图后固化、对话中更新、回退)。
 
 身份一律取 current_operator()(apikey 由中间件校验后注入),**任何端点都不接受外部
 传入的 operator/account id**——档案是个人资产,路径里能传 id 就等于开了越权读的口子。
-唯一的例外是管理员默认档案端点:它写的是 operator_id IS NULL 那一行,require_admin 收口。
+唯一的例外是管理员默认档案那两个端点:它们碰的是 operator_id IS NULL 那一行,**写**由
+require_admin 收口;**读**不设 admin 门——同一份内容还没建档的运营本来就能从
+GET /api/style-profile 读到,挡了只会造成"A 路径能读、B 路径 403"的不一致。
 """
 
 from typing import Literal
@@ -99,6 +101,21 @@ MANIFEST_ENTRIES = [
                  "所以「回退后又后悔」还能再回退回去。历史永远只增不减。"
                  "dropped_keys 含义同 PUT:这次回退相对回退前少了哪些键(旧版没有的新增字段"
                  "会在这里现形),非空就跟运营确认一句。",
+    },
+    {
+        "method": "GET", "path": "/api/style-profile/admin-default",
+        "summary": "读管理员默认档案本身(改它之前的留底手段)",
+        "admin_only": False, "params": {},
+        "returns": "{profile:管理员那套,admin_default_version,updated_at}",
+        "errors": "",
+        "notes": "**PUT /api/style-profile/admin-default 之前先拉一份存起来**:那一行不进版本"
+                 "历史表、改了不可回退,留底只能靠你自己在改之前读一份。"
+                 "**别拿 GET /api/style-profile 当留底手段**:它读的是调用者自己那份,只在他"
+                 "还没有个人档案时才恰好等于默认档案——一旦他建了个人档案,同一条命令就悄悄"
+                 "变成读他自己的,照样 200 不报错,留下来的那份底却是错的。"
+                 "非管理员也能读(不设 admin 门):内容与未建档运营 GET 到的完全相同,无敏感性。"
+                 "库里还没有那一行时(未跑迁移的开发/测试库)返回内置常量、版本给 0、"
+                 "updated_at 给 null,与 GET /api/style-profile 的 exists:false 分支同口径。",
     },
     {
         "method": "PUT", "path": "/api/style-profile/admin-default",
@@ -223,6 +240,17 @@ async def rollback_style_profile_endpoint(payload: StyleProfileRollback) -> dict
             )
         except style_profile.VersionConflict as exc:
             raise _conflict(exc) from exc
+
+
+@router.get("/api/style-profile/admin-default")
+async def get_admin_default_endpoint() -> dict:
+    """读管理员默认档案本身(改它之前的留底手段);**不设 admin 门**。
+
+    不挡的理由:同一份内容,还没建个人档案的运营从 GET /api/style-profile 本来就读得到,
+    挡了只会造成"A 路径能读、B 路径 403"的不一致。仍然要过 apikey 中间件。
+    """
+    async with get_session() as session:
+        return await style_profile.get_admin_default(session)
 
 
 @router.put("/api/style-profile/admin-default")

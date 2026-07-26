@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.12.0 (2026-07-27)
+
+skill 侧第三批 + 一次安全告警的核查。**两条真缺陷是对抗验证抓出来的,不是实现阶段发现的。**
+
+**安全告警核查:`admin-default` 权限失效——不成立**
+
+消费方实测 \"operator key 打 `PUT /api/style-profile/admin-default` 返 422 而非 403\",
+判定为越权。实测证伪:他们为避免真写入而**故意不带 `profile`**,而 FastAPI 先验 body 再进 handler,
+缺字段必然在权限检查之前 422 ——**这个测法在构造上就够不到权限关**。带合法 body 的 operator key
+拿到 403,默认档案纹丝未动。全仓 admin 守卫都是 handler 内首行 `require_admin(current_operator())`
+(见 admin_rest.py),不存在漏挂,故**不改守卫写法**(只改一个反而制造真的不一致)。
+
+**采纳其系统性建议**:新增 `tests/test_admin_only_sweep.py`,拿 operator key 遍历 manifest 全部
+10 个 `admin_only` 端点断言 **只接受 403**(写成 `in (403,422)` 就等于把判别力扔掉),
+外加**完备性断言**——新增 admin_only 端点却没配合法 body 会直接变红。变异实证:
+把 `require_admin` 打成空操作后 10 个里 8 个变 200/404,证明这条防线不是恒真断言。
+
+**新增 `GET /api/style-profile/admin-default`**
+
+管理员默认档案此前**只写不读**:它不进版本历史、不可回退,manifest 却写着\"改前请自行留底\"——
+而没有任何端点能读回它,留底实际做不到。更隐蔽的是 `GET /api/style-profile` 在运营**尚未建档时
+恰好**能读到默认配置,一旦他建了档同一条命令悄悄变成读自己那份、照样 200 不报错。
+按消费方理由**不设 admin 门**(读没有敏感性,未建档者本来就能从另一条路读到同样内容,挡了反而不一致)。
+
+**「最后一个管理员」硬保护(三条等价路径)**
+
+0 个管理员 = 管理面永久瘫痪(`POST/GET/PATCH/DELETE /api/operators` 全是 admin_only)。
+`update_operator` 的降级(role→operator)与停用(enabled→false)、`delete_operator` 的删除,
+三条路径共用 `_ensure_admin_remains`:**先应用改动再在同一事务内统计**,为 0 则回滚 + 409。
+
+- **对抗验证抓到的 blocker**:delete 起初用 `if was_effective_admin` 当门,而该判断取自
+  **写事务之外的陈旧读**。三条普通并发 HTTP 请求即可绕过——DELETE 读到 bob 还是 operator →
+  另一请求把 bob 提成 admin → 第三个请求降级 root(此刻统计看到 bob 是 admin,放行)→
+  DELETE 才拿到写锁,删掉 bob 且**跳过判定** → 0 管理员(时序网格 35/120 命中,最差配置 75%)。
+  已改为**删到行就无条件判定**;真实 HTTP 并发 40 轮(5 组时序)复打该路径,0 次击穿。
+- 回归钉用确定性性质而非并发时序(并发测试必 flaky):无管理员的库里删**普通运营者**须 409 ——
+  谁把那道门加回来,这条立刻红(已变异实证)。
+
+**`/notes` 的 `field_meta` 收窄 + `field_notes["排序"]` 停止撒谎**
+
+- `field_meta` 原声明 19 字段却只下发 11 个平台原生列(6 个派生率只在 `/note-trends` 有),
+  数分 agent 照口径去找会当成数据缺失。收窄的筛子复用 `_METRIC_FIELDS` 这个真源,不是手抄清单。
+- **对抗验证抓到的 major**:同一 meta 块里 `field_notes["排序"]` 仍写着\"notes 按最新 views 降序\",
+  而 `list_notes` 实际是 `order_by(NoteMetric.id)`(入库序)、且 `/notes` 根本不下发 series。
+  真实数据实证:账号 7 的 views 序列 `[528,396,375,1664,...]` 非降序,**真 Top1 排在第 4 位**——
+  agent 取 `notes[:5]` 当 Top5 就会拿错。根因是端点相关的断言放进了端点无关的共用常量,
+  同一份 meta 挂两个端点必然对其中一个撒谎。现 `ordering` 改为**必填关键字参数**,三个调用点各说各的真话;
+  测试同时盯\"实现的真实排序\"与\"meta 的说明\",三次变异(改实现/改文案/改第三个调用点)均能致红。
+
+**已知残留(不修,记录在案)**
+
+- 硬保护的并发正确性依赖 SQLite 写事务串行。`app/core/db.py` 保留着 Postgres 迁移路径——
+  切到 PG 默认 READ COMMITTED 后两个并发事务更新不同行、互不可见,可能双双放行。**迁移那天必须重验此处。**
+- 并发 PATCH 撞上正被删除的同一行 → `StaleDataError` → 500(既有形态,非本次引入)。
+
 ## 0.11.0 (2026-07-26)
 
 skill 侧实测撞出来的第二批(数据口径 3 条 + 风格档案 4 条)。

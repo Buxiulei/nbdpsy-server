@@ -29,6 +29,20 @@ from app.services.quota import assert_operator_quota
 
 router = APIRouter()
 
+# /notes 两个分支各自的真实排序口径,随 meta 下发(field_meta_block 的 ordering 必填参数)。
+# 分开写不合并:两个分支 order_by 本来就不同,合成一句"通用排序"正是老 bug 的形状。
+_ORDER_LATEST_SNAPSHOT = (
+    "notes 按**入库顺序**(NoteMetric.id 升序)返回,**不是**按 views/点赞等任何指标排序"
+    "——notes[:5] 拿到的是最早入库的 5 篇,**不是**「Top5 高表现笔记」,"
+    "最火的一篇完全可能排在中间。要按表现取 Top N:自己按 notes[].views(或其它指标)排序,"
+    "或直接调 GET /api/accounts/{account_id}/note-trends——它已按最新 views 降序,"
+    "还带率值与逐日序列。本端点也不下发 series(逐日序列),要序列用 trend=daily 或 note-trends。"
+)
+_ORDER_TREND_DAILY = (
+    "trend 按 snapshot_date **升序**(最早在前);本形态只返所指定那一条笔记的逐日行,"
+    "不存在跨笔记排序。"
+)
+
 MANIFEST_ENTRIES = [
     {
         "method": "POST", "path": "/api/accounts/{account_id}/note-exports",
@@ -80,7 +94,8 @@ MANIFEST_ENTRIES = [
         "summary": "一次拉取该号完整趋势分析包(数分 agent 专用,免二次组装)",
         "admin_only": False, "params": {"account_id": "path,int"},
         "returns": "{account:{id,name,nickname,cookie_status}, meta:{snapshot_dates,"
-                   "latest_snapshot_date,notes_tracked,field_notes(口径说明)}, "
+                   "latest_snapshot_date,notes_tracked,field_meta(全量逐字段口径,"
+                   "含 6 个派生率 + delta/days_between),field_notes(口径说明)}, "
                    "account_daily:[{snapshot_date,note_count,7量指标合计,delta:{增量,days_between}}], "
                    "notes:[{title,publish_time,days_since_publish,latest(11指标),"
                    "rates(like/collect/comment/engage/follow_rate/follow_rate_t1),"
@@ -101,14 +116,22 @@ MANIFEST_ENTRIES = [
             "publish_time": "query,str|None(Excel 原文发布时间字符串,与 title 组成业务主键)",
             "trend": "query,str|None(=daily 且带 title+publish_time 时返日趋势;否则返最新快照列表)",
         },
-        "returns": "默认 {notes:[最新快照, ...], meta:{field_meta(逐字段口径),field_notes(读法)}};"
-                   "trend=daily+title+publish_time → {trend:[每日行, ...], meta:同上}",
+        "returns": "默认 {notes:[最新快照, ...](按入库顺序,非按表现排序), meta:{field_meta"
+                   "(只含本端点实际下发的 11 个平台原生列,不含率值),field_notes"
+                   "(读法 + 本形态真实排序口径)}};"
+                   "trend=daily+title+publish_time → {trend:[每日行, ...](按 snapshot_date 升序), "
+                   "meta:同上(排序口径换成该形态的)}",
         "errors": "403=无该号授权",
         "notes": "小红书创作中心导出无 note_id / 封面 URL,故以 (account_id, 标题, 发布时间) 三元组为"
                  "笔记业务主键;数据由 note-exports 导出落库,需该号 creator 登录态先跑过导出。"
                  "trend 缺 title/publish_time 时退化为读最新快照列表。"
-                 "meta.field_meta 给出每个指标的官方口径/时间窗(T 实时 vs T-1 截至昨日)/单位/来源,"
-                 "**分析前先读它**——跨 window 字段相除算不出真实转化率。",
+                 "meta.field_meta 给出本端点下发的每个指标的官方口径/时间窗(T 实时 vs T-1 截至昨日)/"
+                 "单位/来源,**分析前先读它**——跨 window 字段相除算不出真实转化率。"
+                 "本端点**不下发**派生率值(like_rate/engage_rate/follow_rate_t1 等)与 delta 增量,"
+                 "field_meta 里也不声明;要率值调 GET /api/accounts/{account_id}/note-trends。"
+                 "⚠️ 默认形态的 notes 是**入库顺序**(NoteMetric.id 升序),**不是**按 views 等指标排序"
+                 "——notes[:5] 是最早入库的 5 篇而非 Top5;要 Top N 自己排序,或调 note-trends"
+                 "(它按最新 views 降序)。",
     },
 ]
 
@@ -205,7 +228,11 @@ async def list_account_notes_endpoint(
     """默认读最新快照 {notes:[...]};trend=daily + title + publish_time 时读日趋势 {trend:[...]}。
 
     两种形态都附 meta(field_meta 逐字段口径 + field_notes 读法):口径随数据一起下发,
-    数分 agent 不会拿到一堆裸数字只能按"口径未知"保守处理。
+    数分 agent 不会拿到一堆裸数字只能按"口径未知"保守处理。排序口径两个形态各不相同
+    (默认=入库序、trend=snapshot_date 升序),各自经 ordering= 自报,不共用一句。
+
+    两种形态下发的都是平台原生列(最新快照 / 每日行),没有率值那一层,故 field_meta 取
+    include_derived=False 收窄到实际下发的字段 + 一句指路(率值去 note-trends 拿)。
 
     RBAC 由 note_metrics_service.list_notes / note_trend 内部 assert_account_access 收窄
     (admin 全见,operator 仅授权号,无权抛 AccessDenied → 403)。
@@ -214,9 +241,19 @@ async def list_account_notes_endpoint(
     async with get_session() as session:
         if trend == "daily" and title and publish_time:
             rows = await note_trend(session, operator, account_id, title, publish_time)
-            return {"trend": rows, "meta": field_meta_block()}
+            return {
+                "trend": rows,
+                "meta": field_meta_block(
+                    include_derived=False, ordering=_ORDER_TREND_DAILY
+                ),
+            }
         rows = await list_notes(session, operator, account_id)
-        return {"notes": rows, "meta": field_meta_block()}
+        return {
+            "notes": rows,
+            "meta": field_meta_block(
+                include_derived=False, ordering=_ORDER_LATEST_SNAPSHOT
+            ),
+        }
 
 
 @router.get("/api/accounts/{account_id}/note-trends")

@@ -1,6 +1,8 @@
 """admin 分组 REST 测试:仅 admin 可调 / apikey 生命周期 / 授权往返。"""
 
-from tests.rest_helpers import ADMIN_KEY, bearer, make_operator, rest_client, seed_account
+from tests.rest_helpers import (
+    ADMIN_KEY, bearer, get_root_admin, make_operator, rest_client, seed_account,
+)
 
 _COOKIES = [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
 
@@ -93,6 +95,72 @@ async def test_update_operator_unknown_id_404(tmp_path, monkeypatch):
         assert "error" in r.json()
 
 
+async def test_update_operator_demote_last_admin_409(tmp_path, monkeypatch):
+    """降级唯一管理员(bootstrap 的 root)→ 409 {"detail": ...},且 root 仍在岗。
+
+    管理端点全 admin_only,若放行这一改动系统就是 0 个管理员,谁都改不回来。
+    """
+    async with rest_client(tmp_path, monkeypatch) as client:
+        root = await get_root_admin()
+        r = await client.patch(
+            f"/api/operators/{root.id}",
+            json={"role": "operator"},
+            headers=bearer(ADMIN_KEY),
+        )
+        assert r.status_code == 409, r.text
+        assert "至少一个启用中的管理员" in r.json()["detail"]
+
+        # root 的 apikey 依旧管用、角色依旧是 admin → 改动确实没落库
+        r2 = await client.get("/api/operators", headers=bearer(ADMIN_KEY))
+        assert r2.status_code == 200, r2.text
+        me = next(o for o in r2.json()["operators"] if o["id"] == root.id)
+        assert me["role"] == "admin"
+        assert me["enabled"] is True
+
+
+async def test_update_operator_disable_last_admin_409(tmp_path, monkeypatch):
+    """停用唯一管理员 → 同样 409:停用与降级后果完全一样,两条路径都得堵。"""
+    async with rest_client(tmp_path, monkeypatch) as client:
+        root = await get_root_admin()
+        r = await client.patch(
+            f"/api/operators/{root.id}",
+            json={"enabled": False},
+            headers=bearer(ADMIN_KEY),
+        )
+        assert r.status_code == 409, r.text
+
+        r2 = await client.get("/api/operators", headers=bearer(ADMIN_KEY))
+        me = next(o for o in r2.json()["operators"] if o["id"] == root.id)
+        assert me["enabled"] is True
+
+
+async def test_update_operator_demote_admin_ok_when_another_admin_exists(
+    tmp_path, monkeypatch
+):
+    """先把新人提成管理员,再降级 root → 放行(系统仍有一位在岗管理员)。"""
+    async with rest_client(tmp_path, monkeypatch) as client:
+        root = await get_root_admin()
+        created = (
+            await client.post(
+                "/api/operators", json={"name": "gina", "role": "admin"},
+                headers=bearer(ADMIN_KEY),
+            )
+        ).json()
+        r = await client.patch(
+            f"/api/operators/{root.id}",
+            json={"role": "operator"},
+            headers=bearer(ADMIN_KEY),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "operator"
+
+        # 降级后 root 已非 admin,改用新管理员的 key 复核
+        r2 = await client.get("/api/operators", headers=bearer(created["apikey"]))
+        assert r2.status_code == 200, r2.text
+        me = next(o for o in r2.json()["operators"] if o["id"] == root.id)
+        assert me["role"] == "operator"
+
+
 async def test_rotate_apikey_old_dies_new_works(tmp_path, monkeypatch):
     async with rest_client(tmp_path, monkeypatch) as client:
         r = await client.post(
@@ -177,3 +245,54 @@ async def test_delete_operator(tmp_path, monkeypatch):
 
         r3 = await client.get("/api/whoami", headers=bearer(created["apikey"]))
         assert r3.status_code == 401
+
+
+async def test_delete_last_admin_409(tmp_path, monkeypatch):
+    """删唯一管理员(bootstrap 的 root)→ 409,且 root 的 key 与角色都原样可用。
+
+    与 PATCH 的降级/停用后果完全一致:放行就是 0 个管理员,而管理端点全 admin_only。
+    """
+    async with rest_client(tmp_path, monkeypatch) as client:
+        root = await get_root_admin()
+        r = await client.delete(
+            f"/api/operators/{root.id}", headers=bearer(ADMIN_KEY)
+        )
+        assert r.status_code == 409, r.text
+        assert "至少一个启用中的管理员" in r.json()["detail"]
+
+        # root 的 apikey 依旧管用、角色/启用位依旧原样 → 事务真回滚
+        r2 = await client.get("/api/operators", headers=bearer(ADMIN_KEY))
+        assert r2.status_code == 200, r2.text
+        me = next(o for o in r2.json()["operators"] if o["id"] == root.id)
+        assert me["role"] == "admin"
+        assert me["enabled"] is True
+
+
+async def test_delete_admin_ok_when_another_admin_exists(tmp_path, monkeypatch):
+    """先建第二位管理员,再删 root → 放行(系统仍有一位在岗管理员)。"""
+    async with rest_client(tmp_path, monkeypatch) as client:
+        root = await get_root_admin()
+        created = (
+            await client.post(
+                "/api/operators", json={"name": "hana", "role": "admin"},
+                headers=bearer(ADMIN_KEY),
+            )
+        ).json()
+        r = await client.delete(
+            f"/api/operators/{root.id}", headers=bearer(ADMIN_KEY)
+        )
+        assert r.status_code == 200, r.text
+        assert r.json() == {"deleted": root.id}
+
+        # root 已删,改用新管理员的 key 复核名单里确实没有它了
+        r2 = await client.get("/api/operators", headers=bearer(created["apikey"]))
+        assert r2.status_code == 200, r2.text
+        assert all(o["id"] != root.id for o in r2.json()["operators"])
+
+
+async def test_delete_unknown_id_still_200(tmp_path, monkeypatch):
+    """删不存在的运营者仍幂等返 200,新增的管理员保护不改这一语义。"""
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.delete("/api/operators/9999", headers=bearer(ADMIN_KEY))
+        assert r.status_code == 200, r.text
+        assert r.json() == {"deleted": 9999}

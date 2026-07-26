@@ -241,6 +241,105 @@ async def test_notes_ship_field_meta(tmp_path, monkeypatch):
         assert r2.json()["meta"]["field_meta"]["views"]["window"] == "T"
 
 
+async def test_notes_field_meta_only_declares_shipped_fields(tmp_path, monkeypatch):
+    """field_meta 键集合 ⊆ 实际下发字段:声明了却不下发会让数分 agent 白排查一轮。
+
+    这条子集断言本身就是防漂移闸——将来谁往 _FIELD_META 加派生字段,本端点若不真下发就红。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号G", "uG", _COOKIES)
+        title = "只报实发字段"
+        publish_time = "2026年05月22日10时"
+        await _seed_notes(
+            acc, [{"title": title, "publish_time": publish_time, "likes": 10}],
+            snapshot_date="2026-07-13",
+        )
+
+        rates = {"like_rate", "collect_rate", "comment_rate",
+                 "engage_rate", "follow_rate", "follow_rate_t1"}
+
+        # 最新快照形态
+        body = (await c.get(
+            f"/api/accounts/{acc}/notes", headers=bearer(ADMIN_KEY)
+        )).json()
+        fm = set(body["meta"]["field_meta"])
+        assert fm <= set(body["notes"][0]), f"声明了却不下发: {sorted(fm - set(body['notes'][0]))}"
+        assert not (fm & rates) and "delta" not in fm  # 率值/增量这层根本不在本端点
+        # 指路:率值去哪取,别当成数据缺失
+        joined = "".join(body["meta"]["field_notes"].values())
+        assert "note-trends" in joined and "不是数据缺失" in joined
+
+        # trend=daily 形态同样处理(每日行也没有 rates)
+        body2 = (await c.get(
+            f"/api/accounts/{acc}/notes",
+            params={"title": title, "publish_time": publish_time, "trend": "daily"},
+            headers=bearer(ADMIN_KEY),
+        )).json()
+        fm2 = set(body2["meta"]["field_meta"])
+        assert fm2 <= set(body2["trend"][0]), f"声明了却不下发: {sorted(fm2 - set(body2['trend'][0]))}"
+        assert not (fm2 & rates)
+        assert "note-trends" in "".join(body2["meta"]["field_notes"].values())
+
+
+async def test_notes_order_is_insertion_not_performance(tmp_path, monkeypatch):
+    """默认形态真按入库序下发,且 meta 的排序口径说的就是这件事(实现 + 文案双盯)。
+
+    只断文案挡不住"实现改了文案没改";只断实现挡不住 meta 继续撒谎。所以造一份
+    入库序 ≠ views 降序的数据:断言下发顺序 == 入库序 且 != views 降序(否则这条数据
+    根本区分不出两种实现),再断言 meta 里的排序口径确实点名入库序并给出 Top N 的指路。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号H", "uH", _COOKIES)
+        pub = "2026年05月22日10时"
+        # 入库序 = 下面的行序;真正的 Top1(1664)排第 3,不在 notes[0]
+        rows = [
+            {"title": "先入库的冷笔记", "publish_time": pub, "views": 528},
+            {"title": "更冷的", "publish_time": pub, "views": 396},
+            {"title": "真正的爆款", "publish_time": pub, "views": 1664},
+        ]
+        await _seed_notes(acc, rows, snapshot_date="2026-07-13")
+
+        body = (await c.get(
+            f"/api/accounts/{acc}/notes", headers=bearer(ADMIN_KEY)
+        )).json()
+        got = [n["views"] for n in body["notes"]]
+        assert got == [528, 396, 1664]  # 入库序
+        assert got != sorted(got, reverse=True)  # 这份数据确实能区分两种实现
+        assert body["notes"][0]["title"] == "先入库的冷笔记"  # notes[0] 不是 Top1
+
+        order_note = body["meta"]["field_notes"]["排序"]
+        assert "入库" in order_note  # 说的是真实口径
+        assert "note-trends" in order_note  # 且指路:要 Top N 去哪拿
+
+
+async def test_notes_trend_order_note_matches_real_order(tmp_path, monkeypatch):
+    """trend=daily 真按 snapshot_date 升序(与入库序相反也不受影响),meta 口径同步说对。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号I", "uI", _COOKIES)
+        title, pub = "逆序入库的笔记", "2026年05月22日10时"
+        # 故意先入库晚的快照日,再入库早的:升序是排序结果,不是入库序的副产品
+        await _seed_notes(
+            acc, [{"title": title, "publish_time": pub, "views": 90}],
+            snapshot_date="2026-07-14",
+        )
+        await _seed_notes(
+            acc, [{"title": title, "publish_time": pub, "views": 30}],
+            snapshot_date="2026-07-12",
+        )
+
+        body = (await c.get(
+            f"/api/accounts/{acc}/notes",
+            params={"title": title, "publish_time": pub, "trend": "daily"},
+            headers=bearer(ADMIN_KEY),
+        )).json()
+        assert [d["snapshot_date"] for d in body["trend"]] == ["2026-07-12", "2026-07-14"]
+
+        order_note = body["meta"]["field_notes"]["排序"]
+        assert "snapshot_date" in order_note and "升序" in order_note
+        # 本形态没有"按 views 降序"这回事,别把别的端点的口径抄过来
+        assert "入库" not in order_note
+
+
 # ---------------- 防漂移(局部子集) ----------------
 
 

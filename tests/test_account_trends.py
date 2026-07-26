@@ -124,6 +124,45 @@ async def test_trends_empty_account(smk):
     assert pkg["meta"]["latest_snapshot_date"] is None
 
 
+async def test_trends_notes_sorted_by_latest_views_desc(smk):
+    """notes 真按最新 views 降序,且 meta 的排序口径说的就是这件事(实现 + 文案双盯)。
+
+    _seed 里 A/B 的入库序恰好等于 views 降序,区分不出"排了"还是"没排";这里故意让
+    入库序与 views 降序相反,顺序对了才说明真排过。series 同理:先入库晚的快照日。
+    """
+    async with smk() as s:
+        acc = XhsAccount(name="号S", cookie_status="valid")
+        s.add(acc)
+        await s.commit()
+        acc_id = acc.id
+        pub = "2026年07月01日10时00分00秒"
+        # 入库序 冷→热(30/500/120),views 降序应为 热(500)→中(120)→冷(30)
+        for title, views, dates in (
+            ("冷", 30, ("2026-07-25",)),
+            ("热", 500, ("2026-07-25", "2026-07-23")),  # 晚的快照日先入库
+            ("中", 120, ("2026-07-25",)),
+        ):
+            s.add(NoteMetric(account_id=acc_id, title=title, publish_time=pub,
+                             views=views, updated_at=datetime.utcnow()))
+            for d in dates:
+                s.add(_daily(acc_id, title, pub, d, views=views))
+        await s.commit()
+
+    async with smk() as s:
+        pkg = await account_trends(s, _admin(), acc_id)
+
+    got = [n["latest"]["views"] for n in pkg["notes"]]
+    assert got == [500, 120, 30]  # 真按最新 views 降序
+    assert got != [30, 500, 120]  # 这份数据确实能区分"排了"和"照入库序原样返回"
+    # series 按 snapshot_date 升序(与入库序相反,升序才是排出来的)
+    hot = next(n for n in pkg["notes"] if n["title"] == "热")
+    assert [r["snapshot_date"] for r in hot["series"]] == ["2026-07-23", "2026-07-25"]
+
+    order_note = pkg["meta"]["field_notes"]["排序"]
+    assert "降序" in order_note and "views" in order_note
+    assert "snapshot_date" in order_note and "升序" in order_note
+
+
 # ── 逐字段口径元数据(field_meta)随数据下发 ──────────────────────────────
 
 async def test_field_meta_ships_with_data(smk):
@@ -144,6 +183,25 @@ async def test_field_meta_ships_with_data(smk):
     # 派生字段也要标口径
     for f in ("engage_rate", "follow_rate", "delta", "days_between"):
         assert f in fm, f"派生字段 {f} 缺口径"
+
+
+async def test_trends_field_meta_keeps_all_six_rates(smk):
+    """本端点是率值的唯一出处:六个派生率的口径必须全在,且 notes[].rates 真的下发。
+
+    /notes 的 field_meta 已收窄成只声明平台原生列,这里不能跟着一起少。
+    """
+    six = ("like_rate", "collect_rate", "comment_rate",
+           "engage_rate", "follow_rate", "follow_rate_t1")
+
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        pkg = await account_trends(s, _admin(), acc_id)
+
+    fm = pkg["meta"]["field_meta"]
+    for f in six:
+        assert f in fm, f"派生率 {f} 缺口径"
+    # 声明=下发:六个率在数据里也都有键(值可为 null)
+    assert set(six) <= set(pkg["notes"][0]["rates"])
 
 
 async def test_verified_windows_match_official_wording(smk):

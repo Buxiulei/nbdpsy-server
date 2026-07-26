@@ -346,6 +346,8 @@ async def test_delete_operator_cascades_style_profile(db):
     """删运营账号 → 其当前档案与全部历史版本级联清空(应用层级联,不靠 SQLite 外键)。"""
     from app.services import operator_service
 
+    # 背景管理员:delete_operator 的"最后一个管理员"硬保护删到行就判定,无管理员的库会 409
+    await operator_service.create_operator(db, "在岗boss", role="admin")
     op, _key = await operator_service.create_operator(db, "苏澜")
     other, _ = await operator_service.create_operator(db, "旁人")
     await svc.save_profile(db, op.id, base_version=0, profile=_profile("A"),
@@ -542,6 +544,80 @@ async def test_admin_default_write_is_live_for_operators_without_profile(tmp_pat
                 .where(StyleProfile.operator_id.is_(None))
             )).scalar_one()
             assert rows == 1  # 默认档案永远只有一行
+
+
+# ---------------- 读回管理员默认档案(改它之前的留底手段) ----------------
+
+
+async def test_get_admin_default_reads_seed_row(tmp_path, monkeypatch):
+    """库里有 operator_id IS NULL 那一行时,读到它的内容与版本(而非内置常量)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-admindefault-seed"
+        await make_operator(key)
+        async with db_module.async_session() as s:
+            s.add(StyleProfile(
+                operator_id=None, version=7, profile=_profile("SEED"),
+                source="admin_default", note="seed",
+            ))
+            await s.commit()
+
+        r = await c.get("/api/style-profile/admin-default", headers=bearer(key))
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["profile"] == _profile("SEED")
+        assert data["admin_default_version"] == 7
+        assert data["updated_at"]
+
+
+async def test_get_admin_default_reflects_admin_write(tmp_path, monkeypatch):
+    """没那一行时回落常量(版本 0 / updated_at 空);管理员改过之后读到新内容与递增后的版本。
+
+    这正是"留底"要的:改之前拉一份存起来,改之后能验证拉到的确实是新的那份。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-admindefault-write"
+        await make_operator(key)
+
+        before = (await c.get("/api/style-profile/admin-default",
+                              headers=bearer(key))).json()
+        assert before["profile"] == svc.ADMIN_DEFAULT_PROFILE
+        assert before["admin_default_version"] == 0
+        assert before["updated_at"] is None
+
+        wrote = await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY),
+                            json={"profile": _profile("新默认"), "note": "换全局调性"})
+        assert wrote.status_code == 200, wrote.text
+
+        after = (await c.get("/api/style-profile/admin-default",
+                             headers=bearer(key))).json()
+        assert after["profile"] == _profile("新默认")
+        assert after["admin_default_version"] == wrote.json()["version"] == 1
+        assert after["updated_at"] == wrote.json()["updated_at"]
+
+
+async def test_get_admin_default_is_not_admin_only(tmp_path, monkeypatch):
+    """非管理员(role=operator)也能读:不是 403,且内容与他未建档时 GET 到的完全相同。
+
+    末尾同时钉死这个端点存在的理由:他一旦建了个人档案,GET /api/style-profile 就悄悄
+    变成读他自己那份(照样 200 不报错),拿它当留底手段会存下一份错的底;
+    admin-default 读到的始终是默认档案本身。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-admindefault-operator"
+        await make_operator(key)
+
+        r = await c.get("/api/style-profile/admin-default", headers=bearer(key))
+        assert r.status_code == 200, r.text
+        own = (await c.get("/api/style-profile", headers=bearer(key))).json()
+        assert own["exists"] is False
+        assert r.json()["profile"] == own["profile"]
+
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("自己的"), "source": "manual"})
+        assert (await c.get("/api/style-profile", headers=bearer(key))
+                ).json()["profile"] == _profile("自己的")  # 同一条命令,内容悄悄换了人
+        assert (await c.get("/api/style-profile/admin-default", headers=bearer(key))
+                ).json()["profile"] == svc.ADMIN_DEFAULT_PROFILE  # 这条始终是默认档案
 
 
 # ---------------- 历史列表分页(历史长期保存,一年可能几百版) ----------------

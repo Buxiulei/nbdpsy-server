@@ -61,16 +61,20 @@ MANIFEST_ENTRIES = [
         "summary": "[管理员] 局部更新运营者 role/enabled/name(留空的字段不改)",
         "admin_only": True, "params": {"operator_id": "path,int", "name": "body,str,可选", "role": "body,operator|admin,可选", "enabled": "body,bool,可选"},
         "returns": "{id, name, role, enabled}",
-        "errors": "403=非管理员;404=运营者不存在",
-        "notes": "",
+        "errors": "403=非管理员;404=运营者不存在;409=该改动会让系统一个启用中的管理员都不剩(注意键是 detail)",
+        "notes": "系统硬保证至少留一位 role=admin 且 enabled=true 的管理员:降级最后一位管理员"
+                 "(role→operator)与停用最后一位管理员(enabled→false)都会被拒 409,库内不留改动。"
+                 "要动最后一位,请先把别人设为管理员。",
     },
     {
         "method": "DELETE", "path": "/api/operators/{operator_id}",
         "summary": "[管理员] 删除运营者并级联清除其账号授权",
         "admin_only": True, "params": {"operator_id": "path,int"},
         "returns": "{deleted: operator_id}",
-        "errors": "403=非管理员",
-        "notes": "",
+        "errors": "403=非管理员;409=删掉这一位会让系统一个启用中的管理员都不剩(注意键是 detail)",
+        "notes": "删除最后一位有效管理员(role=admin 且 enabled=true)会被拒 409,库内不留改动"
+                 "(授权行、风格档案一并回滚);要删最后一位,请先把别人设为管理员。"
+                 "运营者不存在时静默成功(幂等)。",
     },
     {
         "method": "POST", "path": "/api/operators/{operator_id}/rotate-apikey",
