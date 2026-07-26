@@ -189,3 +189,86 @@ async def test_follow_rate_cross_window_trap_is_flagged(smk):
     # engage_rate 反之:四者同为 T,不该被标成陷阱
     assert fm["engage_rate"]["window"] == "T"
     assert "口径一致" in fm["engage_rate"]["desc"]
+
+
+# ── follow_rate_t1:同窗涨粉率(分母换成上一快照日的 views)──────────────────
+
+async def test_follow_rate_t1_uses_previous_snapshot_views(smk):
+    """分母取上一快照日的 views(07-23 的 50),不是最新 views(80)。"""
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        pkg = await account_trends(s, _admin(), acc_id)
+
+    note_a = pkg["notes"][0]
+    assert note_a["title"] == "A"
+    assert note_a["rates"]["follow_rate_t1"] == round(1 / 50, 4)
+    # 跨窗版仍按最新 views 算 → 必然更低,这个差正是要暴露给运营的偏差
+    assert note_a["rates"]["follow_rate"] == round(1 / 80, 4)
+
+
+async def test_follow_rate_t1_none_without_earlier_snapshot(smk):
+    """只有一个快照日 → 没有同窗分母 → null(绝不拿最新 views 顶替)。"""
+    async with smk() as s:
+        acc = XhsAccount(name="号C", cookie_status="valid")
+        s.add(acc)
+        await s.commit()
+        acc_id = acc.id
+        pub = "2026年07月20日10时00分00秒"
+        s.add(_daily(acc_id, "新篇", pub, "2026-07-25", views=40, follows=2))
+        s.add(NoteMetric(account_id=acc_id, title="新篇", publish_time=pub,
+                         views=40, follows=2, updated_at=datetime.utcnow()))
+        await s.commit()
+    async with smk() as s:
+        rates = (await account_trends(s, _admin(), acc_id))["notes"][0]["rates"]
+
+    assert rates["follow_rate_t1"] is None
+    assert rates["follow_rate"] == round(2 / 40, 4)
+
+
+async def test_follow_rate_t1_none_when_previous_views_zero(smk):
+    """上一快照日 views=0(发布当天还没观看)→ null,不除零也不硬凑。"""
+    async with smk() as s:
+        acc = XhsAccount(name="号D", cookie_status="valid")
+        s.add(acc)
+        await s.commit()
+        acc_id = acc.id
+        pub = "2026年07月24日09时00分00秒"
+        s.add(_daily(acc_id, "当日篇", pub, "2026-07-24", views=0))
+        s.add(_daily(acc_id, "当日篇", pub, "2026-07-25", views=60, follows=3))
+        s.add(NoteMetric(account_id=acc_id, title="当日篇", publish_time=pub,
+                         views=60, follows=3, updated_at=datetime.utcnow()))
+        await s.commit()
+    async with smk() as s:
+        rates = (await account_trends(s, _admin(), acc_id))["notes"][0]["rates"]
+
+    assert rates["follow_rate_t1"] is None
+    assert rates["follow_rate"] == round(3 / 60, 4)
+
+
+def test_follow_rate_t1_key_always_present():
+    """键恒定存在(含 views=0 的全 None 分支)——字段集合稳定,拿不到是 null 而非缺键。"""
+    from app.services.note_metrics_service import _rates
+
+    assert _rates({"views": 0})["follow_rate_t1"] is None
+    assert _rates({"views": 10, "follows": 1})["follow_rate_t1"] is None
+
+
+async def test_follow_rate_meta_quantifies_bias_and_points_to_t1(smk):
+    """follow_rate 的 desc 要给出方向/量级/弱样本标注/不可用窗口并指向 t1;t1 自身要写残余误差。"""
+    acc_id = await _seed(smk)
+    async with smk() as s:
+        fm = (await account_trends(s, _admin(), acc_id))["meta"]["field_meta"]
+
+    desc = fm["follow_rate"]["desc"]
+    assert "偏低" in desc                       # 方向
+    assert "18.2%" in desc and "n=69" in desc   # 实测量级
+    assert "n=1" in desc and "n=4" in desc      # 弱证据必须标出,不许当结论
+    assert "无意义" in desc                     # 发布当天/次日根本不能用
+    assert "follow_rate_t1" in desc             # 有出路
+
+    t1 = fm["follow_rate_t1"]
+    assert t1["window"] == "T-1" and t1["source"] == "derived"
+    assert t1["unit"] == "比率(0-1)" and "派生" in t1["label"]
+    assert "偏高" in t1["desc"] and "null" in t1["desc"]  # 诚实写残余误差与缺值
+    # engage_rate 已核实同窗:给 skill 侧一个能结案的明确说法
+    assert "已核实同窗" in fm["engage_rate"]["desc"]

@@ -210,6 +210,37 @@ async def test_notes_trend(tmp_path, monkeypatch):
         assert [d["likes"] for d in trend] == [10, 25]
 
 
+async def test_notes_ship_field_meta(tmp_path, monkeypatch):
+    """口径随数据下发:两种形态都带 meta.field_meta,且 notes/trend 键结构不变。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号F", "uF", _COOKIES)
+        title = "带口径的笔记"
+        publish_time = "2026年05月22日10时"
+        await _seed_notes(
+            acc, [{"title": title, "publish_time": publish_time, "likes": 10}],
+            snapshot_date="2026-07-13",
+        )
+
+        r = await c.get(f"/api/accounts/{acc}/notes", headers=bearer(ADMIN_KEY))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["notes"][0]["title"] == title  # 原有键结构不动
+        fm = body["meta"]["field_meta"]
+        # 裸数字不再没口径:窗口不同的两个代表字段都能查到
+        assert fm["views"]["window"] == "T"
+        assert fm["follows"]["window"] == "T-1"
+        assert body["meta"]["field_notes"]
+
+        # trend 形态同样带 meta
+        r2 = await c.get(
+            f"/api/accounts/{acc}/notes",
+            params={"title": title, "publish_time": publish_time, "trend": "daily"},
+            headers=bearer(ADMIN_KEY),
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["meta"]["field_meta"]["views"]["window"] == "T"
+
+
 # ---------------- 防漂移(局部子集) ----------------
 
 

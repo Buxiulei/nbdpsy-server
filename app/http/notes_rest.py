@@ -19,7 +19,12 @@ from app.core.errors import NotFoundError
 from app.http.cookies_rest import _decrypt_account_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import note_delete, note_export
-from app.services.note_metrics_service import account_trends, list_notes, note_trend
+from app.services.note_metrics_service import (
+    account_trends,
+    field_meta_block,
+    list_notes,
+    note_trend,
+)
 from app.services.quota import assert_operator_quota
 
 router = APIRouter()
@@ -78,7 +83,8 @@ MANIFEST_ENTRIES = [
                    "latest_snapshot_date,notes_tracked,field_notes(口径说明)}, "
                    "account_daily:[{snapshot_date,note_count,7量指标合计,delta:{增量,days_between}}], "
                    "notes:[{title,publish_time,days_since_publish,latest(11指标),"
-                   "rates(like/collect/comment/engage/follow_rate),series:[逐日行+delta]}]}",
+                   "rates(like/collect/comment/engage/follow_rate/follow_rate_t1),"
+                   "series:[逐日行+delta]}]}",
         "errors": "403=无该号授权",
         "notes": "为数据分析设计:指标全是快照日累计值;delta=与上一快照日的差,带 days_between"
                  "(快照可能断档,日均要除以它);rates 分母是最新 views,views=0 时 null;"
@@ -95,11 +101,14 @@ MANIFEST_ENTRIES = [
             "publish_time": "query,str|None(Excel 原文发布时间字符串,与 title 组成业务主键)",
             "trend": "query,str|None(=daily 且带 title+publish_time 时返日趋势;否则返最新快照列表)",
         },
-        "returns": "默认 {notes:[最新快照, ...]};trend=daily+title+publish_time → {trend:[每日行, ...]}",
+        "returns": "默认 {notes:[最新快照, ...], meta:{field_meta(逐字段口径),field_notes(读法)}};"
+                   "trend=daily+title+publish_time → {trend:[每日行, ...], meta:同上}",
         "errors": "403=无该号授权",
         "notes": "小红书创作中心导出无 note_id / 封面 URL,故以 (account_id, 标题, 发布时间) 三元组为"
                  "笔记业务主键;数据由 note-exports 导出落库,需该号 creator 登录态先跑过导出。"
-                 "trend 缺 title/publish_time 时退化为读最新快照列表。",
+                 "trend 缺 title/publish_time 时退化为读最新快照列表。"
+                 "meta.field_meta 给出每个指标的官方口径/时间窗(T 实时 vs T-1 截至昨日)/单位/来源,"
+                 "**分析前先读它**——跨 window 字段相除算不出真实转化率。",
     },
 ]
 
@@ -195,6 +204,9 @@ async def list_account_notes_endpoint(
 ) -> dict:
     """默认读最新快照 {notes:[...]};trend=daily + title + publish_time 时读日趋势 {trend:[...]}。
 
+    两种形态都附 meta(field_meta 逐字段口径 + field_notes 读法):口径随数据一起下发,
+    数分 agent 不会拿到一堆裸数字只能按"口径未知"保守处理。
+
     RBAC 由 note_metrics_service.list_notes / note_trend 内部 assert_account_access 收窄
     (admin 全见,operator 仅授权号,无权抛 AccessDenied → 403)。
     """
@@ -202,9 +214,9 @@ async def list_account_notes_endpoint(
     async with get_session() as session:
         if trend == "daily" and title and publish_time:
             rows = await note_trend(session, operator, account_id, title, publish_time)
-            return {"trend": rows}
+            return {"trend": rows, "meta": field_meta_block()}
         rows = await list_notes(session, operator, account_id)
-        return {"notes": rows}
+        return {"notes": rows, "meta": field_meta_block()}
 
 
 @router.get("/api/accounts/{account_id}/note-trends")

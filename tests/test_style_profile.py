@@ -1,4 +1,5 @@
-"""每用户风格档案测试:exists 语义 / 版本自增留档 / 乐观锁 409 / 回退造新版 / 越权隔离。
+"""每用户风格档案测试:exists 语义 / 版本自增留档 / 乐观锁 409 / 回退造新版 / 越权隔离 /
+丢字段告知 / 管理员默认档案维护 / 历史分页 / base_version 真源。
 
 需求 /home/roots/NBDpsy/文档/2026-07-26-每用户风格档案-server需求.md。REST 用 rest_helpers
 的隔离库 client(零网络);服务层级联用 conftest 的 db fixture。
@@ -18,7 +19,7 @@ from sqlalchemy import func, select
 
 from app.models.style_profile import StyleProfile, StyleProfileVersion
 from app.services import style_profile as svc
-from tests.rest_helpers import bearer, make_operator, rest_client
+from tests.rest_helpers import ADMIN_KEY, bearer, make_operator, rest_client
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -408,3 +409,198 @@ async def test_toctou_race_surfaces_409_not_500(tmp_path, monkeypatch):
         assert resp.status_code == 409, f"撞唯一键必须转 409,实得 {resp.status_code}: {resp.text}"
         detail = resp.json()["detail"]
         assert "current_version" in detail and "updated_at" in detail, detail
+
+
+# ---------------- dropped_keys:整份覆盖丢了什么,只有 server 说得出 ----------------
+
+
+async def test_put_dropped_keys_lists_top_level_and_dotted_paths(tmp_path, monkeypatch):
+    """只想改配色却漏带其他字段 → 响应如实列出丢掉的顶层与二级键(不拦截、仍 200)。
+
+    这是需求方点名的要害:整份覆盖是既定语义,但 agent 漏字段时静默清空,运营要到下次
+    出图才发现人物卡没了,那时已查不出是哪次 PUT 弄丢的。顶层整段消失只报顶层名——
+    再展开成 tone.person 之类只是噪音。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-drop-1"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+
+        # agent 只改配色:visual 里只留 palette,tone 整段没带,density 倒是齐的
+        partial = copy.deepcopy(_profile("A"))
+        partial["visual"] = {"palette": [{"name": "暖橘", "hex": "#E8A87C"}]}
+        del partial["tone"]
+        r = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 1, "profile": partial, "source": "manual"})
+
+        assert r.status_code == 200, r.text  # 只告知,不报错
+        assert r.json()["dropped_keys"] == ["tone", "visual.text_color"]
+        # tone 整段消失只报一条,不向下展开
+        assert "tone.person" not in r.json()["dropped_keys"]
+        # 语义没变:整份覆盖照旧生效,server 不替他补回来
+        assert (await c.get("/api/style-profile", headers=bearer(key))
+                ).json()["profile"] == partial
+
+
+async def test_dropped_keys_empty_list_when_nothing_lost(tmp_path, monkeypatch):
+    """首次建档、以及字段齐全的覆盖 → dropped_keys 是空列表(不是省略这个键)。
+
+    skill 侧要能无条件 resp["dropped_keys"] 读它,省略会让它踩 KeyError。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-drop-2"
+        await make_operator(key)
+        first = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        assert first.json()["dropped_keys"] == []  # 此前无档案,无从比对
+
+        # 字段一个不少地整体回传(只换内容)→ 无丢弃
+        second = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("B"), "source": "manual"})
+        assert "dropped_keys" in second.json()
+        assert second.json()["dropped_keys"] == []
+
+
+async def test_rollback_also_reports_dropped_keys(tmp_path, monkeypatch):
+    """回退同样给 dropped_keys:回退前有、回退后没有的键在这里现形。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-drop-3"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        richer = copy.deepcopy(_profile("B"))
+        richer["extra"] = {"x": 1}  # v2 新增了一个顶层段
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 1, "profile": richer, "source": "manual"})
+
+        r = await c.post("/api/style-profile/rollback", headers=bearer(key),
+                         json={"to_version": 1, "base_version": 2})
+        assert r.status_code == 200, r.text
+        assert r.json()["dropped_keys"] == ["extra"]  # 回退等于丢掉 v2 新增的那段
+
+
+# ---------------- 管理员默认档案维护入口 ----------------
+
+
+async def test_admin_default_rejects_non_admin(tmp_path, monkeypatch):
+    """普通运营改不了管理员默认档案(它影响所有还没建档的人)→ 403,且内容没动。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-admin-1"
+        await make_operator(key)
+        r = await c.put("/api/style-profile/admin-default", headers=bearer(key),
+                        json={"profile": _profile("坏"), "note": "越权"})
+        assert r.status_code == 403, r.text
+        assert (await c.get("/api/style-profile", headers=bearer(key))
+                ).json()["profile"] == svc.ADMIN_DEFAULT_PROFILE
+
+
+async def test_admin_default_write_is_live_for_operators_without_profile(tmp_path, monkeypatch):
+    """管理员改默认档案 → 还没建档的运营下一次 GET 立刻读到新内容(实时读,不是建档快照);
+    已建个人档案的运营完全不受影响。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        plain, owner = "sp-key-admin-2", "sp-key-admin-3"
+        await make_operator(plain)
+        await make_operator(owner)
+        # owner 已有自己的档案
+        await c.put("/api/style-profile", headers=bearer(owner), json={
+            "base_version": 0, "profile": _profile("自己的"), "source": "manual"})
+
+        before = (await c.get("/api/style-profile", headers=bearer(plain))).json()
+        assert before["profile"] == svc.ADMIN_DEFAULT_PROFILE
+
+        r = await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY),
+                        json={"profile": _profile("新默认"), "note": "换全局调性"})
+        assert r.status_code == 200, r.text
+        assert r.json()["version"] == before["admin_default_version"] + 1
+        assert r.json()["source"] == "admin_default"
+        assert r.json()["note"] == "换全局调性"
+
+        after = (await c.get("/api/style-profile", headers=bearer(plain))).json()
+        assert after["exists"] is False  # 仍是"别人的档案",不能说成他自己的
+        assert after["profile"] == _profile("新默认")  # 实时跟着变
+        assert after["admin_default_version"] == r.json()["version"]
+        assert after["updated_at"] == r.json()["updated_at"]
+
+        # 已建档的运营不受牵连
+        assert (await c.get("/api/style-profile", headers=bearer(owner))
+                ).json()["profile"] == _profile("自己的")
+
+        # 再改一次 → 版本继续自增,但不进版本历史表(管理员改动不可回退,是既定取舍)
+        again = await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY),
+                            json={"profile": _profile("再改")})
+        assert again.json()["version"] == r.json()["version"] + 1
+        async with db_module.async_session() as s:
+            snapshots = (await s.execute(
+                select(func.count()).select_from(StyleProfileVersion)
+                .where(StyleProfileVersion.operator_id.is_(None))
+            )).scalar_one()
+            assert snapshots == 0
+            rows = (await s.execute(
+                select(func.count()).select_from(StyleProfile)
+                .where(StyleProfile.operator_id.is_(None))
+            )).scalar_one()
+            assert rows == 1  # 默认档案永远只有一行
+
+
+# ---------------- 历史列表分页(历史长期保存,一年可能几百版) ----------------
+
+
+async def test_versions_pagination_and_limit_cap(tmp_path, monkeypatch):
+    """limit/offset 翻页 + total/has_more;limit 超 200 直接钳到 200 而不是报错。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-page"
+        await make_operator(key)
+        for i in range(5):
+            await c.put("/api/style-profile", headers=bearer(key), json={
+                "base_version": i, "profile": _profile(str(i)), "source": "manual"})
+
+        first = (await c.get("/api/style-profile/versions?limit=2",
+                             headers=bearer(key))).json()
+        assert [v["version"] for v in first["versions"]] == [5, 4]  # 仍是倒序
+        assert first["total"] == 5
+        assert first["limit"] == 2
+        assert first["offset"] == 0
+        assert first["has_more"] is True
+
+        last = (await c.get("/api/style-profile/versions?limit=2&offset=4",
+                            headers=bearer(key))).json()
+        assert [v["version"] for v in last["versions"]] == [1]
+        assert last["offset"] == 4
+        assert last["has_more"] is False
+
+        # 超上限不报错,钳到 200;默认(不传参)一次给 50 条以内
+        capped = await c.get("/api/style-profile/versions?limit=9999", headers=bearer(key))
+        assert capped.status_code == 200, capped.text
+        assert capped.json()["limit"] == 200
+        assert capped.json()["has_more"] is False
+        default = (await c.get("/api/style-profile/versions", headers=bearer(key))).json()
+        assert default["limit"] == 50
+        assert [v["version"] for v in default["versions"]] == [5, 4, 3, 2, 1]
+
+
+# ---------------- base_version:下一次 PUT 传什么,server 说了算 ----------------
+
+
+async def test_base_version_is_single_source_of_truth(tmp_path, monkeypatch):
+    """无档案给 0、有档案给当前 version,skill 侧直接透传不必自己推(两端各推一次会分歧)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-key-base"
+        await make_operator(key)
+        empty = (await c.get("/api/style-profile", headers=bearer(key))).json()
+        assert empty["exists"] is False
+        assert empty["base_version"] == 0
+
+        # 拿它原样回传即可建档
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": empty["base_version"], "profile": _profile("A"),
+            "source": "manual"})
+        got = (await c.get("/api/style-profile", headers=bearer(key))).json()
+        assert got["base_version"] == got["version"] == 1  # version 键保留不动
+
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": got["base_version"], "profile": _profile("B"),
+            "source": "manual"})
+        assert (await c.get("/api/style-profile", headers=bearer(key))
+                ).json()["base_version"] == 2

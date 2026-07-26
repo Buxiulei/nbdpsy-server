@@ -203,11 +203,16 @@ def _delta(cur: dict, prev: dict | None) -> dict | None:
 
 
 def _rates(m: dict) -> dict:
-    """率值(分母 views,4 位小数;views=0 时全 None——新笔记零观看没有率可言)。"""
+    """率值(分母 views,4 位小数;views=0 时全 None——新笔记零观看没有率可言)。
+
+    follow_rate_t1 需要历史快照,这里算不了,恒定给 None 占位——由 account_trends 覆盖成真实值。
+    恒定带这个键是为了让消费方看到的字段集合稳定:拿不到就是 null,而不是"这个键时有时无"。
+    """
     views = m.get("views") or 0
     if views <= 0:
         return {k: None for k in
-                ("like_rate", "collect_rate", "comment_rate", "engage_rate", "follow_rate")}
+                ("like_rate", "collect_rate", "comment_rate", "engage_rate",
+                 "follow_rate", "follow_rate_t1")}
     likes, collects, comments = (m.get("likes") or 0), (m.get("collects") or 0), (m.get("comments") or 0)
     return {
         "like_rate": round(likes / views, 4),
@@ -215,7 +220,27 @@ def _rates(m: dict) -> dict:
         "comment_rate": round(comments / views, 4),
         "engage_rate": round((likes + collects + comments) / views, 4),
         "follow_rate": round((m.get("follows") or 0) / views, 4),
+        "follow_rate_t1": None,
     }
+
+
+def _follow_rate_t1(latest: dict, series: list[dict]) -> float | None:
+    """同窗涨粉率:follows(T-1)÷ 上一快照日的 views(≈截至昨日的观看),对齐分子分母口径。
+
+    series 已按 snapshot_date 升序;分母取"快照日严格早于最新快照日"的最近一行的 views。
+    没有更早快照、或该 views<=0 时返回 None(没有可用同窗分母,不猜)。
+    """
+    if len(series) < 2:
+        return None
+    latest_date = series[-1]["snapshot_date"]
+    prev_views = next(
+        (row.get("views") for row in reversed(series[:-1])
+         if row["snapshot_date"] < latest_date),
+        None,
+    )
+    if prev_views is None or prev_views <= 0:
+        return None
+    return round((latest.get("follows") or 0) / prev_views, 4)
 
 
 # ── 逐字段口径元数据(随数据下发,LLM 数分 agent 直接读,不必外部文档)──────────
@@ -288,14 +313,37 @@ _FIELD_META: dict = {
     },
     "engage_rate": {
         "label": "互动率(派生)", "unit": "比率(0-1)", "window": "T", "source": "derived",
-        "desc": "(likes+collects+comments) / views;四者同为实时 T,口径一致",
+        "desc": "(likes+collects+comments) / views;四者同为实时 T,口径一致。"
+                "已核实同窗,不存在 follow_rate 那类跨窗问题,可直接当互动转化率用。",
     },
     "follow_rate": {
         "label": "涨粉率(派生)", "unit": "比率(0-1)", "window": "混合(T-1/T)",
         "source": "derived",
-        "desc": "⚠️ follows(T-1,每天更新) / views(T,实时)——**分子分母不同期**,"
-                "会系统性偏低,且笔记越新偏得越多。与 cover_ctr 同类陷阱,"
-                "仅可用于同一快照日内横向比较,不可当作真实转化率的绝对值。",
+        "desc": "follows(T-1,每天更新,截至昨日) / views(T,实时,含今日)——**分子分母不同期**:"
+                "分母含今日观看、分子不含今日涨粉,所以**只会偏低、不会偏高**,笔记越新偏得越多。"
+                "实测偏低幅度(生产库 2026-07-25/07-26 两个连续快照日、78 条笔记,"
+                "以「当日新增观看÷累计观看」度量,该比例即本字段相对同窗算法偏低的幅度):"
+                "发布 0-2 天 中位 5.3%/最大 5.3%(**n=1,单点,不能当结论**);"
+                "3-6 天 中位 4.8%/最大 18.2%(**n=4,样本少**);"
+                "14-29 天 中位 0.0%/最大 5.9%(n=4);30 天+ 中位 0.0%/最大 4.8%(n=69)。"
+                "7-13 天档无样本。样本严重偏老(78 条里 69 条是 30 天+),新笔记两档证据弱。"
+                "**发布当天/次日的值根本不能用**:follows 是 T-1 口径,还没覆盖到发布日,"
+                "本值必然趋近 0——这不是「偏低」而是「无意义」,不要解读成涨粉能力差。"
+                "发布约两周以上:实测中位偏差 0%、最大 6%,可直接用。"
+                "要同窗口径请改用 follow_rate_t1。",
+    },
+    "follow_rate_t1": {
+        "label": "涨粉率·同窗(派生)", "unit": "比率(0-1)", "window": "T-1",
+        "source": "derived",
+        "desc": "同窗版涨粉率:follows(T-1,截至昨日) / **上一快照日**的 views"
+                "(≈截至昨日的观看),分子分母都对齐到昨日,规避 follow_rate 的跨窗偏低。"
+                "**不是精确值**:上一快照是昨天**某个时刻**采的(观看数只截到那一刻),"
+                "而 follows 覆盖到昨日 24:00,分子比分母多覆盖几小时 → 本值会**轻微偏高**。"
+                "实测与 follow_rate 之差:老笔记 +0.0%~+0.9%,一条 2 天新笔记 +5.6%。"
+                "⚠️ 上述「几小时」是按**上一快照日就是昨天**估的;快照会断档"
+                "(生产上出现过 07-23 → 07-25 隔两天),此时分母停在更早那天而分子仍到昨日,"
+                "偏高幅度按间隔天数放大。间隔看 series 里的 snapshot_date 与 delta.days_between。"
+                "该笔记没有更早的快照日(或上一快照日 views<=0)时为 null。",
     },
     "delta": {
         "label": "相邻快照增量(派生)", "unit": "同各字段", "window": "跨快照差",
@@ -310,6 +358,26 @@ _FIELD_META: dict = {
         "desc": "本快照日与上一快照日相差的天数;为 null 表示无上一快照或日期不可解析",
     },
 }
+
+_FIELD_NOTES: dict = {
+    "读法": "所有指标为快照日的**累计值**(非当日增量);逐字段的官方口径、"
+           "时间窗(window)、单位、来源见 meta.field_meta。",
+    "⚠️时间窗不一致": "平台各指标更新频率不同:window='T' 是实时(截止目前),"
+                "'T-1' 是每天更新(截至昨日),'unknown' 表示我们**未核实**"
+                "(绝非默认值,不要当成 T 或 T-1 去推算)。"
+                "**跨不同 window 的字段相除得到的比率不可当真实转化率**"
+                "——分子分母不同期。已知踩坑:views/exposure 算不出 cover_ctr;"
+                "follow_rate(follows T-1 ÷ views T)系统性偏低。",
+    "排序": "notes 按最新 views 降序;series 按 snapshot_date 升序",
+}
+
+
+def field_meta_block() -> dict:
+    """口径说明块(field_meta + field_notes),供任何下发指标的响应挂到 meta 里复用。
+
+    口径要随数据一起下发:消费 agent 拿到裸字段名不必望文生义,也不必查外部文档。
+    """
+    return {"field_meta": _FIELD_META, "field_notes": _FIELD_NOTES}
 
 
 async def account_trends(
@@ -373,12 +441,15 @@ async def account_trends(
             row["delta"] = _delta(row, prev_row)
             prev_row = row
         pub_date = _parse_publish_date(m.publish_time)
+        rates = _rates(latest)
+        # 有历史快照才算得出同窗分母,把 _rates 里的 None 占位覆盖成真实值
+        rates["follow_rate_t1"] = _follow_rate_t1(latest, series)
         notes.append({
             "title": m.title,
             "publish_time": m.publish_time,
             "days_since_publish": (today - pub_date).days if pub_date else None,
             "latest": latest,
-            "rates": _rates(latest),
+            "rates": rates,
             "series": series,
         })
     notes.sort(key=lambda n: n["latest"].get("views") or 0, reverse=True)
@@ -394,19 +465,7 @@ async def account_trends(
             "snapshot_dates": snapshot_dates,
             "latest_snapshot_date": snapshot_dates[-1] if snapshot_dates else None,
             "notes_tracked": len(notes),
-            # 逐字段口径随数据下发:agent 拿到字段名不必望文生义,也不必查外部文档。
-            "field_meta": _FIELD_META,
-            "field_notes": {
-                "读法": "所有指标为快照日的**累计值**(非当日增量);逐字段的官方口径、"
-                       "时间窗(window)、单位、来源见 meta.field_meta。",
-                "⚠️时间窗不一致": "平台各指标更新频率不同:window='T' 是实时(截止目前),"
-                            "'T-1' 是每天更新(截至昨日),'unknown' 表示我们**未核实**"
-                            "(绝非默认值,不要当成 T 或 T-1 去推算)。"
-                            "**跨不同 window 的字段相除得到的比率不可当真实转化率**"
-                            "——分子分母不同期。已知踩坑:views/exposure 算不出 cover_ctr;"
-                            "follow_rate(follows T-1 ÷ views T)系统性偏低。",
-                "排序": "notes 按最新 views 降序;series 按 snapshot_date 升序",
-            },
+            **field_meta_block(),
         },
         "account_daily": account_daily,
         "notes": notes,

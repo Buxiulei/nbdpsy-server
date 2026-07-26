@@ -17,7 +17,7 @@ import json
 from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError
@@ -95,6 +95,30 @@ def _assert_size(profile: dict) -> None:
         )
 
 
+def _dropped_keys(old: dict | None, new: dict) -> list[str]:
+    """列出相对上一版消失了的顶层与二级键(如 ``["tone", "visual.text_color"]``)。
+
+    这道比对**只有 server 做得了**:server 手上有上一版,skill 侧手上只有 agent 记得带的
+    那一份。整份覆盖不是打补丁(既定语义,不改),但"只想改配色却漏带人物卡"这种静默丢失,
+    运营往往要到下次出图才发现,那时已查不出是哪次 PUT 弄丢的——故**不拦截、不报错**,
+    只如实告知调用方本次覆盖丢了什么。
+
+    只比两层:顶层键整段消失就记顶层名、**不再向下展开**(否则整段消失会刷出一串噪音);
+    两边都在且都是 dict 时才比二级键。更深不管(skill 侧明确只要顶层与二级)。
+    """
+    if not old:  # 首次建档(此前无档案)无从比对
+        return []
+    dropped: list[str] = []
+    for key, old_value in old.items():
+        if key not in new:
+            dropped.append(key)
+            continue
+        new_value = new[key]
+        if isinstance(old_value, dict) and isinstance(new_value, dict):
+            dropped.extend(f"{key}.{sub}" for sub in old_value if sub not in new_value)
+    return sorted(dropped)
+
+
 async def _current_row(session: AsyncSession, operator_id: int) -> StyleProfile | None:
     """取该运营的当前档案行;无则 None。operator_id 恒为真实 int,取不到管理员 NULL 行。"""
     return (
@@ -104,31 +128,43 @@ async def _current_row(session: AsyncSession, operator_id: int) -> StyleProfile 
     ).scalar_one_or_none()
 
 
-async def admin_default_profile(session: AsyncSession) -> dict:
-    """管理员默认档案内容:优先读 operator_id IS NULL 的 seed 行,缺行回落到常量。
+async def _admin_default_row(session: AsyncSession) -> StyleProfile | None:
+    """管理员默认档案那一行(operator_id IS NULL);缺行返 None,由调用方回落到常量。
 
     回落不是冗余:测试与开发库走 create_all 建表(不跑 alembic),没有迁移 seed 的那一行。
     """
-    row = (
+    return (
         await session.execute(
             select(StyleProfile).where(StyleProfile.operator_id.is_(None))
         )
     ).scalars().first()
-    return row.profile if row is not None else ADMIN_DEFAULT_PROFILE
 
 
 async def get_profile(session: AsyncSession, operator_id: int) -> dict:
-    """读当前档案;无个人档案时返回管理员默认档案并显式标注 exists=False。"""
+    """读当前档案;无个人档案时返回管理员默认档案并显式标注 exists=False。
+
+    没有个人档案的运营**每次都实时读到最新的管理员默认档案**(不是建档时的快照),故管理员
+    一改所有沿用者立刻跟着变——``admin_default_version`` / ``updated_at`` 让 skill 侧能察觉
+    "默认档案变过了"。已建个人档案的运营是各自独立的内容,完全不受管理员改动影响。
+
+    ``base_version`` 是"下一次 PUT 该传什么"的唯一真源(无档案给 0),由 server 直接给出,
+    免得两端各推一次口径分歧。
+    """
     row = await _current_row(session, operator_id)
     if row is None:
+        admin_row = await _admin_default_row(session)
         return {
             "exists": False,
             "source": "admin_default",
-            "profile": await admin_default_profile(session),
+            "base_version": 0,
+            "admin_default_version": admin_row.version if admin_row else 0,
+            "updated_at": _iso(admin_row.updated_at) if admin_row else None,
+            "profile": admin_row.profile if admin_row else ADMIN_DEFAULT_PROFILE,
         }
     return {
         "exists": True,
         "version": row.version,
+        "base_version": row.version,
         "source": row.source,
         "note": row.note,
         "updated_at": _iso(row.updated_at),
@@ -151,6 +187,8 @@ async def _write_new_version(
     if base_version != current_version:
         raise VersionConflict(current_version, _iso(row.updated_at) if row else None)
     _assert_size(profile)
+    # 覆盖前先记下上一版内容,用于算本次整份覆盖丢掉了哪些键(下面 row.profile 即被改写)
+    dropped = _dropped_keys(row.profile if row is not None else None, profile)
 
     new_version = current_version + 1
     now = datetime.utcnow()
@@ -197,6 +235,8 @@ async def _write_new_version(
         "source": source,
         "note": note,
         "updated_at": _iso(now),
+        # 没丢弃时也给空列表(不省略这个键):skill 侧要能无条件读它
+        "dropped_keys": dropped,
     }
 
 
@@ -223,13 +263,65 @@ async def save_profile(
     )
 
 
-async def list_versions(session: AsyncSession, operator_id: int) -> list[dict]:
-    """历史版本列表(倒序);**不含 profile 全文**——列表要轻,预览走取某版端点。"""
+async def save_admin_default(
+    session: AsyncSession,
+    *,
+    profile: dict,
+    note: str | None,
+    updated_by: int,
+) -> dict:
+    """覆盖管理员默认档案(operator_id IS NULL 那一行);version 自增,缺行则创建。
+
+    这一行影响所有还没建档的运营(新人默认全走它),故必须有维护入口;调用方须先
+    require_admin。同样是**整份覆盖**、profile 原样存取只校大小。
+
+    **管理员默认档案不进版本历史表**:style_profile_versions.operator_id 是 NOT NULL 的
+    外键,塞 NULL 要改表结构,不值当。代价是**管理员改动不可回退**(改前请自行留底),
+    别以为它和个人档案一样能 rollback。
+    """
+    _assert_size(profile)
+    row = await _admin_default_row(session)
+    if row is None:  # create_all 建的库没有迁移 seed 的那一行,首次写即建
+        row = StyleProfile(operator_id=None, version=0)
+        session.add(row)
+    now = datetime.utcnow()
+    row.version += 1
+    row.profile = profile
+    row.source = "admin_default"
+    row.note = note
+    row.updated_at = now
+    row.updated_by = updated_by
+    await session.commit()
+    return {
+        "version": row.version,
+        "source": "admin_default",
+        "note": note,
+        "updated_at": _iso(now),
+    }
+
+
+async def count_versions(session: AsyncSession, operator_id: int) -> int:
+    """历史版本总数(分页要的 total;历史长期保存不清理,高频改风格的运营会攒到几百版)。"""
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(StyleProfileVersion)
+            .where(StyleProfileVersion.operator_id == operator_id)
+        )
+    ).scalar_one()
+
+
+async def list_versions(
+    session: AsyncSession, operator_id: int, *, limit: int = 50, offset: int = 0
+) -> list[dict]:
+    """历史版本列表(倒序分页);**不含 profile 全文**——列表要轻,预览走取某版端点。"""
     rows = (
         await session.execute(
             select(StyleProfileVersion)
             .where(StyleProfileVersion.operator_id == operator_id)
             .order_by(StyleProfileVersion.version.desc())
+            .offset(offset)
+            .limit(limit)
         )
     ).scalars().all()
     return [
