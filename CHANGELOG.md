@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.13.0 (2026-07-27)
+
+**发布口 fail-closed 去水印闸** —— 发的图必须是去过水印的,不再靠"建任务时塞进来的图恰好干净"。
+
+事故背景:生图侧的去水印(reraster 主路)**只在生图那一刻跑**;发布任务把图片以 base64 快照
+存进 `publish_jobs.images_json`,到点后 materialize 只是原样落盘上传,**整条发布链路零校验**。
+用像素级判据(纯 JPEG 重编码 ≤1.03x vs 真 reraster 1.41x)实测确认:job 14/15/16(已发)
+7/7 张全是未去水印的 provider 原图,job 23/24 各 1/8 张。
+
+- **闸设在发布口**(`app/account_worker.py` 活路径 + `app/publish/scheduler.py` 停用回滚位):
+  materialize 之后、交浏览器之前,对每张统一跑 `dewatermark_all`。发布时手上只有字节快照、
+  **判断不了某张是否已清洗**(像素判据只看得出"有没有被重采样",看不出对应原图是谁),故不猜、统一重做。
+- **fail-closed**:任一张去水印失败 → 抛异常整任务失败(落 error 排重试),**绝不降级"用原图发"**——
+  那正是事故形态。闸在 materialize 之后 = **图片来源无关**,从资产库复用再发也照样过闸。
+- 归档保留原始母版(不改):复用链路仍过闸,且从母版做一次 reraster 比"已 reraster 再 reraster"质量更好。
+
+**同批热修:reraster 不认相对路径(线上事故)**
+
+- `reraster_image` 内部 `Path(path).as_uri()` 对相对路径直接抛
+  "relative path can't be expressed as a file URI"。生图侧一直传绝对路径所以从未暴露,
+  而发布口的 workdir 是 `settings.UPLOAD_DIR` 下的**相对路径** → 07-27 09:00 那批定时发布
+  被闸全数拦下(**fail-closed 生效,没发出带水印的图,但也没发出去**)。改为 `.resolve().as_uri()`。
+- 教训:最初"拿真实待发图跑一遍闸"的验证用了 `tempfile.mkdtemp()` 的**绝对路径**,没还原生产的
+  相对路径形态,放过了这个 bug。已补相对路径回归测试 + 变异验证(去掉 resolve 立刻红)。
+- 生产验证:两条被拦任务复位重试后 published(图经去水印);18:00 job28 准点发布成功。
+
 ## 0.12.0 (2026-07-27)
 
 skill 侧第三批 + 一次安全告警的核查。**两条真缺陷是对抗验证抓出来的,不是实现阶段发现的。**

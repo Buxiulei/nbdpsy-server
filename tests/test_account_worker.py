@@ -133,6 +133,24 @@ def _patch_publish_once(monkeypatch, result_or_exc, calls=None):
     monkeypatch.setattr(aw.sync_client, "publish_once", fake_publish_once)
 
 
+def _patch_dewatermark(monkeypatch, calls=None, fail_on=None):
+    """把去水印闸的叶子(真起 chromium 的那层)换成桩,批量编排走真实 dewatermark_all。
+
+    桩按输入路径产出可区分的 ``{原路径}.shot.jpg``,便于断言顺序;``fail_on`` 命中的
+    输入返回 None(模拟 reraster 未产出),用于验 fail-closed。
+    """
+    from app.imagegen import postprocess
+
+    async def fake_dewatermark(path):
+        if calls is not None:
+            calls.append(path)
+        if fail_on is not None and path == fail_on:
+            return None
+        return f"{path}.shot.jpg"
+
+    monkeypatch.setattr(postprocess, "dewatermark", fake_dewatermark)
+
+
 # ---------------- publish:四种终态落库 ----------------
 
 
@@ -581,6 +599,7 @@ def test_publish_materializes_images_before_publish(wdb, monkeypatch):
         return [Path("/local/a.png")]
 
     monkeypatch.setattr(aw, "materialize_images", fake_materialize)
+    _patch_dewatermark(monkeypatch)
     calls = []
     _patch_publish_once(monkeypatch, PublishResult(success=True, note_id="n"), calls)
 
@@ -588,9 +607,81 @@ def test_publish_materializes_images_before_publish(wdb, monkeypatch):
 
     assert captured["materialize"][0] == ["https://cdn/a.png"]
     _, _, _, _, image_paths, topics = calls[0]
-    assert image_paths == ["/local/a.png"]
+    # 交给浏览器的是去水印后的产物,不是物料化的原图
+    assert image_paths == ["/local/a.png.shot.jpg"]
     assert topics == ["#心理"]
     assert _get_job(engine, job_id).status == "published"
+
+
+# ---------------- publish:发布口去水印闸(fail-closed) ----------------
+
+
+def test_publish_dewatermarks_every_image_in_page_order(wdb, monkeypatch):
+    """闸放行:每张图都过去水印,publish_once 收到的是清洗后路径且页序与原序严格一致。"""
+    from pathlib import Path
+
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(
+        engine,
+        account_id,
+        images_json=json.dumps(["https://cdn/a.png", "https://cdn/b.png", "https://cdn/c.png"]),
+    )
+    monkeypatch.setattr(
+        aw,
+        "materialize_images",
+        lambda images, workdir: [Path(f"/local/img_{i:02d}.png") for i in range(len(images))],
+    )
+    dw_calls = []
+    _patch_dewatermark(monkeypatch, calls=dw_calls)
+    calls = []
+    _patch_publish_once(monkeypatch, PublishResult(success=True, note_id="n"), calls)
+
+    aw.run_publish_job(db_path, account_id, job_id)
+
+    # 逐张过闸,且按页序
+    assert dw_calls == ["/local/img_00.png", "/local/img_01.png", "/local/img_02.png"]
+    _, _, _, _, image_paths, _ = calls[0]
+    assert image_paths == [
+        "/local/img_00.png.shot.jpg",
+        "/local/img_01.png.shot.jpg",
+        "/local/img_02.png.shot.jpg",
+    ]
+    assert _get_job(engine, job_id).status == "published"
+
+
+def test_publish_dewatermark_failure_aborts_whole_job(wdb, monkeypatch):
+    """闸拦下:任一张去水印失败 → publish_once 根本不被调用,整个发布任务失败排重试。
+
+    这是 job 14/15/16 事故的反向锚:绝不允许"某张失败就拿原图顶上"的静默降级。
+    """
+    from pathlib import Path
+
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(
+        engine,
+        account_id,
+        images_json=json.dumps(["https://cdn/a.png", "https://cdn/b.png"]),
+    )
+    monkeypatch.setattr(
+        aw,
+        "materialize_images",
+        lambda images, workdir: [Path(f"/local/img_{i:02d}.png") for i in range(len(images))],
+    )
+    _patch_dewatermark(monkeypatch, fail_on="/local/img_01.png")
+    calls = []
+    _patch_publish_once(monkeypatch, PublishResult(success=True), calls)
+
+    aw.run_publish_job(db_path, account_id, job_id)
+
+    assert calls == []  # 一张都没发出去
+    job = _get_job(engine, job_id)
+    assert job.status == "pending"  # 兜底按普通失败裁决 → 排重试
+    assert job.retries == 1
+    assert job.next_retry_at is not None
+    assert "第 2 页" in job.error
+    assert "拒绝发布未去水印的图" in job.error
 
 
 def test_publish_success_triggers_auto_archive(wdb, monkeypatch):

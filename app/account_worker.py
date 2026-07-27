@@ -7,7 +7,8 @@ CLI 契约(supervisor 派生调用)::
 
 同进程串行:先发布任务(按 id 升序)后 browser jobs。每账号独立 OS 进程 + 独立
 camoufox 真屏会话——本模块只是换了宿主进程调用既有拟人层(``sync_client.publish_once``
-一行不改),不引入任何新浏览器行为。
+一行不改)。发布前另有 fail-closed 去水印闸(``dewatermark_all``,每张图起一次无头
+chromium 重栅格化),任一张失败即整任务失败,绝不发未去水印的图。
 
 台账纪律(全部 sqlite3 短事务,WAL 并发安全):
 - publish 认领 = 乐观 ``UPDATE status pending->publishing``(rowcount=1 才算领到);
@@ -40,6 +41,7 @@ from app.browser import sync_client
 from app.browser.images import materialize_images
 from app.core.config import settings
 from app.core.security import decrypt_cookies
+from app.imagegen.postprocess import dewatermark_all
 from app.publish.policy import cooldown_remaining_s, daily_cap_reached, decide_finish
 
 # browser job 在跑心跳周期(秒);supervisor 侧僵死判定阈值 900s,300s 留足 3 次机会
@@ -237,7 +239,7 @@ def _requeue_if_hanging(db_path: str, job_id: int, prefix: str) -> None:
 
 
 def _execute_publish(db_path: str, account_id: int, job: dict):
-    """物料化图片 + 调既有拟人层真发布(``sync_client.publish_once``,一行不改)。
+    """物料化图片 + 去水印闸 + 调既有拟人层真发布(``sync_client.publish_once``,一行不改)。
 
     临时物料目录发布结束(无论成败)清理。返回 ``PublishResult``。
     """
@@ -247,6 +249,12 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
     workdir = Path(settings.UPLOAD_DIR) / f"job_{job['id']}"
     try:
         image_paths = [str(p) for p in materialize_images(raw_images, workdir)]
+        # fail-closed 去水印闸:生图侧的去水印只在生图那一刻跑,而发布任务存的是图片字节
+        # 快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛异常整任务失败(交外层
+        # decide_finish 落 error 排重试),绝不用原图发。
+        # 同进程此刻绝无运行中的事件循环:publish 批全程 sync,browser job 的 asyncio.run
+        # 严格排在所有 publish job 之后(见 main()),故 asyncio.run 安全。
+        image_paths = asyncio.run(dewatermark_all(image_paths))
         return sync_client.publish_once(
             account_id, cookies, job["title"], job["content"], image_paths, topics
         )

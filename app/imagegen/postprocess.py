@@ -10,6 +10,10 @@
   与直接交原图**没有任何区别**,留着只会让人误以为已经处理过。
 - ③ 直接返回原图路径:同上,带水印交付且无声无息。
 
+批量入口 ``dewatermark_all``(2026-07-27 新增)是**发布口的 fail-closed 闸**:发布任务
+拿到的是图片字节快照、判断不了"这张是否已清洗",故统一重做,任一张失败即抛异常让整个
+发布任务失败——绝不退回"用原图发"。
+
 效力说明(承自 reraster 的诚实声明):重采样对耐久水印是"**扰动**"而非保证清除,
 能否规避目标平台的 AI 检测以平台真实行为为准,本模块不做此保证。
 (薯营家的 gemini SynthID 可见水印引擎不迁——本服务只有 gpt-image 一条生图路线。)
@@ -42,3 +46,29 @@ async def dewatermark(path: str) -> Optional[str]:
         return rr.path
     logger.warning(f"[postprocess] 去水印失败(reraster: {rr.error}) path={path}")
     return None
+
+
+async def dewatermark_all(paths: list[str]) -> list[str]:
+    """发布口的 fail-closed 去水印闸:按页序逐张重做,返回等长的清洗后路径列表。
+
+    发布任务手上只有图片字节快照(``publish_jobs.images_json``),**判断不了某张图是否
+    已经去过水印**——像素判据只能看出"有没有被重采样过",看不出"这张图对应的原图是谁"。
+    所以不猜,统一重做;重复 reraster 只是轻微质量损失,可接受。
+
+    任何一张失败即抛异常让整个发布任务失败,**绝不静默降级成"用原图发"**——那正是
+    job 14/15/16 七张全带水印发出去的事故形态。
+
+    Raises:
+        RuntimeError: 任一页去水印失败(文案带页序 + 拒发声明,交由调用方的终态逻辑
+            落 error 排重试)。
+    """
+    cleaned: list[str] = []
+    for index, path in enumerate(paths):
+        out = await dewatermark(path)
+        if not out:
+            raise RuntimeError(
+                f"第 {index + 1} 页去水印失败(reraster 未产出),"
+                f"拒绝发布未去水印的图: {path}"
+            )
+        cleaned.append(out)
+    return cleaned

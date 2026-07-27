@@ -65,7 +65,11 @@ async def reraster_image(path: str) -> ReRasterResult:
             _HTML_TEMPLATE
             .replace("__W__", str(w))
             .replace("__H__", str(h))
-            .replace("__SRC__", Path(path).as_uri())
+            # 必须 resolve():as_uri() 对相对路径直接抛 "relative path can't be expressed
+            # as a file URI"。生图侧传的是绝对路径所以一直没暴露,发布口的闸传的是
+            # settings.UPLOAD_DIR 下的**相对**路径(如 data/uploads/job_25/img_00.png),
+            # 2026-07-27 09:00 那批定时发布因此被闸全数拦下——真图是好的,是这里炸的。
+            .replace("__SRC__", Path(path).resolve().as_uri())
         )
         with tempfile.NamedTemporaryFile(
             suffix=".html", delete=False, mode="w", encoding="utf-8"

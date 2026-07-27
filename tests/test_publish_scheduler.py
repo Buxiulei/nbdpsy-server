@@ -340,6 +340,14 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
 
     monkeypatch.setattr(scheduler_mod, "materialize_images", fake_materialize)
 
+    # 去水印闸的叶子打桩(不起 chromium):产出可区分的 .shot.jpg,断言交给浏览器的是清洗后的图
+    async def fake_dewatermark(path):
+        return f"{path}.shot.jpg"
+
+    monkeypatch.setattr(
+        "app.imagegen.postprocess.dewatermark", fake_dewatermark, raising=True
+    )
+
     def fake_publish_once(acc_id, cookies, title, content, image_paths, topics):
         captured["args"] = (acc_id, cookies, title, content, image_paths, topics)
         return PublishResult(success=True, note_id="nid", note_url="https://xhs/1")
@@ -360,7 +368,7 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
     acc_id, cookies, title, content, image_paths, topics = captured["args"]
     assert acc_id == account_id
     assert cookies == []
-    assert image_paths == ["/local/a.png"]
+    assert image_paths == ["/local/a.png.shot.jpg"]  # 物料化 → 去水印闸 → 才交浏览器
     assert topics == ["#心理"]
 
 

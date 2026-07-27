@@ -30,6 +30,7 @@ from app.browser.browser_gate import browser_slot
 from app.browser.images import materialize_images
 from app.core.config import settings
 from app.core.security import decrypt_cookies
+from app.imagegen.postprocess import dewatermark_all
 from app.models.publish_job import PublishJob
 from app.models.xhs_account import XhsAccount
 from app.publish.queue import AccountLocks, PublishQueue
@@ -110,7 +111,10 @@ def make_publish_runner(
                 #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
                 #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
                 paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
-                image_paths = [str(p) for p in paths]
+                # 2b'. fail-closed 去水印闸(与 account_worker._execute_publish 同源):发布任务
+                #      存的是图片字节快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛
+                #      异常,落到下面兜底 finish(fail) 排重试,绝不用原图发。
+                image_paths = await dewatermark_all([str(p) for p in paths])
 
                 # 2c. 全局浏览器并发闸 + 线程内跑 sync 发布(per-account 串行已由外层锁保证)。
                 #     browser_slot 封顶总 camoufox 数,超出排队;publish 不 block_images(保真)。
