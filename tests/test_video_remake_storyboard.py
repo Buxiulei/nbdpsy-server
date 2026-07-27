@@ -306,8 +306,9 @@ class TestBuild:
         balls = [s for s in sb["scenes"] if s["type"] == "ball_exercise"]
         motions = [b for b in balls if not b["params"].get("static")]
         statics = [b for b in balls if b["params"].get("static")]
-        # 该窗确实跨相位边界：应在边界两侧各切出静止子段（≥2 个静止子场景）
-        assert len(statics) >= 2
+        # 该窗跨相位边界，各相位分别切出静止子段；第四轮节奏修正的合并 pass 会把这些紧邻静止
+        # 并作一段连续静止（问答块「一停到底」），故断言 ≥1 段静止 + 下方「完整覆盖」不变量。
+        assert len(statics) >= 1
         # 过切安全：无运动子场景与任一语音窗 [start,end+0.5] 相交
         for seg in sb["retimed_segments"]:
             w0, w1 = seg["start"], seg["end"] + 0.5
@@ -1001,3 +1002,182 @@ class TestCardDurationOverride:
                 facts, duration=40.0, segments=segs, clip_durations=[2.0],
                 card_duration_overrides=[])
         assert base == same
+
+
+# 第四轮验收：分镜互斥节奏两处修正（语音窗桥接 + 静止尾巴裁剪）
+from app.video.pipeline.remake import timeline               # noqa: E402
+
+
+def _static(t0, t1, period=2.0):
+    return {"t0": t0, "t1": t1, "type": "ball_exercise", "renderer": "programmatic",
+            "params": {"ball_color": style.CREAM, "bg_color": style.DARK_BG,
+                       "period_s": period, "amplitude_ratio": 0.42, "static": True}}
+
+
+def _motion(t0, t1, color=None, period=2.0):
+    return {"t0": t0, "t1": t1, "type": "ball_exercise", "renderer": "programmatic",
+            "params": {"ball_color": color or style.BURGUNDY, "bg_color": style.DARK_BG,
+                       "period_s": period, "amplitude_ratio": 0.42,
+                       "audio_cue": "alternating_tone"}}
+
+
+class TestSpeechRhythmConstants:
+    def test_constants(self):
+        assert storyboard._SPEECH_BRIDGE_GAP_S == 6.0
+        assert storyboard._POST_SPEECH_MOTION_DELAY_S == 2.0
+
+
+class TestBridgeSpeechGaps:
+    def test_short_gap_between_two_speech_statics_bridged(self):
+        # 两个锚着语音的静止块之间 4s 运动间隙（≤6s）→ 间隙并入静止（问答块一停到底）
+        scenes = [_static(0.0, 4.0), _motion(4.0, 8.0), _static(8.0, 12.0)]
+        sw = [(1.0, 3.5), (9.0, 11.5)]
+        storyboard._bridge_speech_gaps(scenes, sw)
+        assert scenes[1]["params"].get("static") is True
+        assert scenes[1]["params"]["ball_color"] == style.CREAM
+
+    def test_long_gap_not_bridged(self):
+        # 间隙 8s（>6s，下一句在远处）→ 运动照常恢复，不并
+        scenes = [_static(0.0, 4.0), _motion(4.0, 12.0), _static(12.0, 16.0)]
+        sw = [(1.0, 3.5), (13.0, 15.5)]
+        storyboard._bridge_speech_gaps(scenes, sw)
+        assert not scenes[1]["params"].get("static")
+
+    def test_multi_scene_gap_all_bridged(self):
+        # color_cycle 把间隙切成多段运动子场景 → 整段（总 4s ≤6s）全部并入静止
+        scenes = [_static(0.0, 4.0), _motion(4.0, 6.0, style.GOLD),
+                  _motion(6.0, 8.0, style.BURGUNDY), _static(8.0, 12.0)]
+        sw = [(1.0, 3.5), (9.0, 11.5)]
+        storyboard._bridge_speech_gaps(scenes, sw)
+        assert all(scenes[i]["params"].get("static") for i in (1, 2))
+
+    def test_gap_not_bridged_when_a_side_has_no_speech(self):
+        # 右侧静止无语音锚（纯组间休息 run）→ 不桥接（保「语音窗到远处」运动恢复语义）
+        scenes = [_static(0.0, 4.0), _motion(4.0, 8.0), _static(8.0, 12.0)]
+        sw = [(1.0, 3.5)]                                     # 只锚左侧
+        storyboard._bridge_speech_gaps(scenes, sw)
+        assert not scenes[1]["params"].get("static")
+
+    def test_empty_speech_windows_noop(self):
+        scenes = [_static(0.0, 4.0), _motion(4.0, 8.0), _static(8.0, 12.0)]
+        before = [dict(s["params"]) for s in scenes]
+        storyboard._bridge_speech_gaps(scenes, [])
+        assert [dict(s["params"]) for s in scenes] == before
+
+    def test_total_duration_unchanged(self):
+        scenes = [_static(0.0, 4.0), _motion(4.0, 8.0), _static(8.0, 12.0)]
+        storyboard._bridge_speech_gaps(scenes, [(1.0, 3.5), (9.0, 11.5)])
+        assert scenes[0]["t0"] == 0.0 and scenes[-1]["t1"] == 12.0    # 只改分类不改边界
+
+
+class TestMergeAdjacentStatics:
+    def test_consecutive_statics_merged(self):
+        scenes = [_static(0.0, 4.0), _static(4.0, 8.0), _motion(8.0, 10.0)]
+        storyboard._merge_adjacent_statics(scenes)
+        assert len(scenes) == 2
+        assert (scenes[0]["t0"], scenes[0]["t1"]) == (0.0, 8.0)
+        assert scenes[0]["params"].get("static")
+
+    def test_static_motion_static_not_merged(self):
+        scenes = [_static(0.0, 4.0), _motion(4.0, 8.0), _static(8.0, 12.0)]
+        storyboard._merge_adjacent_statics(scenes)
+        assert len(scenes) == 3
+
+
+class TestTrimStaticSpeechTails:
+    def test_long_tail_trimmed_to_speech_plus_delay_on_grid(self):
+        # 静止块含语音（末句结束 5.0），块拖到 15.0、其后紧邻运动 → 裁到 phase_floor(5+2)=7.0（落栅格）
+        scenes = [_static(0.0, 15.0), _motion(15.0, 25.0)]
+        sw = [(3.0, 5.5)]                                     # 末句语音结束 = 5.0
+        storyboard._trim_static_speech_tails(scenes, sw, period=2.0, fps=style.FPS)
+        expect = timeline.phase_floor(7.0, period=2.0, fps=style.FPS)
+        assert scenes[0]["t1"] == expect and scenes[1]["t0"] == expect
+        assert expect <= 7.0 + 1e-9                          # 静止尾 ≤ 语音结束+延迟
+        h = 2.0 / 2
+        assert abs(expect - round(expect / h) * h) <= 1.0 / style.FPS + 1e-9   # 落 k*(T/2) 栅格
+
+    def test_short_tail_not_trimmed(self):
+        # 尾巴 ≤2s（说完球很快就该动）→ 不裁
+        scenes = [_static(0.0, 6.5), _motion(6.5, 16.0)]
+        sw = [(3.0, 5.5)]                                     # 末句结束 5.0，尾巴 1.5 ≤ 2
+        storyboard._trim_static_speech_tails(scenes, sw, period=2.0, fps=style.FPS)
+        assert scenes[0]["t1"] == 6.5
+
+    def test_speechless_rest_run_not_trimmed(self):
+        # 纯组间休息 run（无任何语音锚）→ 绝不裁（原片功能性留白保全）
+        scenes = [_static(0.0, 20.0), _motion(20.0, 30.0)]
+        storyboard._trim_static_speech_tails(scenes, [(100.0, 102.0)], period=2.0, fps=style.FPS)
+        assert scenes[0]["t1"] == 20.0
+
+    def test_static_not_followed_by_motion_not_trimmed(self):
+        # 其后是卡片（非运动）→ 不裁（无「早点动起来」的对象）
+        card = {"t0": 15.0, "t1": 20.0, "type": "text_card", "renderer": "still_image",
+                "content": {"title": "", "body": ""}, "transition": "fade"}
+        scenes = [_static(0.0, 15.0), card]
+        storyboard._trim_static_speech_tails(scenes, [(3.0, 5.5)], period=2.0, fps=style.FPS)
+        assert scenes[0]["t1"] == 15.0
+
+    def test_trim_preserves_total_duration(self):
+        scenes = [_static(0.0, 15.0), _motion(15.0, 25.0)]
+        storyboard._trim_static_speech_tails(scenes, [(3.0, 5.5)], period=2.0, fps=style.FPS)
+        assert scenes[0]["t0"] == 0.0 and scenes[-1]["t1"] == 25.0    # 边界左移，总时长不变
+
+
+class TestSpeechRhythmEndToEnd:
+    @pytest.mark.asyncio
+    async def test_close_sentences_bridged_into_one_stop(self):
+        # 端到端（桥接）：运动 run 内两句提问间隔很近 → 中间不再有运动（问答块一停到底）
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 60.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.0, "period_estimated": True},
+        ], "warnings": []}
+        segs = [
+            {"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"},
+            {"start": 20.0, "end": 22.0, "en": "q1", "zh": "现在有什么感觉"},   # 落 ball run
+            {"start": 24.0, "end": 26.0, "en": "q2", "zh": "就停留在这里"},     # 紧接上一句
+        ]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(
+                facts, duration=60.0, segments=segs, clip_durations=[2.0, 2.0, 2.0])
+        retimed = sb["retimed_segments"]
+        w0 = min(s["start"] for s in retimed if s["zh"] in ("现在有什么感觉", "就停留在这里"))
+        w1 = max(s["end"] for s in retimed if s["zh"] in ("现在有什么感觉", "就停留在这里"))
+        motions = [s for s in sb["scenes"]
+                   if s["type"] == "ball_exercise" and not s["params"].get("static")]
+        # 两句语音跨度内无任何运动场景（间隙已并入静止）
+        for m in motions:
+            assert min(w1, m["t1"]) - max(w0, m["t0"]) <= 1e-9
+        storyboard.validate_storyboard(sb)
+
+    @pytest.mark.asyncio
+    async def test_rest_run_with_speech_tail_trimmed(self):
+        # 端到端（尾巴裁剪，复刻 job5 25:50）：静止休息 run 内有一句指令语音，说完后静止拖很久
+        # 才接运动 run → 裁到 语音结束+2s，后续运动提前起（总时长不变、validate 过）。
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 30.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.0, "period_estimated": True},
+            {"t0": 30.0, "t1": 50.0, "kind": "ball_exercise", "static": True},   # 组间休息 run
+            {"t0": 50.0, "t1": 70.0, "kind": "ball_exercise",
+             "ball_color_hex": "#A2C40C", "period_s": 2.0, "period_estimated": True},
+        ], "warnings": []}
+        segs = [
+            {"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"},
+            {"start": 35.0, "end": 37.0, "en": "q", "zh": "看着小球说出它的颜色"},  # 落休息 run
+        ]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(
+                facts, duration=70.0, segments=segs, clip_durations=[2.0, 2.0])
+        instr = next(s for s in sb["retimed_segments"] if s["zh"] == "看着小球说出它的颜色")
+        speech_end = instr["end"]
+        scenes = sb["scenes"]
+        rest = next(s for s in scenes if s["type"] == "ball_exercise"
+                    and s["params"].get("static") and s["t0"] <= speech_end < s["t1"] + 20)
+        idx = scenes.index(rest)
+        # 休息 run 静止尾 ≤ 语音结束+2s（吸附容差内），其后紧邻运动
+        assert rest["t1"] <= speech_end + storyboard._POST_SPEECH_MOTION_DELAY_S + 1e-6
+        assert not scenes[idx + 1]["params"].get("static")
+        # 总时长不变、校验全过
+        assert sb["source"]["duration_s"] == scenes[-1]["t1"]
+        storyboard.validate_storyboard(sb)

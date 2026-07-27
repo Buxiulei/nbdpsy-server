@@ -15,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 _T_EPS = 0.05                      # 相邻场景衔接允许的浮点误差（秒）
 
+# 分镜互斥节奏两处修正（用户第四轮验收反馈，job5 实证）——carve 只把语音窗本身转静止，
+# 留下两类节奏缺陷，故在场景组装后统一做两遍普适修正（弹性时间轴模式）：
+#  A. 问答块间隙漏动：相邻两句配音之间几秒的运动间隙里球又晃起来（投诉 5:38/12:28/13:16/
+#     14:10/23:04/24:45 同一模式）。→ 语音窗桥接：两侧都锚着语音的静止块之间、运动间隙
+#     ≤ 本阈值 → 间隙并入静止，整个问答块一停到底；> 本阈值（下一句在很远处）不并，运动照常恢复。
+#  B. 指令后死区：静止块内最后一句说完后，静止还拖好几秒才恢复运动（25:50 拖 6s 空白）。
+#     → 静止尾巴裁剪：静止块末端距块内最后一句语音结束点 > 本阈值 → 裁到 语音结束+本阈值，
+#     裁掉的部分并入后续运动段（球早点动起来）。
+# 两遍都只作用于「锚着语音的静止块」；纯组间休息 run（原片功能性留白，无任何语音锚）不受影响。
+_SPEECH_BRIDGE_GAP_S = 6.0         # 语音窗桥接上限（秒）：两语音静止块间运动间隙 ≤ 此值即并入静止
+_POST_SPEECH_MOTION_DELAY_S = 2.0  # 指令后恢复运动延迟（秒）：静止块最后一句说完至多再停此值就恢复运动
+
 IMPLEMENTED_RENDERERS = {"programmatic", "still_image"}
 KNOWN_RENDERERS = IMPLEMENTED_RENDERERS | {"seedance"}
 
@@ -251,6 +263,109 @@ def _card_scene(sc: dict, zh_map: dict[str, str], warnings: list[str],
     return {"t0": t0, "t1": t1,
             "type": kind if kind in ("title_card", "text_card") else "text_card",
             "renderer": "still_image", "content": content, "transition": "fade"}
+
+
+def _is_motion_ball(sc: dict) -> bool:
+    return sc.get("type") == "ball_exercise" and not (sc.get("params") or {}).get("static")
+
+
+def _is_static_ball(sc: dict) -> bool:
+    return sc.get("type") == "ball_exercise" and bool((sc.get("params") or {}).get("static"))
+
+
+def _static_touches_speech(sc: dict, speech_windows: list) -> bool:
+    """静止球场景 [t0,t1] 是否锚着语音（与任一语音窗真相交）。
+
+    speech_windows = [(start, end+尾延展), ...]（新轴）。用于区分「锚着语音的静止块」
+    与「纯组间休息 run（原片功能性留白，无语音）」——两处节奏修正只作用前者。
+    """
+    return any(float(w0) < sc["t1"] - 1e-6 and float(w1) > sc["t0"] + 1e-6
+               for w0, w1 in speech_windows)
+
+
+def _merge_adjacent_statics(scenes: list[dict]) -> None:
+    """把连续的静止球场景合并成单个场景（原地改 scenes）。
+
+    carve 逐相位 / 逐语音窗切分、组间休息 run、桥接并入的间隙，都可能产出多个紧邻的米白
+    静止子场景（渲染完全一致——同米白、同居中、同参数）。合并成一个既让「问答块一停到底」
+    在 storyboard.json 里显式成一段，也让尾巴裁剪按整块处理（无需跨多子场景）。
+    合并只并同为静止的球场景，保留首段 params（全片静止段参数一致：米白 + 全局周期）。
+    """
+    out: list[dict] = []
+    for sc in scenes:
+        if out and _is_static_ball(out[-1]) and _is_static_ball(sc):
+            out[-1]["t1"] = sc["t1"]                        # 紧邻静止：延展前段末端，丢弃本段
+        else:
+            out.append(sc)
+    scenes[:] = out
+
+
+def _bridge_speech_gaps(scenes: list[dict], speech_windows: list) -> None:
+    """语音窗桥接（第四轮反馈 A：问答块间隙漏动）——原地改 scenes。
+
+    扫场景序列，凡「静止块 → 运动间隙 → 静止块」且两侧静止块都锚着语音、间隙总时长
+    ≤ _SPEECH_BRIDGE_GAP_S 者，把整段运动间隙逐场景改成米白静止（沿用相邻静止参数模板），
+    使整个问答块一停到底。间隙可含多个运动子场景（color_cycle 逐 N·T 轮色会把间隙切成数段），
+    故按「静止到下一个静止之间的连续运动段」整体判定与并入。
+    间隙 > 阈值（下一句语音在很远处）不并——运动照常恢复（保 5:38 那类块末长间隙的正确恢复）。
+    speech_windows 空（非弹性模式）→ 直接返回，行为不变。
+    """
+    if not speech_windows:
+        return
+    i = 0
+    while i < len(scenes):
+        if not _is_static_ball(scenes[i]):
+            i += 1
+            continue
+        j = i + 1                                           # 收集本静止块之后的连续运动段 [i+1, j)
+        while j < len(scenes) and _is_motion_ball(scenes[j]):
+            j += 1
+        if (j < len(scenes) and j > i + 1 and _is_static_ball(scenes[j])
+                and scenes[j]["t0"] - scenes[i + 1]["t0"] <= _SPEECH_BRIDGE_GAP_S + 1e-9
+                and _static_touches_speech(scenes[i], speech_windows)
+                and _static_touches_speech(scenes[j], speech_windows)):
+            tmpl = dict(scenes[i]["params"])               # 米白静止参数模板（含 static=True）
+            for m in range(i + 1, j):
+                scenes[m]["params"] = dict(tmpl)
+            i = j                                           # [i..j] 已全静止，从右静止续扫（可再链桥）
+            continue
+        i = j                                               # 无桥接：跳过这段运动到下一个可能的静止
+
+
+def _trim_static_speech_tails(scenes: list[dict], speech_windows: list,
+                              *, period: float, fps: int) -> None:
+    """静止尾巴裁剪（第四轮反馈 B：指令后死区）——原地改 scenes。
+
+    对每个「锚着语音、其后紧邻运动段」的静止块：取块内最后一句语音结束点 last_end，若静止块
+    末端距 last_end > _POST_SPEECH_MOTION_DELAY_S，则把末端裁到 last_end + 该延迟，裁掉的部分
+    并入后续运动段（后续运动 t0 左移到新末端）——总时长不变，只是球早点动起来。
+    作为管线最后一步（F3 栅格终校之后）运行：新末端落既有「球过中点」栅格（phase_floor，
+    ≤ 语音结束+延迟），停/起球恰在中心、漂移 ≤0.5/fps 满足 F-B 不变量，且无后续 pass 再动它
+    （若放 _snap 之前，其 static→motion 的 phase_ceil 会把边界向后顶回去）。
+    只裁锚着语音的静止块（含「原片休息 run 但块内有指令语音」这类，如 25:50）；纯无语音的
+    组间休息 run（last_end 不存在）跳过——绝不动原片功能性留白。speech_windows 空 → 直接返回。
+    合并已保证静止块=单场景，故这里假定连续静止已并作一段（scenes[i] 即整块）。
+    """
+    if not speech_windows:
+        return
+    tail = timeline._SPEECH_WINDOW_TAIL
+    for i in range(len(scenes) - 1):
+        sc, nxt = scenes[i], scenes[i + 1]
+        if not (_is_static_ball(sc) and _is_motion_ball(nxt)):
+            continue
+        ends = [float(w1) - tail for w0, w1 in speech_windows
+                if float(w0) < sc["t1"] - 1e-6 and float(w1) > sc["t0"] + 1e-6]
+        if not ends:                                        # 无语音锚（纯组间休息 run）→ 不裁
+            continue
+        last_end = max(ends)
+        if sc["t1"] - last_end <= _POST_SPEECH_MOTION_DELAY_S + 1e-9:
+            continue
+        new_end = timeline.phase_floor(last_end + _POST_SPEECH_MOTION_DELAY_S,
+                                       period=period, fps=fps)
+        new_end = min(max(new_end, sc["t0"]), sc["t1"])     # 夹回本静止块内（不越 run 起止）
+        if new_end < sc["t1"] - 1e-9:
+            sc["t1"] = new_end                              # 静止块末端裁短
+            nxt["t0"] = new_end                             # 裁掉部分并入后续运动段（衔接不断）
 
 
 def _snap_ball_boundaries(scenes: list[dict], *, period: float, fps: int) -> None:
@@ -500,10 +615,21 @@ async def build_storyboard(facts: dict, *, duration: float,
                                    "renderer": "programmatic", "params": sub})
         i = j
 
+    # 分镜互斥节奏两处修正（第四轮反馈，弹性模式）。顺序有讲究：
+    #  1) 桥接问答块内运动间隙（产出新静止）→ 2) 合并连续静止成整块 → 3) F3 栅格终校对齐所有
+    #     「运动↔静止」边界（含桥接/合并后新暴露的边界）→ 4) 裁静止块指令后死区尾巴。
+    # 尾巴裁剪必须放在栅格终校**之后**：_snap 的 static→motion 规则用 phase_ceil 向后生长静止
+    # （保停/起球在中心），会把裁短的边界又顶回去（且 120fps 量化下 phase_floor/ceil 非互幂等，
+    # 生长后不再回落）；故裁剪作为最后一步落 phase_floor 栅格点（≤ 语音结束+延迟，且漂移
+    # ≤0.5/fps 满足 F-B 不变量），无后续 pass 再动它。
     # F3：弹性时间轴模式下，把所有「运动↔静止」球场景边界吸附到「球过中点」栅格（含组间天然
     # 静止 run 的边界）。非弹性模式保持原轴量化的既有行为（生产恒走弹性模式，见 handler）。
     if retimed is not None:
+        _bridge_speech_gaps(scenes, speech_windows)
+        _merge_adjacent_statics(scenes)
         _snap_ball_boundaries(scenes, period=global_period, fps=style.FPS)
+        _trim_static_speech_tails(scenes, speech_windows,
+                                  period=global_period, fps=style.FPS)
 
     for idx, sc in enumerate(scenes, start=1):  # 聚合后重排连续 id
         sc["id"] = idx
