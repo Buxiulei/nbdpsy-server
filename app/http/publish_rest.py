@@ -63,7 +63,14 @@ def _next_active_window_start(now: datetime) -> datetime:
 
 
 def _job_view(job: PublishJob) -> dict:
-    """把发布任务序列化为对外视图(不含图片/正文等大字段,只给调度可读的元信息)。"""
+    """把发布任务序列化为对外视图(不含图片/正文等大字段,只给调度可读的元信息)。
+
+    时间字段(schedule_time/next_retry_at/created_at)库里存的是 **naive UTC**(与调度器
+    utcnow 基准一致)。读回时显式补上 ``+00:00`` 偏移:数值不变,只把这个 naive datetime
+    本就代表的 UTC 时区标注出来,消除"裸串被当本地时间"的歧义——消费方(含非北京时区)可自行
+    astimezone 到目标时区。不转成 +08:00,避免把 Beijing-only 假设硬编码进通用 REST 契约,
+    也避免与存储/调度器一直锚定 UTC 的语义分裂(详见入口 _parse_schedule_time)。
+    """
     return {
         "job_id": job.id,
         "account_id": job.account_id,
@@ -74,12 +81,20 @@ def _job_view(job: PublishJob) -> dict:
         "error": job.error,
         "retries": job.retries,
         "schedule_time": (
-            job.schedule_time.isoformat() if job.schedule_time else None
+            job.schedule_time.replace(tzinfo=timezone.utc).isoformat()
+            if job.schedule_time
+            else None
         ),
         "next_retry_at": (
-            job.next_retry_at.isoformat() if job.next_retry_at else None
+            job.next_retry_at.replace(tzinfo=timezone.utc).isoformat()
+            if job.next_retry_at
+            else None
         ),
-        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "created_at": (
+            job.created_at.replace(tzinfo=timezone.utc).isoformat()
+            if job.created_at
+            else None
+        ),
     }
 
 
@@ -117,7 +132,9 @@ MANIFEST_ENTRIES = [
                  "(发布中,常态 1-3 分钟)、published(成功,保证有 note_url,note_id 可能为空)、"
                  "failed(重试耗尽后的终态,error 给最后一次失败原因)、canceled(被 cancel 取消)。"
                  "next_retry_at 是失败后回 pending 的下次重试时刻(未安排重试则为 null);"
-                 "retries 是已重试次数。轮询节奏建议每 5-10s 一次直到 published/failed。",
+                 "retries 是已重试次数。轮询节奏建议每 5-10s 一次直到 published/failed。"
+                 "schedule_time/next_retry_at/created_at 读回均带 +00:00 显式 UTC 偏移"
+                 "(如 2026-01-01T01:00:00+00:00),即该时刻的 UTC 值;要看本地时间自行 +8 小时。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs",

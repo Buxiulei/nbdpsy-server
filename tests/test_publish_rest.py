@@ -16,7 +16,7 @@ runtime.set_active_scheduler(fake) 覆盖 lifespan 装好的真调度器(与 tes
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import app.core.db as db_module
 from app.models import Operator, PublishJob, XhsAccount
@@ -263,6 +263,41 @@ async def test_get_status_reads_and_denied(tmp_path, monkeypatch):
         assert r3.status_code == 404
 
 
+async def test_time_fields_readback_carry_utc_offset(tmp_path, monkeypatch):
+    """读回的三个时间字段带 +00:00 显式 UTC 偏移,且其时刻与库里 naive UTC 一致。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await seed_account("号TZ", "uTZ", _COOKIES)
+        op_key = "op-publish-tz-01"
+        await _make_operator_with_access(acc, key=op_key)
+
+        # 三个字段各给一个不同的 naive UTC 时刻(库里存的就是这样)。
+        schedule = datetime(2026, 7, 27, 10, 0, 0)
+        retry = datetime(2026, 7, 27, 10, 30, 0)
+        created = datetime(2026, 7, 27, 9, 0, 0)
+        job_id = await _make_job(
+            acc, status="failed", schedule_time=schedule,
+            next_retry_at=retry, created_at=created,
+        )
+
+        r = await c.get(f"/api/publish-jobs/{job_id}", headers=bearer(op_key))
+        assert r.status_code == 200, r.text
+        data = r.json()
+
+        # 每个字段:①字面带 +00:00;②fromisoformat 解析出 tz-aware;
+        # ③换回 naive UTC 与库里存的值逐一相等(数值没被平移)。
+        for field, stored in (
+            ("schedule_time", schedule),
+            ("next_retry_at", retry),
+            ("created_at", created),
+        ):
+            raw = data[field]
+            assert raw.endswith("+00:00"), f"{field} 缺 UTC 偏移:{raw}"
+            parsed = datetime.fromisoformat(raw)
+            assert parsed.tzinfo is not None
+            assert parsed.astimezone(timezone.utc).replace(tzinfo=None) == stored
+
+
 # ---------------- GET /api/publish-jobs ----------------
 
 
@@ -407,7 +442,8 @@ async def test_patch_pending_updates_schedule_and_content(tmp_path, monkeypatch)
         body = r.json()
         assert body["ok"] is True
         assert body["job"]["title"] == "新标题"
-        assert body["job"]["schedule_time"] == "2026-09-09T01:00:00"  # +08:00 → naive UTC
+        # 入口把 +08:00 → naive UTC(早 8h),读回补显式 +00:00 标注该 UTC 时刻。
+        assert body["job"]["schedule_time"] == "2026-09-09T01:00:00+00:00"
 
 
 async def test_patch_clear_schedule_enqueues(tmp_path, monkeypatch):

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.14.0 (2026-07-27)
+
+**publish 任务时间字段读回带显式 `+00:00`**——消除"裸 UTC 串被当本地时间"的歧义。
+
+库里存的是 naive UTC(与调度器 utcnow 基准一致),但 REST 读回 `.isoformat()` 吐的是裸串
+(如 `2026-07-27T10:00:00`),运营/agent 自然当成北京时间,实际是 UTC 10:00 = 北京 18:00。
+排查定时任务时正是被这个读回格式误导过。系统**接收时认时区偏移、吐出时却丢偏移**,亲手制造误读。
+
+- `_job_view` 的 `schedule_time` / `next_retry_at` / `created_at` 三字段读回补 `.replace(tzinfo=utc)`,
+  产出 `2026-07-27T10:00:00+00:00`。**数值一位不变**,只把 naive datetime 本就代表的 UTC 显式标注。
+- **不转 +08:00**:那会把 Beijing-only 假设焊进通用 REST 契约、让钟点数字漂移(10:00→18:00)、
+  与存储/调度器锚定 UTC 的语义分裂,制造二次歧义。要看本地时间由消费方自行 astimezone。
+- 存储层、调度器(worker/publish scheduler 的 utcnow 比对)、入口 `_parse_schedule_time` **一律未动**。
+- skill 侧对这些字段全是 dict 透传/字符串相等、不做 fromisoformat 解析,**运行时零破坏**。
+- manifest 补一条读回口径说明。范围只治报告点出的事故字段(publish-jobs);其余 8 处 created_at/
+  last_login 等信息展示字段暂不动,避免"有的带偏移有的不带"的新不一致——若要全仓统一应作一次性批量决策。
 ## 0.13.0 (2026-07-27)
 
 **发布口 fail-closed 去水印闸** —— 发的图必须是去过水印的,不再靠"建任务时塞进来的图恰好干净"。
