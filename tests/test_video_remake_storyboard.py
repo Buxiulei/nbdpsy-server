@@ -1253,6 +1253,24 @@ class TestReorchestrateRounds:
         assert groups[1]["narr"] == [] and groups[1]["motion_dur"] == 30.0
         assert groups[1]["bound"] is None                                      # 末组无边界
 
+    def test_build_groups_keeps_trailing_narration_after_last_motion(self):
+        # 第五轮裁决：末组「最后一段摆动之后」的旁白（其后无运动/检查点）不前移，留 trailing；
+        # 而两段运动之间的旁白仍前移（保组内不间断）。序列 [运动][旁白N1][运动][旁白N2]（无边界）。
+        scenes = [
+            {"type": "ball_exercise", "t0": 6.0, "t1": 30.0, "params": {}},
+            {"type": "ball_exercise", "t0": 30.0, "t1": 40.0, "params": {"static": True}},
+            {"type": "ball_exercise", "t0": 40.0, "t1": 70.0, "params": {}},
+            {"type": "ball_exercise", "t0": 70.0, "t1": 80.0, "params": {"static": True}},
+        ]
+        retimed = [{"start": 32.0, "end": 34.0, "zh": "看着球说颜色"},       # 两运动之间 → 前移
+                   {"start": 72.0, "end": 74.0, "zh": "慢慢睁开眼睛。"}]      # 末段摆动之后 → 留 trailing
+        groups = storyboard._reorch_build_groups(
+            [0, 1, 2, 3], scenes, retimed, {1: [0], 3: [1]})
+        assert len(groups) == 1
+        assert groups[0]["narr"] == [0]                                       # N1 前移进组开头
+        assert groups[0]["trailing"] == [1]                                   # N2 留在摆动之后
+        assert groups[0]["motion_dur"] == 54.0 and groups[0]["bound"] is None
+
     # ---- 集成（build_storyboard）----
 
     def _big_facts(self):
@@ -1319,6 +1337,37 @@ class TestReorchestrateRounds:
                     and s["t0"] - 1e-6 <= narr["start"] and narr["end"] <= s["t1"] + 1e-6)
         # 该静止窗之后紧邻的是运动（旁白说完球才起摆）
         assert self._is_motion(scenes[scenes.index(host) + 1])
+
+    @pytest.mark.asyncio
+    async def test_trailing_narration_stays_after_last_swing(self):
+        # 第五轮裁决：末组尾部旁白（如「慢慢睁开眼睛」，其后不再有运动/检查点）保留在末组摆动之后
+        # 的静止窗，不前移；成片顺序 = [...最后一组摆动][睁眼静止窗][结尾卡]。
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 100.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.5, "period_estimated": True},
+            {"t0": 100.0, "t1": 116.0, "kind": "ball_exercise",           # 尾部旁白所在静止（原片）
+             "ball_color_hex": "#FFFFFF", "static": True},
+            {"t0": 116.0, "t1": 130.0, "kind": "text_card", "text": "end"},
+        ], "warnings": []}
+        segs = [
+            {"start": 1.0, "end": 3.0, "en": "i", "zh": "引言"},
+            {"start": 103.0, "end": 105.0, "en": "e", "zh": "慢慢睁开眼睛。"},   # 末段摆动之后
+            {"start": 120.0, "end": 123.0, "en": "c", "zh": "练习到这里就结束了。"},  # 结尾卡
+        ]
+        sb = await self._build(facts, segs, [2.0, 2.0, 3.0], [10, 20], duration=130.0)
+        scenes = sb["scenes"]
+        narr = next(s for s in sb["retimed_segments"] if s["zh"] == "慢慢睁开眼睛。")
+        last_motion = max((s for s in scenes if self._is_motion(s)), key=lambda s: s["t1"])
+        # 「慢慢睁开眼睛」落在最后一组摆动之后（不前移）
+        assert narr["start"] > last_motion["t1"] - 1e-6
+        host = next(s for s in scenes if self._is_static(s)
+                    and s["t0"] - 1e-6 <= narr["start"] and narr["end"] <= s["t1"] + 1e-6)
+        hi = scenes.index(host)
+        assert self._is_motion(scenes[hi - 1])                       # 其前紧邻末组摆动
+        assert scenes[hi + 1]["renderer"] == "still_image"           # 其后紧邻结尾卡
+        assert not any(self._is_motion(s) for s in scenes[hi + 1:])  # 尾部旁白后再无摆动
+        storyboard.validate_storyboard(sb)
 
     @pytest.mark.asyncio
     async def test_functional_rest_is_group_boundary(self):

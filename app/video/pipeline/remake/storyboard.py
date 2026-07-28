@@ -585,29 +585,49 @@ def _emit_reorch_motion(new_scenes: list, t0: float, t1: float, phase_idx: int, 
     return phase_idx
 
 
+def _reorch_new_group() -> dict:
+    return {"narr": [], "motion_dur": 0.0, "pending": []}
+
+
+def _reorch_fold_pending(cur: dict) -> None:
+    """把暂挂旁白 pending 折进本组开头 narr（其后遇到了运动/边界，故须让组内摆动不间断）。"""
+    cur["narr"].extend(cur["pending"])
+    cur["pending"] = []
+
+
 def _reorch_build_groups(zone_idxs: list[int], scenes: list[dict], retimed: list[dict],
                          scene_segs: dict) -> list[dict]:
     """把球练习区场景序列按检查点语音块 / 功能性留白 rest 分组。每组累计：前移旁白句 narr + 组内
-    总运动时长 motion_dur + 组尾边界 bound（("speech", segs) / ("rest", 原时长) / None=末组无边界）。"""
+    总运动时长 motion_dur + 组尾边界 bound（("speech", segs) / ("rest", 原时长) / None=末组无边界）
+    + 末组尾部旁白 trailing。
+
+    旁白暂挂 pending：静止旁白块先暂挂，遇到后续运动/边界（其后仍有摆动或检查点）才折进本组开头
+    （narr）保证组内不间断；若走到球练习区末尾仍未遇到运动/边界（末组尾部旁白，如「慢慢睁开眼睛」
+    /收尾自我陈述），则不前移，作为 trailing 保留在末组摆动之后的静止窗原序排布（第五轮验收裁决）。"""
     groups: list[dict] = []
-    cur: dict = {"narr": [], "motion_dur": 0.0}
+    cur = _reorch_new_group()
     for si in zone_idxs:
         sc = scenes[si]
         if _is_motion_ball(sc):
+            _reorch_fold_pending(cur)                           # 运动前的暂挂旁白 → 折进组开头
             cur["motion_dur"] += float(sc["t1"]) - float(sc["t0"])
         elif _is_static_ball(sc):
             segs = sorted(scene_segs.get(si, []))
             texts = [_reorch_seg_text(retimed[i]) for i in segs]
             dur = float(sc["t1"]) - float(sc["t0"])
             if (not segs) and dur >= _REORCH_REST_MIN_S:        # 功能性留白 rest = 天然边界
+                _reorch_fold_pending(cur)
                 cur["bound"] = ("rest", dur)
-                groups.append(cur); cur = {"narr": [], "motion_dur": 0.0}
+                groups.append(cur); cur = _reorch_new_group()
             elif segs and _is_boundary_speech(texts):           # 检查点语音块 = 组边界
+                _reorch_fold_pending(cur)                       # 边界前的暂挂旁白 → 折进组开头
                 cur["bound"] = ("speech", segs)
-                groups.append(cur); cur = {"narr": [], "motion_dur": 0.0}
-            else:                                               # 零散旁白（或 <8s 无语音静止）→ 前移进组开头
-                cur["narr"].extend(segs)
-    if cur["narr"] or cur["motion_dur"] > 1e-6:                 # 末组：无组尾边界
+                groups.append(cur); cur = _reorch_new_group()
+            else:                                               # 零散旁白（或 <8s 无语音静止）→ 暂挂待判
+                cur["pending"].extend(segs)
+    # 末组（无组尾边界）：pending 里的旁白其后不再有运动/检查点 → 保留在末组摆动之后（不前移）
+    cur["trailing"] = cur["pending"]
+    if cur["narr"] or cur["motion_dur"] > 1e-6 or cur["trailing"]:
         cur["bound"] = None
         groups.append(cur)
     return groups
@@ -653,6 +673,7 @@ def _reorchestrate_rounds(scenes: list[dict], retimed: list[dict], *,
             continue
         # 球练习区：按组边界重建
         for g in _reorch_build_groups(payload, scenes, retimed, scene_segs):
+            trailing = g.get("trailing") or []              # 末组尾部旁白（摆动之后，不前移）
             if g["narr"]:                                   # 组开头旁白窗（前移的零散旁白）
                 cursor = _emit_static_window(new_scenes, retimed, g["narr"], cursor,
                                              period=period, fps=fps, base_params=base_params)
@@ -661,13 +682,18 @@ def _reorchestrate_rounds(scenes: list[dict], retimed: list[dict], *,
                 k0 = round(cursor / h)                       # cursor 落栅格（静止窗末端 phase_ceil）→ 复原相位序
                 m_t1 = _quantize_t((k0 + 2 * rounds) * h)    # 整 rounds 轮 = 2·rounds 个半周期 → 末端落栅格
                 prev_static = bool(new_scenes) and _is_static_ball(new_scenes[-1])
+                # 组尾接静止 = 有检查点/rest 边界，或末组尾部旁白窗（摆动末色块紧邻静止 → 跳槽判定）
+                next_static = g["bound"] is not None or bool(trailing)
                 phase_idx = _emit_reorch_motion(
                     new_scenes, cursor, m_t1, phase_idx, base_params=base_params,
                     ball_palette=ball_palette, color_mode=color_mode, span=span,
-                    prev_static=prev_static, next_static=g["bound"] is not None)
+                    prev_static=prev_static, next_static=next_static)
                 cursor = m_t1
             bound = g["bound"]
-            if bound is None:
+            if bound is None:                                # 末组：尾部旁白保留在摆动之后原序排布（不前移）
+                if trailing:
+                    cursor = _emit_static_window(new_scenes, retimed, trailing, cursor,
+                                                 period=period, fps=fps, base_params=base_params)
                 continue
             if bound[0] == "rest":                           # 功能性留白 rest 边界（保原时长）
                 cursor = _emit_rest_window(new_scenes, cursor, bound[1],
