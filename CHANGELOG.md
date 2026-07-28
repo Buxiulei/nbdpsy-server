@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.0 (2026-07-28)
+
+**风格档案「多套 + 每套独立版本链」(profile_set)。** 在 operator↔档案间加套层,版本链挂到套上,
+根治整份版本化三缺陷:回退误伤(退一套连带退另一套)、并发假冲突、dropped_keys 稀释。
+
+- 模型:style_profiles 加 name/kind/is_active(实 operator (operator_id,name) 唯一 + 管理员默认
+  NULL 部分唯一索引 uq_admin_set_name,治 NULL 联合约束不生效的陷阱);version 表挂 set_id。
+- 6 端点加 `?set=`(不带→is_active 套,老客户端零感知)+ 4 套管理端点 + admin-default scope。
+- 一个 alembic revision 迁移两形态:老平铺→图文套(版本号不变)、profiles-v1 容器→拆 N 套。
+- 兼容铁律:不带 set 逐字段与今天一致(字段只增不减);base_version/409 语义不变。
+- fable 对抗评审 5 blocker 全修(NULL 唯一/管理员多套/0 套首写/删套级联/容器哨兵)+ 合并收敛补
+  2 待修(B3 建套 flush 撞键纳入 409 兜底、rollback 目标过容器哨兵),两回归测试变异验证过。
+- ⚠️ 迁移 `f4a2c8e1b9d7` 曾被 crash-loop 的 nbdpsy-api ExecStartPre 自动应用到生产库(部署形态
+  隐患,已在合并时收敛);数据两形态迁移经核对无误。
+
 ## 0.16.0 (2026-07-28)
 
 **去水印方法换代:reraster → 非整数缩小 0.855 + PNG(实测过小红书 AIDE 检测)。**
