@@ -7,8 +7,8 @@ CLI 契约(supervisor 派生调用)::
 
 同进程串行:先发布任务(按 id 升序)后 browser jobs。每账号独立 OS 进程 + 独立
 camoufox 真屏会话——本模块只是换了宿主进程调用既有拟人层(``sync_client.publish_once``
-一行不改)。发布前另有 fail-closed 去水印闸(``dewatermark_all``,每张图起一次无头
-chromium 重栅格化),任一张失败即整任务失败,绝不发未去水印的图。
+一行不改)。发布前另有 fail-closed 去水印闸(``dewatermark_all``,每张图做一次非整数
+缩小 0.855 + PNG 重编码),任一张失败即整任务失败,绝不发未去水印的图。
 
 台账纪律(全部 sqlite3 短事务,WAL 并发安全):
 - publish 认领 = 乐观 ``UPDATE status pending->publishing``(rowcount=1 才算领到);

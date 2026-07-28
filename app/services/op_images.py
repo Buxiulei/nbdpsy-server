@@ -136,7 +136,7 @@ async def execute(payload: dict) -> dict:
         results = await provider.generate_batch(
             prompts, anchor_path=anchor_path, save_prefix="p")
 
-        # 逐张去水印(只有 reraster 一条路,失败即该页失败,不拿带水印图冒充交付),
+        # 逐张去水印(非整数缩小 0.855 + PNG,失败即该页失败,不拿带水印图冒充交付),
         # 终名改页序 NN.ext 作默认交付;去水印前的原图另存 NN.orig.ext 供提取——
         # /uploads/{batch}/{name} 免鉴权路由的 _NAME_RE 只放行 NN.ext 与 NN.orig.ext
         # 两种形态,生图产物遵守同一约定,不放宽安全白名单。
@@ -152,7 +152,7 @@ async def execute(payload: dict) -> dict:
             # 先去水印(要读原图),再把原图改名归档——两个不同文件,别把原图 rename 没了
             cleaned = await dewatermark(r.path)
             if cleaned:
-                # 扩展名跟随真实格式(去水印后为 .jpg;免鉴权路由白名单 png/jpg/webp)
+                # 扩展名跟随真实格式(去水印后为 .png;免鉴权路由白名单 png/jpg/webp)
                 cleaned_path = Path(cleaned)
                 serve_path = out_dir / f"{i + 1:02d}{_safe_ext(cleaned_path)}"
                 # rename 单独兜底:改名炸了(权限/目标占用等)只塌这一位,绝不冒泡到
@@ -168,7 +168,7 @@ async def execute(payload: dict) -> dict:
                     errors.append(f"交付改名失败: {exc}")
             else:
                 urls.append("")
-                errors.append("去水印失败(reraster 重栅格化未产出),本页未交付;"
+                errors.append("去水印失败(非整数缩小未产出),本页未交付;"
                               "原图见 orig_urls,或用 --pages 重出该页")
             # 原图无论去水印成功与否都保留可取(用户明确要求的提取通道);
             # 同样单独兜底——原图归档失败只让本位 orig_urls 空,不牵连交付与其它页。

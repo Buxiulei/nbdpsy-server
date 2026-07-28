@@ -30,7 +30,7 @@ MANIFEST_ENTRIES = [
         "notes": "202 异步契约:拿 job_id+session_id 后每 10s 轮询 GET "
                  "/api/op/drafts/{session_id}/jobs/{job_id}。锚点法:anchor_url 为空则第 1 张"
                  "(P1)当锚点、其余页各自锚定它;非空则全部页锚定该已确认 P1(不重画 P1)。"
-                 "产物自动过去水印工作流(无头浏览器截图重栅格化,同时丢弃 C2PA/EXIF);"
+                 "产物自动过去水印工作流(非整数缩小 0.855 + PNG 重编码,同时丢弃 C2PA/EXIF);"
                  "该步失败即判该页失败(不返回带水印图),原图仍可从 orig_urls 取。"
                  "批量出图耗时约每页 30-60s,8 页 medium 质量约 $0.7。",
     },
