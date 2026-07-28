@@ -128,6 +128,34 @@ def _build_parse_prompt(instructions: str, rewritten: list[dict], storyboard: di
     )
 
 
+def _build_reflection_prompt(instructions: str, first_ops: list[dict],
+                             rewritten: list[dict], storyboard: dict) -> str:
+    """拼装「覆盖度反思」prompt：原始意见全文 + 首轮 EditOp 清单 + 台词/场景上下文 + 操作 schema。
+
+    为什么要第二轮：组合意见（多处独立要求写在一句话里）首轮解析常漏其一——实证两次整轮出片浪费：
+    ①「使用须知改正文+缩短停留」丢 duration_s；②「结语改时长+全组 24-40 轮」丢 set_rounds_range。
+    第二轮让 LLM 逐条核对「意见里每一处独立要求是否已有对应 EditOp」，只补被漏的项。
+    下标/scene_id 的上下文与首轮完全一致（复用同一 _format_script / _format_scenes，不重新发明），
+    LLM 补出的 op 定位口径与首轮一致，可直接并入首轮清单。
+    """
+    first_json = json.dumps(first_ops, ensure_ascii=False, indent=2)
+    return (
+        "你是 NBDpsy 视频修订助手的复核环节。上一轮已把用户意见初步解析成一份 EditOp 清单，"
+        "但组合意见里常有某一处独立要求被漏掉。请你逐条核对：用户意见中的每一处独立要求，"
+        "是否都已经有对应的 EditOp。\n\n"
+        f"用户的原始修改意见：\n{instructions}\n\n"
+        f"上一轮已解析出的 EditOp 清单：\n{first_json}\n\n"
+        f"当前台词（下标从 0 开始，附时间轴）：\n{_format_script(rewritten)}\n\n"
+        f"当前分镜场景：\n{_format_scenes(storyboard)}\n\n"
+        f"{_OP_SCHEMA}\n\n"
+        "规则：\n"
+        "- 只针对**被遗漏**的要求补充 EditOp，不要重复上一轮已经覆盖的操作，也不要修改上一轮的操作。\n"
+        "- 每一处遗漏对应一个补充 EditOp，index / after_index / scene_id 必须与上面的台词/场景列表一致。\n"
+        "- 只输出一个 JSON 数组（补充的 EditOp）；若逐条核对后确认没有任何遗漏，输出空数组 []。"
+        "不要输出任何解释文字。"
+    )
+
+
 def _extract_json_array(content: str):
     """从 LLM 输出里抠出 JSON 数组（首 [ 到末 ]，与 rewriter 的 {}/[] 风格一致）。
 
@@ -145,13 +173,88 @@ def _extract_json_array(content: str):
     return data if isinstance(data, list) else None
 
 
+def _op_dedup_key(op: dict):
+    """反思补充项与首轮去重用的身份键（同 type + 定位键 → 判为重复，首轮优先）。
+
+    定位键取「能区分不同编辑目标」的最小信息，避免把合法补充误判成重复而丢掉——尤其两个实证案例：
+      - card_edit：内容编辑（title/body）与时长编辑（duration_s）是同一张卡片上两个正交子功能
+        （apply_edits 也分开落 cards / card_duration_overrides），故键含子功能标签；否则「同卡片
+        改正文 + 缩短停留」的 duration_s 补充项会被首轮 body 编辑挡掉（实证案例①）。
+      - ball_style / global_param：全局 op 无位置锚，按其携带的参数键集合定位；首轮已覆盖的参数键
+        不再补，缺的参数键才补——否则「结语改 + 全组 24-40 轮」里的 set_rounds_range 补充项会被
+        首轮的另一个 ball_style（若有）整体挡掉（实证案例②）。
+    其余按天然定位键：script_edit/script_delete 用 index，script_insert 用 (after_index, text)
+    （同一锚点多插句各自独立），scene_edit 用 scene_id。
+    """
+    t = op.get("type")
+    if t in ("script_edit", "script_delete"):
+        return (t, op.get("index"))
+    if t == "script_insert":
+        return (t, op.get("after_index"), op.get("text"))
+    if t == "card_edit":
+        return (t, op.get("scene_id"),
+                "duration" if op.get("duration_s") is not None else "content")
+    if t == "scene_edit":
+        return (t, op.get("scene_id"))
+    if t in ("ball_style", "global_param"):
+        return (t, frozenset(k for k in op if k != "type"))
+    return (t,)
+
+
+async def _reflect_coverage(instructions: str, first_ops: list[dict],
+                            rewritten: list[dict], storyboard: dict) -> list[dict]:
+    """覆盖度反思环：第二轮核对意见每处独立要求是否已有对应 EditOp，补出被漏项（已对首轮去重）。
+
+    返回「补充 EditOp 列表」（已剔除与首轮重复的项）。三种退化路径均返回 []（不阻塞既有能力）：
+      - 无遗漏：反思输出空数组 → 正常返回 []（首轮清单即完整）；
+      - 反思 LLM 调用失败 / 超时（抛异常）→ 记 warning 后返回 []（降级为首轮结果）；
+      - 反思输出不可解析（无 JSON 数组 / 非数组）→ 记 warning 后返回 []（降级为首轮结果）。
+    补充项**不在此处做语义校验**：并入首轮清单后由调用方交既有 validate_edit_plan 统一校验
+    （补充项非法 → 整体 EditPlanError，语义与首轮一致）。温度沿用首轮（0.0）。
+    """
+    try:
+        prompt = _build_reflection_prompt(instructions, first_ops, rewritten, storyboard)
+        content = (await llm_chat(messages=[{"role": "user", "content": prompt}],
+                                 temperature=0.0) or "").strip()
+    except Exception:                       # LLM 失败/超时 → 降级首轮（不阻塞既有能力）
+        logger.warning("覆盖度反思环 LLM 调用失败，降级为首轮解析结果", exc_info=True)
+        return []
+    extra = _extract_json_array(content)
+    if extra is None:                       # 输出不可解析 → 降级首轮
+        logger.warning("覆盖度反思环输出不可解析，降级为首轮解析结果：%s", content[:200])
+        return []
+    if not extra:                           # 反思判定无遗漏
+        return []
+    # 对首轮去重（同 type + 定位键，首轮优先）；补充项内部也去重。非 dict 项原样保留，
+    # 交下游 validate_edit_plan 报错（补充项非法整体报错，语义不变）。
+    seen = {_op_dedup_key(op) for op in first_ops if isinstance(op, dict)}
+    supplements: list[dict] = []
+    for op in extra:
+        if not isinstance(op, dict):
+            supplements.append(op)
+            continue
+        key = _op_dedup_key(op)
+        if key in seen:                     # 首轮已覆盖 → 丢弃反思重复项
+            continue
+        seen.add(key)
+        supplements.append(op)
+    return supplements
+
+
 async def parse_instructions(instructions: str, rewritten: list[dict],
                              storyboard: dict) -> list[dict]:
-    """自然语言修改意见 → EditOp dict 列表（走 llm_chat）。
+    """自然语言修改意见 → EditOp dict 列表（走 llm_chat + 覆盖度反思环）。
 
-    LLM 输出一个 JSON 数组。解析失败（无数组/非法 JSON/非数组）或空清单 → raise EditPlanError，
-    .detail 为 LLM 原始说明（API 层据此返 400，见 spec §B2）。本函数只负责解析结构，
-    语义校验（index 越界 / scene_id 不存在 / 未知键）由 validate_edit_plan 负责。
+    首轮 LLM 输出一个 JSON 数组。解析失败（无数组/非法 JSON/非数组）或空清单 → raise EditPlanError，
+    .detail 为 LLM 原始说明（API 层据此返 400，见 spec §B2）。
+
+    首轮出清单后加一轮「覆盖度反思」（_reflect_coverage）：让 LLM 逐条核对意见里每处独立要求是否
+    已有对应 EditOp，补出被漏的项（组合意见丢项已三次浪费整轮出片）。补充项去重后 append 进清单，
+    并整体交既有 validate_edit_plan 校验（补充项非法 → 整体 EditPlanError，语义与首轮一致）。
+    反思环失败/超时/输出不可解析时降级为首轮结果，不阻塞既有能力（见 _reflect_coverage）。
+
+    本函数只负责解析结构；首轮结果的语义校验（index 越界 / scene_id 不存在 / 未知键）仍由调用方的
+    validate_edit_plan 负责（无补充项时本函数不重复校验，保持既有链路语义不变）。
     """
     prompt = _build_parse_prompt(instructions, rewritten, storyboard)
     # 换 import 面：源 get_llm(_LLM_KEY).chat(..., urgent=True).content → 薄 provider llm_chat
@@ -163,6 +266,13 @@ async def parse_instructions(instructions: str, rewritten: list[dict],
         raise EditPlanError(content or "LLM 未返回可解析的编辑清单")
     if not ops:
         raise EditPlanError(content or "未能从修改意见中识别出任何编辑操作")
+    # 覆盖度反思环：核对遗漏并补充。补充项并入后走既有 validate_edit_plan（补充项非法即整体报错）；
+    # 无补充项时按原链路直接返回首轮结果（不重复校验，语义不变）。
+    supplements = await _reflect_coverage(instructions, ops, rewritten, storyboard)
+    if supplements:
+        merged = ops + supplements
+        validate_edit_plan(merged, rewritten, storyboard)
+        return merged
     return ops
 
 

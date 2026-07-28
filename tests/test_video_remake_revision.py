@@ -196,6 +196,99 @@ class TestParseInstructions:
     # llm_chat 无 urgent 概念（实时/batch 分流机制不进本宿主），该断言无对应面。
 
 
+# ---------------- 覆盖度反思环：parse_instructions 第二轮补漏 ----------------
+
+class TestReflectionLoop:
+    """组合意见丢项已三次浪费整轮出片（①改正文丢 duration_s；②改结语丢 set_rounds_range）。
+    覆盖度反思环 = 首轮出清单后第二次 llm_chat 逐条核对遗漏，补出被漏 EditOp（去重并入再校验）。
+
+    两轮 llm_chat 用 side_effect 依次返回「首轮内容 / 反思内容」；断言 await_count==2 证实跑了两轮。
+    """
+
+    async def _parse_two_rounds(self, first_content, reflect_content,
+                                instructions="组合意见"):
+        """side_effect 双返回打桩 llm_chat（首轮 / 反思），跑 parse_instructions，返回 (ops, fake)。"""
+        fake = AsyncMock(side_effect=[first_content, reflect_content])
+        with patch.object(revision, "llm_chat", fake):
+            ops = await revision.parse_instructions(instructions, REWRITTEN, STORYBOARD)
+        return ops, fake
+
+    @pytest.mark.asyncio
+    async def test_reflection_supplements_missing_op_and_dedups(self):
+        # 首轮只出 script_edit（漏 ball_style）；反思补 ball_style + 重复首轮 script_edit（应去重）
+        first = [{"type": "script_edit", "index": 0, "new_text": "改"}]
+        reflect = [{"type": "ball_style", "set_rounds_range": [24, 40]},
+                   {"type": "script_edit", "index": 0, "new_text": "改"}]   # 重复项
+        ops, fake = await self._parse_two_rounds(
+            json.dumps(first, ensure_ascii=False), json.dumps(reflect, ensure_ascii=False))
+        # 合并去重：首轮项在前 + 补充的 ball_style；重复的 script_edit 被丢
+        assert [o["type"] for o in ops] == ["script_edit", "ball_style"]
+        assert ops[0] == first[0]                          # 首轮优先，原样保留
+        assert ops[1]["set_rounds_range"] == [24, 40]      # 遗漏项补回
+        assert fake.await_count == 2                        # 确实跑了两轮
+
+    @pytest.mark.asyncio
+    async def test_reflection_empty_array_keeps_first_round(self):
+        # 反思核对后判无遗漏（空数组）→ 首轮清单原样不变
+        first = [{"type": "card_edit", "scene_id": 3, "body": "结束语"}]
+        ops, fake = await self._parse_two_rounds(
+            json.dumps(first, ensure_ascii=False), "逐条核对后无遗漏。\n[]")
+        assert ops == first
+        assert fake.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_reflection_garbage_degrades_to_first_round(self):
+        # 反思输出不可解析（无 JSON 数组）→ 降级为首轮结果，不阻塞既有能力
+        first = [{"type": "script_delete", "index": 1}]
+        ops, fake = await self._parse_two_rounds(
+            json.dumps(first, ensure_ascii=False), "反思服务抽风，这段不是 JSON 数组")
+        assert ops == first
+        assert fake.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_reflection_llm_error_degrades_to_first_round(self):
+        # 反思 LLM 调用抛异常（超时/网络）→ 降级为首轮结果
+        first = [{"type": "script_delete", "index": 1}]
+        fake = AsyncMock(side_effect=[json.dumps(first, ensure_ascii=False),
+                                      RuntimeError("反思环超时")])
+        with patch.object(revision, "llm_chat", fake):
+            ops = await revision.parse_instructions("删第二句", REWRITTEN, STORYBOARD)
+        assert ops == first
+        assert fake.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_reflection_illegal_supplement_raises_whole(self):
+        # 反思补出越界的 script_delete（index 99）→ 并入后走 validate_edit_plan 整体报错
+        first = [{"type": "script_edit", "index": 0, "new_text": "改"}]
+        reflect = [{"type": "script_delete", "index": 99}]
+        fake = AsyncMock(side_effect=[json.dumps(first, ensure_ascii=False),
+                                      json.dumps(reflect, ensure_ascii=False)])
+        with patch.object(revision, "llm_chat", fake):
+            with pytest.raises(EditPlanError) as ei:
+                await revision.parse_instructions("改+删", REWRITTEN, STORYBOARD)
+        assert "越界" in ei.value.detail
+
+    @pytest.mark.asyncio
+    async def test_reflection_end_to_end_case2_recovers_set_rounds_range(self):
+        """实证案例②端到端：意见两条「改结语 + 全组每组晃 24-40 轮」，首轮丢了 set_rounds_range，
+        覆盖度反思环补回——最终清单含 script_edit + ball_style.set_rounds_range 且整体过校验。"""
+        instructions = ("把最后一句结语改成「好，我们到这里」；"
+                        "另外所有晃动组每组要晃够 24 到 40 轮。")
+        # 首轮 LLM 只解析出结语改写，漏掉剂量诉求（复现历史整轮丢项）
+        first = [{"type": "script_edit", "index": 2, "new_text": "好，我们到这里。"}]
+        # 反思 LLM 逐条核对后补出被漏的剂量 EditOp
+        reflect = [{"type": "ball_style", "set_rounds_range": [24, 40]}]
+        ops, fake = await self._parse_two_rounds(
+            json.dumps(first, ensure_ascii=False), json.dumps(reflect, ensure_ascii=False),
+            instructions=instructions)
+        assert len(ops) == 2
+        assert ops[0]["type"] == "script_edit" and ops[0]["index"] == 2
+        assert ops[1]["type"] == "ball_style" and ops[1]["set_rounds_range"] == [24, 40]
+        assert fake.await_count == 2
+        # 端到端可用：合并清单整体通过既有校验
+        assert revision.validate_edit_plan(ops, REWRITTEN, STORYBOARD) is None
+
+
 # ---------------- B1: validate_edit_plan ----------------
 
 class TestValidateEditPlan:
