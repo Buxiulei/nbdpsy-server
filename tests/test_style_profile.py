@@ -398,10 +398,13 @@ async def test_toctou_race_surfaces_409_not_500(tmp_path, monkeypatch):
         await c.put("/api/style-profile", headers=bearer(key), json={
             "base_version": 0, "profile": _profile("v1"), "source": "manual"})
 
-        # 另一会话抢先落了 v2 的快照,但当前档案行还停在 v1(正是竞态中间态)
+        # 另一会话抢先落了 v2 的快照(挂在该套 set_id 上),但当前套行还停在 v1(正是竞态中间态)
         async with db_module.async_session() as s:
+            set_id = (await s.execute(
+                select(StyleProfile.id).where(StyleProfile.operator_id == op_id)
+            )).scalar_one()
             s.add(StyleProfileVersion(
-                operator_id=op_id, version=2, profile=_profile("其他会话"),
+                set_id=set_id, operator_id=op_id, version=2, profile=_profile("其他会话"),
                 source="manual", note=None, created_by=op_id))
             await s.commit()
 
@@ -680,3 +683,437 @@ async def test_base_version_is_single_source_of_truth(tmp_path, monkeypatch):
             "source": "manual"})
         assert (await c.get("/api/style-profile", headers=bearer(key))
                 ).json()["base_version"] == 2
+
+
+# ==================== 多套 + 每套独立版本链(profile_set)====================
+# 设计 docs/design-2026-07-28-profile-sets.md(§7 测试要点 + §9 五 blocker)。
+
+
+async def _new_set(c, key, *, name, kind="carousel", profile=None, frm=None, scope=None):
+    """POST /sets 建套的测试小助手;返回响应。"""
+    body = {"name": name, "kind": kind}
+    if profile is not None:
+        body["profile"] = profile
+    if frm is not None:
+        body["from"] = frm
+    url = "/api/style-profile/sets"
+    if scope:
+        url += f"?scope={scope}"
+    return await c.post(url, headers=bearer(key), json=body)
+
+
+# ---------------- 兼容性铁律:响应字段只增不减(新增 set/kind)----------------
+
+
+async def test_responses_carry_set_and_kind_fields(tmp_path, monkeypatch):
+    """不带 set 的 GET/PUT/versions/{v} 响应新增 set/kind 字段(增字段,老客户端无感)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-set-fields"
+        await make_operator(key)
+        put = (await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})).json()
+        assert put["set"] == "图文" and put["kind"] == "carousel"
+        got = (await c.get("/api/style-profile", headers=bearer(key))).json()
+        assert got["set"] == "图文" and got["kind"] == "carousel"
+        one = (await c.get("/api/style-profile/versions/1", headers=bearer(key))).json()
+        assert one["set"] == "图文" and one["kind"] == "carousel"
+
+
+# ---------------- B3:0 套运营首写自动建 图文/carousel/is_active 套 ----------------
+
+
+async def test_b3_zero_set_first_put_autocreates_default_set(tmp_path, monkeypatch):
+    """0 套运营不带 set 的 PUT → 自动建 图文/carousel/is_active 套,version 1;GET /sets 可见。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b3"
+        await make_operator(key)
+        assert (await c.get("/api/style-profile", headers=bearer(key))).json()["exists"] is False
+        assert (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"] == []
+        r = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        assert r.status_code == 200 and r.json()["version"] == 1
+        sets = (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"]
+        assert len(sets) == 1
+        assert sets[0]["name"] == "图文"
+        assert sets[0]["kind"] == "carousel"
+        assert sets[0]["is_active"] is True
+        assert sets[0]["version"] == 1
+
+
+async def test_b3_exists_false_returns_admin_default_active_set(tmp_path, monkeypatch):
+    """exists:false 的 GET 返回管理员默认 **is_active** 套(有多套默认时也是 active 那套)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b3-fallback"
+        await make_operator(key)
+        # 管理员建两套默认(图文 active + 文字版)
+        await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY), json={
+            "profile": _profile("默认图文"), "note": None})
+        await _new_set(c, ADMIN_KEY, name="文字版", kind="typeset",
+                       profile=_profile("默认文字"), scope="admin-default")
+        got = (await c.get("/api/style-profile", headers=bearer(key))).json()
+        assert got["exists"] is False
+        assert got["set"] == "图文"  # is_active 那套
+        assert got["profile"] == _profile("默认图文")
+
+
+# ---------------- 两套独立版本链:改 A 不动 B,回退 A 不串 B(需求 §3.1 核心)----------------
+
+
+async def test_two_sets_independent_version_chains(tmp_path, monkeypatch):
+    """建两套 → 改 A 套 → B 套 version/内容不变;回退 A 套不影响 B 套。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-two-chains"
+        await make_operator(key)
+        # 图文 套(auto) v1
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("图A"), "source": "manual"})
+        # 文字版 套 v1
+        assert (await _new_set(c, key, name="文字版", kind="typeset",
+                               profile=_profile("字A"))).status_code == 200
+
+        # 改 文字版:v1→v2→v3
+        await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("字B"), "source": "manual"})
+        await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 2, "profile": _profile("字C"), "source": "manual"})
+
+        # 图文 完全不受影响
+        gt = (await c.get("/api/style-profile?set=图文", headers=bearer(key))).json()
+        assert gt["version"] == 1 and gt["profile"] == _profile("图A")
+        assert [v["version"] for v in (await c.get(
+            "/api/style-profile/versions?set=图文", headers=bearer(key))).json()["versions"]] == [1]
+        # 文字版 自己的链
+        assert [v["version"] for v in (await c.get(
+            "/api/style-profile/versions?set=文字版", headers=bearer(key))).json()["versions"]] == [3, 2, 1]
+
+        # 回退 文字版 到 v1 → 文字版 v4=字A;图文 仍 v1 字面不动
+        rb = await c.post("/api/style-profile/rollback?set=文字版", headers=bearer(key),
+                          json={"to_version": 1, "base_version": 3})
+        assert rb.status_code == 200 and rb.json()["version"] == 4
+        assert (await c.get("/api/style-profile?set=文字版", headers=bearer(key))
+                ).json()["profile"] == _profile("字A")
+        gt2 = (await c.get("/api/style-profile?set=图文", headers=bearer(key))).json()
+        assert gt2["version"] == 1 and gt2["profile"] == _profile("图A")
+
+        # 不带 set 恒指 is_active(图文)那套
+        assert (await c.get("/api/style-profile", headers=bearer(key))).json()["set"] == "图文"
+
+
+async def test_concurrent_puts_two_sets_no_false_conflict(tmp_path, monkeypatch):
+    """两套各自 PUT,base_version 互不干扰,都成功(需求 §3.2:语义上不冲突不应被迫串行)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-no-false-conflict"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("图A"), "source": "manual"})
+        await _new_set(c, key, name="文字版", kind="typeset", profile=_profile("字A"))
+        # 两套当前都 v1;各自带 base_version=1 写,互不 409
+        a = await c.put("/api/style-profile?set=图文", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("图B"), "source": "manual"})
+        b = await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("字B"), "source": "manual"})
+        assert a.status_code == 200 and a.json()["version"] == 2
+        assert b.status_code == 200 and b.json()["version"] == 2
+
+
+# ---------------- is_active 唯一:建 / 设默认 / 删 active 后恒有且仅一个 ----------------
+
+
+def _active_names(sets):
+    return [s["name"] for s in sets if s["is_active"]]
+
+
+async def test_is_active_unique_across_create_activate_delete(tmp_path, monkeypatch):
+    """建套 / PATCH 设默认 / 删 active 套后,is_active 恒有且仅一个。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-active-unique"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        await _new_set(c, key, name="文字版", kind="typeset", profile=_profile("B"))
+        await _new_set(c, key, name="水墨", kind="typeset", profile=_profile("C"))
+
+        sets = (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"]
+        assert _active_names(sets) == ["图文"]  # 首套是 active,后建的不是
+
+        # 设 水墨 为默认
+        p = await c.patch("/api/style-profile/sets/水墨", headers=bearer(key),
+                          json={"is_active": True})
+        assert p.status_code == 200 and p.json()["is_active"] is True
+        sets = (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"]
+        assert _active_names(sets) == ["水墨"]
+        # 不带 set 现在读 水墨
+        assert (await c.get("/api/style-profile", headers=bearer(key))).json()["set"] == "水墨"
+
+        # 删 active(水墨)→ 另一套顶上,仍恰好一个 active
+        d = await c.delete("/api/style-profile/sets/水墨", headers=bearer(key))
+        assert d.status_code == 200
+        sets = (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"]
+        assert len(_active_names(sets)) == 1
+
+
+async def test_patch_is_active_false_rejected_400(tmp_path, monkeypatch):
+    """PATCH is_active=false 单发拒绝(否则 0 active)→ 400。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-active-false"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        r = await c.patch("/api/style-profile/sets/图文", headers=bearer(key),
+                          json={"is_active": False})
+        assert r.status_code == 400, r.text
+
+
+# ---------------- 删到剩一套拒绝 409 ----------------
+
+
+async def test_delete_last_set_rejected_409(tmp_path, monkeypatch):
+    """只剩一套时再删 → 409(否则运营把自己清空)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-del-last"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        r = await c.delete("/api/style-profile/sets/图文", headers=bearer(key))
+        assert r.status_code == 409, r.text
+
+
+# ---------------- B4:删套→重建同名→写 v1 成功且历史空(数据损坏级回归)----------------
+
+
+async def test_b4_delete_recreate_same_name_clean_history(tmp_path, monkeypatch):
+    """删套须同事务删该套全部版本;重建同名套写 v1 成功、历史只含新版本(无孤儿撞唯一键 500)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b4"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("图"), "source": "manual"})
+        # 文字版:攒 v1 v2 v3
+        await _new_set(c, key, name="文字版", kind="typeset", profile=_profile("字1"))
+        await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("字2"), "source": "manual"})
+        await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 2, "profile": _profile("字3"), "source": "manual"})
+        # 删 文字版(此时 2 套,允许)
+        assert (await c.delete("/api/style-profile/sets/文字版", headers=bearer(key))).status_code == 200
+        # 重建同名套 → v1,历史只有 v1(无孤儿 v2/v3)
+        again = await _new_set(c, key, name="文字版", kind="typeset", profile=_profile("新字1"))
+        assert again.status_code == 200 and again.json()["version"] == 1
+        vers = (await c.get("/api/style-profile/versions?set=文字版", headers=bearer(key))).json()["versions"]
+        assert [v["version"] for v in vers] == [1]
+        # 继续写 v2 不撞唯一键(孤儿历史已清)
+        w = await c.put("/api/style-profile?set=文字版", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("新字2"), "source": "manual"})
+        assert w.status_code == 200 and w.json()["version"] == 2
+
+
+# ---------------- B5:profiles-v1 容器哨兵 → 400 ----------------
+
+
+async def test_b5_container_sentinel_rejected_400(tmp_path, monkeypatch):
+    """PUT / PUT admin-default 收到 profiles-v1 多套容器 → 400(工具包过旧),不落库。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b5"
+        await make_operator(key)
+        container = {"schema": "profiles-v1", "active": "图文",
+                     "profiles": {"图文": {"kind": "carousel"}, "文字版": {"kind": "typeset"}}}
+        r = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": container, "source": "manual"})
+        assert r.status_code == 400, r.text
+        assert (await c.get("/api/style-profile", headers=bearer(key))).json()["exists"] is False
+
+        ra = await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY), json={
+            "profile": container, "note": None})
+        assert ra.status_code == 400, ra.text
+
+        # 仅含 schema 键但**无 profiles** 的普通档案不被误伤(极窄哨兵)
+        ok = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": {"schema": "别的", "visual": {}}, "source": "manual"})
+        assert ok.status_code == 200, ok.text
+
+
+# ---------------- B1:管理员默认(NULL)套名靠部分唯一索引拦重名 ----------------
+
+
+async def test_b1_admin_default_duplicate_name_blocked(tmp_path, monkeypatch):
+    """管理员默认多套:重名被部分唯一索引 uq_admin_set_name 拦成 409(NULL 联合约束不生效)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b1"
+        await make_operator(key)
+        # 建默认 图文(经 PUT admin-default 首建)
+        await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY), json={
+            "profile": _profile("默认"), "note": None})
+        # 再 POST 同名 图文 → 409(部分索引拦 NULL 重名)
+        dup = await _new_set(c, ADMIN_KEY, name="图文", kind="carousel",
+                             profile=_profile("撞名"), scope="admin-default")
+        assert dup.status_code == 409, dup.text
+        # 不同名 文字版 → 成功;再撞 文字版 → 409
+        assert (await _new_set(c, ADMIN_KEY, name="文字版", kind="typeset",
+                               profile=_profile("字"), scope="admin-default")).status_code == 200
+        assert (await _new_set(c, ADMIN_KEY, name="文字版", kind="typeset",
+                               profile=_profile("再撞"), scope="admin-default")).status_code == 409
+
+
+async def test_operator_duplicate_set_name_409(tmp_path, monkeypatch):
+    """实运营重名套 → 409(联合唯一约束)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-dup-op"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        assert (await _new_set(c, key, name="文字版", kind="typeset")).status_code == 200
+        assert (await _new_set(c, key, name="文字版", kind="typeset")).status_code == 409
+        # 改名撞已有名 → 409
+        await _new_set(c, key, name="水墨", kind="typeset")
+        r = await c.patch("/api/style-profile/sets/水墨", headers=bearer(key),
+                          json={"new_name": "文字版"})
+        assert r.status_code == 409, r.text
+        # 改名撞名 + 同时设默认(原子)→ 仍 409 而非 500,且没改成默认
+        r2 = await c.patch("/api/style-profile/sets/水墨", headers=bearer(key),
+                           json={"new_name": "文字版", "is_active": True})
+        assert r2.status_code == 409, r2.text
+        sets = (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"]
+        assert [s["name"] for s in sets if s["is_active"]] == ["图文"]  # 默认没被改动
+
+
+# ---------------- 套名边界 + from 复制 ----------------
+
+
+async def test_set_name_validation_and_from_copy(tmp_path, monkeypatch):
+    """name 规则(空/保留字符/超长)→ 400;首尾空白 trim;from 复制当前 profile;from 不存在 → 404。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-name"
+        await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("原"), "source": "manual"})
+
+        assert (await _new_set(c, key, name="")).status_code == 400
+        assert (await _new_set(c, key, name="   ")).status_code == 400
+        assert (await _new_set(c, key, name="a/b")).status_code == 400
+        assert (await _new_set(c, key, name="q?x")).status_code == 400
+        assert (await _new_set(c, key, name="字" * 21)).status_code == 400  # 42 显示宽度 > 20
+
+        # 首尾空白被 trim:建成 文字版
+        assert (await _new_set(c, key, name="  文字版  ", kind="typeset")).status_code == 200
+        assert (await c.get("/api/style-profile?set=文字版", headers=bearer(key))).status_code == 200
+
+        # from 复制 图文 当前 profile
+        cp = await _new_set(c, key, name="副本", frm="图文")
+        assert cp.status_code == 200
+        assert (await c.get("/api/style-profile?set=副本", headers=bearer(key))
+                ).json()["profile"] == _profile("原")
+        # 改 图文 后 副本 不跟着变(独立副本)
+        await c.put("/api/style-profile?set=图文", headers=bearer(key), json={
+            "base_version": 1, "profile": _profile("改"), "source": "manual"})
+        assert (await c.get("/api/style-profile?set=副本", headers=bearer(key))
+                ).json()["profile"] == _profile("原")
+
+        # from 不存在 → 404
+        assert (await _new_set(c, key, name="X", frm="没这套")).status_code == 404
+
+
+# ---------------- set 不存在 → 404(有档案但无此套);0 套 → 回落不 404 ----------------
+
+
+async def test_set_not_found_semantics(tmp_path, monkeypatch):
+    """有档案但无此套:GET/PUT/versions/rollback → 404;运营 0 套 GET ?set= → 回落默认不 404。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-404"
+        await make_operator(key)
+        # 0 套时 GET ?set=X → 回落默认(exists:false),不 404
+        z = await c.get("/api/style-profile?set=不存在", headers=bearer(key))
+        assert z.status_code == 200 and z.json()["exists"] is False
+
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("A"), "source": "manual"})
+        # 有档案但无此套 → 404
+        assert (await c.get("/api/style-profile?set=没这套", headers=bearer(key))).status_code == 404
+        assert (await c.put("/api/style-profile?set=没这套", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("B"), "source": "manual"})).status_code == 404
+        assert (await c.get("/api/style-profile/versions?set=没这套",
+                            headers=bearer(key))).status_code == 404
+        assert (await c.get("/api/style-profile/versions/1?set=没这套",
+                            headers=bearer(key))).status_code == 404
+        assert (await c.post("/api/style-profile/rollback?set=没这套", headers=bearer(key),
+                             json={"to_version": 1, "base_version": 1})).status_code == 404
+
+
+# ---------------- 管理员默认多套 + scope 权限(B2)----------------
+
+
+async def test_admin_default_sets_scope_and_permissions(tmp_path, monkeypatch):
+    """scope=admin-default:读(GET /sets)不设门,写(POST/PATCH/DELETE)需 admin;作用于 NULL 行。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b2"
+        await make_operator(key)
+        # admin 建两套默认
+        await c.put("/api/style-profile/admin-default", headers=bearer(ADMIN_KEY), json={
+            "profile": _profile("默认图"), "note": None})
+        assert (await _new_set(c, ADMIN_KEY, name="文字版", kind="typeset",
+                               profile=_profile("默认字"), scope="admin-default")).status_code == 200
+        # 非 admin 可读 admin-default 套(客户端 onboarding 据此继承)
+        r = await c.get("/api/style-profile/sets?scope=admin-default", headers=bearer(key))
+        assert r.status_code == 200
+        names = sorted(s["name"] for s in r.json()["sets"])
+        assert names == ["图文", "文字版"]
+        # 非 admin 写 admin-default → 403
+        assert (await _new_set(c, key, name="偷建", kind="typeset", scope="admin-default")
+                ).status_code == 403
+        assert (await c.patch("/api/style-profile/sets/图文?scope=admin-default",
+                              headers=bearer(key), json={"is_active": True})).status_code == 403
+        assert (await c.delete("/api/style-profile/sets/图文?scope=admin-default",
+                               headers=bearer(key))).status_code == 403
+        # admin 读某套 via ?set= 走 admin-default 端点
+        got = (await c.get("/api/style-profile/admin-default?set=文字版",
+                           headers=bearer(ADMIN_KEY))).json()
+        assert got["set"] == "文字版" and got["profile"] == _profile("默认字")
+        # 运营自己的 /sets 与 admin-default 隔离:运营 0 套
+        assert (await c.get("/api/style-profile/sets", headers=bearer(key))).json()["sets"] == []
+
+
+# ---------------- 合并收敛补:B3 建套 flush 撞键 → 409、rollback 容器 → 400 ----------------
+
+
+async def test_b3_autocreate_name_collision_conflicts_409_not_500(tmp_path, monkeypatch):
+    """B3 自动建套的 flush 撞 (operator_id,name) 唯一 → 409 非裸 500(修前 flush 在兜底 try 外)。
+
+    确定性触发:先插一条同运营的**非活跃**「图文」套(使 _active_set 返 None 走 B3 建套路径,
+    但 name 已被占用),再不带 set 首写 → 建套 flush 撞 name 唯一。fable 指出既有 TOCTOU 测试
+    只覆盖版本行 (set_id,version) 撞键(套已存在),盖不住本路径。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-b3-collide"
+        op_id = await make_operator(key)
+        async with db_module.async_session() as s:
+            s.add(StyleProfile(
+                operator_id=op_id, name="图文", kind="carousel", is_active=False,
+                version=1, profile=_profile("占名"), source="manual"))
+            await s.commit()
+        # 不带 set 首写:无活跃套 → 走 B3 建「图文」→ flush 撞 (operator_id,name)
+        r = await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("我的"), "source": "manual"})
+        assert r.status_code == 409, r.text  # 关键:409 而非 500
+
+
+async def test_rollback_to_container_version_rejected_400(tmp_path, monkeypatch):
+    """回退目标是迁移拆容器时挂的整份 profiles-v1 容器快照 → 400,不原样写成套里套。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        key = "sp-rb-container"
+        op_id = await make_operator(key)
+        await c.put("/api/style-profile", headers=bearer(key), json={
+            "base_version": 0, "profile": _profile("图"), "source": "manual"})
+        # 偷偷插一条容器版本(模拟迁移拆容器时挂的「迁移前整份历史」)
+        async with db_module.async_session() as s:
+            set_row = (await s.execute(select(StyleProfile).where(
+                StyleProfile.operator_id == op_id))).scalar_one()
+            s.add(StyleProfileVersion(
+                set_id=set_row.id, operator_id=op_id, version=99,
+                profile={"schema": "profiles-v1", "active": "图文", "profiles": {}},
+                source="manual", note="迁移前整份历史;模拟"))
+            await s.commit()
+        r = await c.post("/api/style-profile/rollback", headers=bearer(key), json={
+            "to_version": 99, "base_version": 1})
+        assert r.status_code == 400, r.text
+        # 当前档案没被容器污染
+        assert "profiles" not in (await c.get(
+            "/api/style-profile", headers=bearer(key))).json()["profile"]

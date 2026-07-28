@@ -22,12 +22,15 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,16 +38,32 @@ from app.core.db import Base
 
 
 class StyleProfile(Base):
-    """某运营的当前风格档案;operator_id 唯一(一人一份当前态)。
+    """某运营某一「套」风格档案的当前态;一运营 N 套,每套一行。
 
-    ``operator_id IS NULL`` 的那一行是**管理员默认档案**(无个人档案时的回落内容),
-    由迁移 seed 一次。唯一约束在 SQLite/PG 下都不约束 NULL,故"只有一行 NULL"靠
-    "应用层无任何写 NULL 行的路径"保证,不靠约束。
+    ``operator_id IS NULL`` 的行是**管理员默认档案**(无个人档案时的回落内容),也可多套。
+
+    唯一性(设计 §9 B1):
+    - 实 operator 靠联合唯一约束 ``(operator_id, name)``。
+    - 管理员默认(NULL)靠**部分唯一索引** ``uq_admin_set_name``(WHERE operator_id IS NULL)——
+      SQLite/PG 的 UNIQUE 都不约束 NULL(NULL≠NULL,两行 (NULL,'图文') 都能插),而本表新增
+      管理员默认多套=写多 NULL 行,拆了"只有一行 NULL"的旧根基,故必须用部分索引兜住。
+    - ``is_active``「同一 owner 恒有且仅一个 True」是**应用层不变量**(建套/设默认/删套事务内
+      先改后数复核,同 operator_service._ensure_admin_remains),不靠 DB 约束。
     """
 
     __tablename__ = "style_profiles"
     __table_args__ = (
-        UniqueConstraint("operator_id", name="uq_style_profiles_operator"),
+        UniqueConstraint(
+            "operator_id", "name", name="uq_style_profiles_operator_name"
+        ),
+        # 管理员默认(NULL operator)的套名唯一:联合约束对 NULL 不生效,这里补部分唯一索引。
+        Index(
+            "uq_admin_set_name",
+            "name",
+            unique=True,
+            sqlite_where=text("operator_id IS NULL"),
+            postgresql_where=text("operator_id IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -55,6 +74,12 @@ class StyleProfile(Base):
     operator_id: Mapped[int | None] = mapped_column(
         ForeignKey("operators.id", ondelete="CASCADE"), nullable=True, default=None
     )
+    # 套名:运营自定义,≤20 显示宽度、允许中文;(operator_id, name) 唯一,NULL 靠部分索引唯一。
+    name: Mapped[str] = mapped_column(String(40), default="图文")
+    # 套类型:carousel(图文)/typeset(文字版);server 原样存不理解含义,客户端按它选套。
+    kind: Mapped[str] = mapped_column(String(20), default="carousel")
+    # 该套是否为该 owner 的默认套;应用层保证恒有且仅一个 True。
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # 当前版本号,从 1 起自增;管理员默认档案行置 0(它不参与版本流)
     version: Mapped[int] = mapped_column(Integer, default=1)
     # 风格内容:原样存取的 JSON(结构见需求文档第四节),server 不校验语义
@@ -67,21 +92,30 @@ class StyleProfile(Base):
 
 
 class StyleProfileVersion(Base):
-    """一条历史版本快照(append-only,永不删改);(operator_id, version) 唯一。
+    """一条历史版本快照(append-only,永不删改);(set_id, version) 唯一。
 
+    版本链挂在**套**(set_id)上而非 operator 上——回退/并发写以套为单位互不干扰。
     唯一约束同时是"读当前 version → 写 version+1"这段读改写竞态的最后一道闸:
     并发双写至多落一条,不会出现两条同号版本。正常并发由 PUT 的 base_version
     乐观锁在业务层拦掉(409)。
+
+    ``operator_id`` 保留(不再作版本归属键):供 operator_service.delete_operator 按运营
+    一次清空其全部套的历史(应用层级联,不依赖 SQLite 外键)。管理员默认(NULL operator)
+    的套不进本表——``operator_id`` NOT NULL,且管理员默认不可回退,与拆分前语义一致。
     """
 
     __tablename__ = "style_profile_versions"
     __table_args__ = (
         UniqueConstraint(
-            "operator_id", "version", name="uq_style_profile_versions_op_ver"
+            "set_id", "version", name="uq_style_profile_versions_set_ver"
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # 归属套:FK → style_profiles.id;取代原先用 operator_id 关联版本的方式。
+    set_id: Mapped[int] = mapped_column(
+        ForeignKey("style_profiles.id", ondelete="CASCADE"), index=True
+    )
     operator_id: Mapped[int] = mapped_column(
         ForeignKey("operators.id", ondelete="CASCADE"), index=True
     )
