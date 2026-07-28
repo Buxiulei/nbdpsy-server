@@ -10,7 +10,7 @@ EditOp v1 类型（逐字，spec §B2）：
   - script_delete {index}                    删某句
   - script_insert {after_index, text}        在某句后插新句
   - card_edit     {scene_id, title?, body?, duration_s?}  改卡片文案 / 改卡片页面停留时长
-  - ball_style    {y_ratio?|palette?|period_s?|color_mode?|color_cycle_periods?}   全局球段参数
+  - ball_style    {y_ratio?|palette?|period_s?|color_mode?|color_cycle_periods?|set_rounds_range?}   全局球段参数
   - global_param  {sentence_gap?|disclaimer_text?|closing_line?}  全局参数
   - scene_edit    {scene_id, static: true}   把某个运动球段转静止（第三轮验收扩展）
 
@@ -40,7 +40,8 @@ _SCRIPT_INDEX_FIELDS = {
     "script_delete": "index",
     "script_insert": "after_index",
 }
-_BALL_STYLE_KEYS = ("y_ratio", "palette", "period_s", "color_mode", "color_cycle_periods")
+_BALL_STYLE_KEYS = ("y_ratio", "palette", "period_s", "color_mode",
+                    "color_cycle_periods", "set_rounds_range")
 _BALL_COLOR_MODES = ("cycle", "single")     # color_mode 允许值：相位轮播 / 全程单色
 _GLOBAL_PARAM_KEYS = ("sentence_gap", "disclaimer_text", "closing_line")
 _VALID_OP_TYPES = (
@@ -58,7 +59,7 @@ _OP_SCHEMA = """可用编辑操作（EditOp）——每条是一个 JSON 对象�
 - {"type": "script_delete", "index": <台词下标>}                                删除某一句台词
 - {"type": "script_insert", "after_index": <台词下标>, "text": "<新增的中文台词>"}  在某句之后插入新台词
 - {"type": "card_edit", "scene_id": <场景 id>, "title": "<新标题(可选)>", "body": "<新正文(可选)>", "duration_s": <正数秒(可选)>}  改卡片文案 / 改卡片页面停留时长（title/body/duration_s 至少给一个；用户说「这张卡/须知/结尾页停留太长、缩短到X秒、翻太快、多停一会」就用 duration_s 给目标秒数）
-- {"type": "ball_style", "y_ratio": <0~1 球心竖直位置>, "palette": [...], "period_s": <摆动周期秒>, "color_mode": "cycle|single", "color_cycle_periods": <正整数N>}  调整全局球段参数（只给需要改的键；color_mode=cycle 按相位轮播调色板，single 全程单色；color_cycle_periods=N 让运动球每晃 N 个周期就换调色板下一色，用户说「每晃一组变色」用 N=1、「变色快一点」用更小的 N、「变色慢一点」用更大的 N）
+- {"type": "ball_style", "y_ratio": <0~1 球心竖直位置>, "palette": [...], "period_s": <摆动周期秒>, "color_mode": "cycle|single", "color_cycle_periods": <正整数N>, "set_rounds_range": [<最少轮数>, <最多轮数>]}  调整全局球段参数（只给需要改的键；color_mode=cycle 按相位轮播调色板，single 全程单色；color_cycle_periods=N 让运动球每晃 N 个周期就换调色板下一色，用户说「每晃一组变色」用 N=1、「变色快一点」用更小的 N、「变色慢一点」用更大的 N；set_rounds_range=[最少,最多] 把每一个晃动组的双侧刺激重编排到该轮数区间——一左一右算一轮（一个来回=一个周期），临床上每组常见 24-40 轮，用户说「每组/所有晃动组晃 24 到 40 轮」「每组轮数太少/每组太短/每组晃的次数不够」「一组要晃够多少个来回」这类要求剂量的说法时用 set_rounds_range=[24,40]）
 - {"type": "global_param", "sentence_gap": <句间停顿秒>, "disclaimer_text": "<须知文案>", "closing_line": "<结语>"}  调整全局参数（只给需要改的键）
 - {"type": "scene_edit", "scene_id": <运动球段场景 id>, "static": true}  把指定的某个运动球段（小球在晃动的那种）转成静止不动的居中球（用户说「这段球别晃 / 喊开始前的球先别动 / 开头这段静止 / 把某段小球停下来」时用，scene_id 必须选下面场景列表里「静止=False」的球段）"""
 
@@ -118,6 +119,8 @@ def _build_parse_prompt(instructions: str, rewritten: list[dict], storyboard: di
         "- 意见涉及多处修改就输出多个 EditOp；改台词用 script_*，改卡片用 card_edit，"
         "改球段/全局参数用 ball_style/global_param；把某段晃动的球停成静止用 scene_edit；"
         "让球「每晃一组变色 / 变色快点慢点」用 ball_style.color_cycle_periods；"
+        "让「每个晃动组晃够多少轮 / 每组太短太少 / 一左一右算一轮 / 每组 24 到 40 轮」用 "
+        "ball_style.set_rounds_range；"
         "「某张卡片/页面停留太长太短、缩短到X秒、翻太快」用 card_edit.duration_s。\n"
         "- index / after_index 必须是上面台词列表里真实存在的下标；scene_id 必须是真实场景 id"
         "（scene_edit 的 scene_id 必须选「静止=False」的运动球段）。\n"
@@ -238,6 +241,18 @@ def validate_edit_plan(ops: list[dict], rewritten: list[dict],
                                     or ccp < 1):
                 raise EditPlanError(
                     f"第 {pos} 条编辑（ball_style）：color_cycle_periods={ccp!r} 必须是正整数")
+            srr = op.get("set_rounds_range")     # 摆动组临床剂量区间 [min,max]：长度 2 + 正整数 + min≤max
+            if srr is not None:
+                if (not isinstance(srr, (list, tuple)) or len(srr) != 2
+                        or any(isinstance(x, bool) or not isinstance(x, int) or x < 1
+                               for x in srr)):
+                    raise EditPlanError(
+                        f"第 {pos} 条编辑（ball_style）：set_rounds_range={srr!r} 必须是两个正整数"
+                        f"[最少轮数, 最多轮数]")
+                if srr[0] > srr[1]:
+                    raise EditPlanError(
+                        f"第 {pos} 条编辑（ball_style）：set_rounds_range 最少轮数 {srr[0]} "
+                        f"不能大于最多轮数 {srr[1]}")
 
         elif op_type == "scene_edit":
             if "scene_id" not in op:

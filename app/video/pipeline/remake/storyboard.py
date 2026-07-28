@@ -475,6 +475,217 @@ def _emit_cycle_motion_run(scenes: list, src_scenes: list, i: int, j: int,
     return phase_idx
 
 
+# ==================== 摆动组临床剂量重编排（用户第五轮反馈：EMDR 每组 24-40 轮）====================
+# 诊断（job6 实证）：「说话停球」互斥把原片连续双侧刺激按每个检查点问句切成 ~14 轮的碎组，低于临床
+# 剂量（每组 24-40 轮不间断，一左一右=1 轮=一个周期 T≈2.486s）。逐组硬拉长会得荒谬总时长；正解是
+# 「重编排聚合」——以检查点语音块为组边界，每组摆动轮数 clamp 到 [min,max] 且组内不间断，零散旁白
+# 静止块前移堆进本组开头静止窗（真正达成「组内语音=零」的互斥）。仅弹性模式 + 给出 set_rounds_range 启用。
+_REORCH_REST_MIN_S = 8.0        # 无语音静止 ≥ 此秒 = 功能性留白 rest = 天然组边界（保留原时长）
+# 检查点（组边界）语义：语音块含疑问句（？/?）或含以下检查语义关键词即为组边界；其余零散旁白
+# （指令/鼓励，如「继续保持专注」「看着球说颜色」）不是边界，前移进本组开头静止窗。
+_REORCH_CHECK_KEYWORDS = ("打分", "打个分", "感受", "留意到", "想法")
+
+
+def _reorch_seg_text(seg: dict) -> str:
+    return str(seg.get("zh") or "")
+
+
+def _is_boundary_speech(texts: list[str]) -> bool:
+    """静止块语音是否构成「检查点语音块」（=组边界）：任一句含疑问句或检查语义关键词。"""
+    for t in texts:
+        if "？" in t or "?" in t or any(k in t for k in _REORCH_CHECK_KEYWORDS):
+            return True
+    return False
+
+
+def _clamp_rounds(x: float, lo: int, hi: int) -> int:
+    """组摆动轮数 = clamp(原有总运动轮数, min, max) 四舍五入到整轮。lo/hi 均正整数故结果 ∈[lo,hi]。"""
+    return int(round(min(max(x, lo), hi)))
+
+
+def _assign_segments_to_scenes(scenes: list[dict], retimed: list[dict]) -> dict:
+    """每条台词句按其**起点** start 归到对应场景下标（新轴）：语音从哪个场景区间开始即归该场景，
+    无命中归起点最近场景。用起点而非中点/最大重叠——静止块末句配音常向后越过块末探入相邻卡片
+    （句尾 +0.5 尾延展 + 自然时长），按中点/重叠会把该句误判归卡片、平移后落到前一段运动上
+    （job6 seg114「慢慢睁开眼睛」实证）；起点恰是「carve 把该句切进哪个静止窗」的稳定归属。
+    台词句（非 no_dub）若归到运动段则防御式改归起点最近静止段（A2：台词必落静止窗）。
+    返回 {scene_idx: [seg_idx,...]}。"""
+    static_idxs = [i for i, sc in enumerate(scenes) if _is_static_ball(sc)]
+    spans = [(float(sc.get("t0", 0.0)), float(sc.get("t1", 0.0))) for sc in scenes]
+
+    def _center(idx: int) -> float:
+        return (spans[idx][0] + spans[idx][1]) / 2.0
+
+    out: dict[int, list[int]] = {}
+    for si, seg in enumerate(retimed):
+        if seg.get("start") is None:
+            continue
+        start = float(seg["start"])
+        best = next((idx for idx, (t0, t1) in enumerate(spans) if t0 <= start < t1), None)
+        if best is None:                                # 起点不落任何区间（越界）→ 起点最近场景
+            best = min(range(len(spans)), key=lambda k: abs(_center(k) - start))
+        if (not seg.get("no_dub")) and _is_motion_ball(scenes[best]) and static_idxs:
+            best = min(static_idxs, key=lambda k: abs(_center(k) - start))
+        out.setdefault(best, []).append(si)
+    return out
+
+
+def _emit_static_window(new_scenes: list, retimed: list, seg_idxs: list[int],
+                        cursor: float, *, period: float, fps: int, base_params: dict) -> float:
+    """组开头旁白窗 / 检查点边界窗：把 seg_idxs（台词先后）在静止窗内按 LEAD 起、句间 GAP(1s)、
+    尾 TAIL 顺排落位（原地改 retimed 的 start/end），窗末端吸附到「球过中点」栅格 k*(T/2)（停/起球
+    在中心零跳变），发一个米白居中静止场景。返回窗末端（下一段起点）。"""
+    durs = [float(retimed[i].get("end", 0.0)) - float(retimed[i].get("start", 0.0))
+            for i in seg_idxs]
+    window_dur = max(timeline.min_card_duration(durs), timeline._MIN_STATIC_S)
+    end = timeline.phase_ceil(cursor + window_dur, period=period, fps=fps)
+    t = cursor + timeline._LEAD                          # 首句提前量
+    for i, d in zip(seg_idxs, durs):
+        retimed[i]["start"] = round(t, 3)
+        retimed[i]["end"] = round(t + d, 3)
+        t += d + timeline._GAP                           # 句间 1s 顺排
+    new_scenes.append({"t0": cursor, "t1": end, "type": "ball_exercise",
+                       "renderer": "programmatic",
+                       "params": dict(base_params, ball_color=style.CREAM, static=True)})
+    return end
+
+
+def _emit_rest_window(new_scenes: list, cursor: float, rest_dur: float, *,
+                      period: float, fps: int, base_params: dict) -> float:
+    """功能性留白 rest 边界：保留原时长（末端吸附栅格），无语音的米白居中静止球。返回窗末端。"""
+    end = timeline.phase_ceil(cursor + rest_dur, period=period, fps=fps)
+    new_scenes.append({"t0": cursor, "t1": end, "type": "ball_exercise",
+                       "renderer": "programmatic",
+                       "params": dict(base_params, ball_color=style.CREAM, static=True)})
+    return end
+
+
+def _emit_reorch_motion(new_scenes: list, t0: float, t1: float, phase_idx: int, *,
+                        base_params: dict, ball_palette: list, color_mode: str | None,
+                        span: float, prev_static: bool, next_static: bool) -> int:
+    """组内不间断摆动：[t0,t1] 按 color_cycle 轮色（span=N·T）切成 motion↔motion 色块逐段上色。
+    色块内边界 motion↔motion（全局相位保球位连续、栅格豁免）；首/末色块紧邻静止且轮到米白则跳槽
+    （避免运动米白球看着像静止）。color_mode=single 时全程取调色板首色。返回推进后的 phase_idx。"""
+    chunks = _split_motion_by_periods(t0, t1, run_ref=t0, span=span)
+    m = len(chunks)
+    for pos, (c0, c1) in enumerate(chunks):
+        if color_mode == "single":
+            color = ball_palette[0]
+            phase_idx += 1
+        else:
+            touch = (pos == 0 and prev_static) or (pos == m - 1 and next_static)
+            color = ball_palette[phase_idx % len(ball_palette)]
+            if color == style.CREAM and touch:
+                phase_idx += 1
+                color = ball_palette[phase_idx % len(ball_palette)]
+            phase_idx += 1
+        new_scenes.append({"t0": c0, "t1": c1, "type": "ball_exercise",
+                           "renderer": "programmatic",
+                           "params": dict(base_params, ball_color=color)})
+    return phase_idx
+
+
+def _reorch_build_groups(zone_idxs: list[int], scenes: list[dict], retimed: list[dict],
+                         scene_segs: dict) -> list[dict]:
+    """把球练习区场景序列按检查点语音块 / 功能性留白 rest 分组。每组累计：前移旁白句 narr + 组内
+    总运动时长 motion_dur + 组尾边界 bound（("speech", segs) / ("rest", 原时长) / None=末组无边界）。"""
+    groups: list[dict] = []
+    cur: dict = {"narr": [], "motion_dur": 0.0}
+    for si in zone_idxs:
+        sc = scenes[si]
+        if _is_motion_ball(sc):
+            cur["motion_dur"] += float(sc["t1"]) - float(sc["t0"])
+        elif _is_static_ball(sc):
+            segs = sorted(scene_segs.get(si, []))
+            texts = [_reorch_seg_text(retimed[i]) for i in segs]
+            dur = float(sc["t1"]) - float(sc["t0"])
+            if (not segs) and dur >= _REORCH_REST_MIN_S:        # 功能性留白 rest = 天然边界
+                cur["bound"] = ("rest", dur)
+                groups.append(cur); cur = {"narr": [], "motion_dur": 0.0}
+            elif segs and _is_boundary_speech(texts):           # 检查点语音块 = 组边界
+                cur["bound"] = ("speech", segs)
+                groups.append(cur); cur = {"narr": [], "motion_dur": 0.0}
+            else:                                               # 零散旁白（或 <8s 无语音静止）→ 前移进组开头
+                cur["narr"].extend(segs)
+    if cur["narr"] or cur["motion_dur"] > 1e-6:                 # 末组：无组尾边界
+        cur["bound"] = None
+        groups.append(cur)
+    return groups
+
+
+def _reorchestrate_rounds(scenes: list[dict], retimed: list[dict], *,
+                          rounds_min: int, rounds_max: int, period: float, fps: int,
+                          color_cycle_periods: int | None, ball_palette: list,
+                          color_mode: str | None, base_params: dict) -> float:
+    """摆动组临床剂量重编排（见本节顶部说明）。原地重排 scenes[:] 与 retimed（各句 start/end 重
+    落位），返回重排后新总时长。前置：scenes 是弹性组装完成态（carve/桥接/合并后），retimed 为
+    各句新轴 start/end。卡片段保时长仅整体平移；球练习区按组重建（组开头旁白窗 + 组内不间断摆动
+    clamp 到 [min,max] + 组尾检查点/rest 静止窗）。所有 motion↔static 边界由构造落 k*(T/2) 栅格。"""
+    scene_segs = _assign_segments_to_scenes(scenes, retimed)
+    span = float(color_cycle_periods or 1) * period
+    h = period / 2.0
+    # 分单元：卡片各自成单元；连续球场景聚成「球练习区」单元
+    units: list[tuple] = []
+    i, n = 0, len(scenes)
+    while i < n:
+        if scenes[i].get("type") == "ball_exercise":
+            j = i
+            while j < n and scenes[j].get("type") == "ball_exercise":
+                j += 1
+            units.append(("zone", list(range(i, j)))); i = j
+        else:
+            units.append(("card", i)); i += 1
+
+    new_scenes: list[dict] = []
+    cursor, phase_idx = 0.0, 0
+    for kind, payload in units:
+        if kind == "card":                                  # 卡片：保时长整体平移（含内部台词句同移）
+            sc = scenes[payload]
+            dur = float(sc["t1"]) - float(sc["t0"])
+            delta = cursor - float(sc["t0"])
+            for seg_i in scene_segs.get(payload, []):
+                if retimed[seg_i].get("start") is None:
+                    continue
+                retimed[seg_i]["start"] = round(float(retimed[seg_i]["start"]) + delta, 3)
+                retimed[seg_i]["end"] = round(float(retimed[seg_i]["end"]) + delta, 3)
+            nsc = dict(sc); nsc["t0"], nsc["t1"] = cursor, _quantize_t(cursor + dur)
+            new_scenes.append(nsc); cursor = nsc["t1"]
+            continue
+        # 球练习区：按组边界重建
+        for g in _reorch_build_groups(payload, scenes, retimed, scene_segs):
+            if g["narr"]:                                   # 组开头旁白窗（前移的零散旁白）
+                cursor = _emit_static_window(new_scenes, retimed, g["narr"], cursor,
+                                             period=period, fps=fps, base_params=base_params)
+            if g["motion_dur"] > 1e-6:                       # 组内不间断摆动，轮数 clamp 到 [min,max]
+                rounds = _clamp_rounds(g["motion_dur"] / period, rounds_min, rounds_max)
+                k0 = round(cursor / h)                       # cursor 落栅格（静止窗末端 phase_ceil）→ 复原相位序
+                m_t1 = _quantize_t((k0 + 2 * rounds) * h)    # 整 rounds 轮 = 2·rounds 个半周期 → 末端落栅格
+                prev_static = bool(new_scenes) and _is_static_ball(new_scenes[-1])
+                phase_idx = _emit_reorch_motion(
+                    new_scenes, cursor, m_t1, phase_idx, base_params=base_params,
+                    ball_palette=ball_palette, color_mode=color_mode, span=span,
+                    prev_static=prev_static, next_static=g["bound"] is not None)
+                cursor = m_t1
+            bound = g["bound"]
+            if bound is None:
+                continue
+            if bound[0] == "rest":                           # 功能性留白 rest 边界（保原时长）
+                cursor = _emit_rest_window(new_scenes, cursor, bound[1],
+                                           period=period, fps=fps, base_params=base_params)
+            else:                                            # 检查点语音边界窗
+                cursor = _emit_static_window(new_scenes, retimed, bound[1], cursor,
+                                             period=period, fps=fps, base_params=base_params)
+
+    _merge_adjacent_statics(new_scenes)                      # 零运动组致的相邻静止合一
+    # 不跑 _snap_ball_boundaries：所有 motion↔static 边界由构造已落 k*(T/2) 栅格，而 phase_ceil
+    # 对「量化后略高于理想 k·h 的栅格点」非幂等（会把已对齐边界再向前顶半周期 → 每组少半轮），
+    # 反而破坏已正确的边界。终校仅供 carve/量化出的非栅格边界，此处无此类边界。
+    for idx, sc in enumerate(new_scenes, start=1):
+        sc["id"] = idx
+    scenes[:] = new_scenes
+    return new_scenes[-1]["t1"] if new_scenes else 0.0
+
+
 async def build_storyboard(facts: dict, *, duration: float,
                            segments: list[dict] | None = None,
                            clip_durations: list[float] | None = None,
@@ -485,7 +696,8 @@ async def build_storyboard(facts: dict, *, duration: float,
                            color_cycle_periods: int | None = None,
                            static_source_spans: list | None = None,
                            sentence_gap: float | None = None,
-                           card_duration_overrides: list | None = None) -> dict:
+                           card_duration_overrides: list | None = None,
+                           set_rounds_range: list | None = None) -> dict:
     """原片事实 → nbdpsy_v1 分镜脚本。
 
     revision 参数覆盖（B4，均 None 时行为不变，显式传参不 monkeypatch 全局常量）：
@@ -501,6 +713,11 @@ async def build_storyboard(facts: dict, *, duration: float,
     card_duration_overrides=[[src_t0,src_t1,new_dur],...] 把源区间命中的卡片场景目标时长强制成
     new_dur（缩短/延长页面停留），后续场景整体前移、全局顺序护栏 + 栅格终校照走——供 card_edit
     的 duration_s 落地（弹性时间轴 relayout 消费；非弹性模式无 relayout，该覆盖不生效）。
+
+    第五轮验收扩展（None/空时行为逐字节不变，恒等锚测试保证）：
+    set_rounds_range=[min,max] 把球练习区按检查点语音块为边界重编排——每组摆动轮数 clamp 到
+    [min,max] 且组内不间断、零散旁白前移进组开头静止窗（组内语音=零），临床剂量落地（见
+    _reorchestrate_rounds）。仅弹性模式生效（非弹性无 retimed，该覆盖不消费）。
 
     球段（wave2 + A4）：连续微段按「运动 run / 静止 run」聚合（run 仅判运动/静止与保时长）。
     运动 run 用全片统一中位周期，颜色恢复 per 相位粒度——每相位按相位序循环取 BALL_PALETTE
@@ -627,9 +844,24 @@ async def build_storyboard(facts: dict, *, duration: float,
     if retimed is not None:
         _bridge_speech_gaps(scenes, speech_windows)
         _merge_adjacent_statics(scenes)
-        _snap_ball_boundaries(scenes, period=global_period, fps=style.FPS)
-        _trim_static_speech_tails(scenes, speech_windows,
-                                  period=global_period, fps=style.FPS)
+        if set_rounds_range:
+            # 摆动组临床剂量重编排（第五轮反馈）：以桥接/合并后的干净静止块为分组依据，重建整个
+            # 球练习区（组内不间断摆动 clamp 到 [min,max] + 旁白前移）。重编排自带栅格终校与合并，
+            # 故不再跑原轴的 _snap/_trim（其产物会被整段重建丢弃）。new_total 改为重排后新总时长。
+            reorch_base = {"bg_color": style.DARK_BG, "period_s": global_period,
+                           "amplitude_ratio": style.BALL_AMPLITUDE_RATIO,
+                           "audio_cue": "alternating_tone"}
+            if y_ratio is not None:
+                reorch_base["y_ratio"] = float(y_ratio)
+            new_total = _reorchestrate_rounds(
+                scenes, retimed, rounds_min=int(set_rounds_range[0]),
+                rounds_max=int(set_rounds_range[1]), period=global_period, fps=style.FPS,
+                color_cycle_periods=color_cycle_periods, ball_palette=ball_palette,
+                color_mode=color_mode, base_params=reorch_base)
+        else:
+            _snap_ball_boundaries(scenes, period=global_period, fps=style.FPS)
+            _trim_static_speech_tails(scenes, speech_windows,
+                                      period=global_period, fps=style.FPS)
 
     for idx, sc in enumerate(scenes, start=1):  # 聚合后重排连续 id
         sc["id"] = idx

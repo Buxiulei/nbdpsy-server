@@ -1181,3 +1181,187 @@ class TestSpeechRhythmEndToEnd:
         # 总时长不变、校验全过
         assert sb["source"]["duration_s"] == scenes[-1]["t1"]
         storyboard.validate_storyboard(sb)
+
+
+class TestReorchestrateRounds:
+    """摆动组临床剂量重编排（第五轮反馈：EMDR 每组 24-40 轮，一左一右=1 轮=一个周期 T）。
+
+    仅弹性模式 + 给出 set_rounds_range 时启用；缺省 None 时输出与基线逐字节一致（恒等锚）。
+    """
+    T = 2.5                                             # 测试统一周期（period_s=2.5 → 整轮好算）
+
+    async def _build(self, facts, segs, clip_durations, srr, **kw):
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            return await storyboard.build_storyboard(
+                facts, duration=kw.pop("duration"), segments=[dict(s) for s in segs],
+                clip_durations=clip_durations, period_s=self.T, set_rounds_range=srr, **kw)
+
+    @staticmethod
+    def _is_motion(s):
+        return s["type"] == "ball_exercise" and not s["params"].get("static")
+
+    @staticmethod
+    def _is_static(s):
+        return s["type"] == "ball_exercise" and s["params"].get("static")
+
+    def _motion_group_rounds(self, scenes):
+        """连续运动场景聚成一组（组内色块 motion↔motion 不隔断），返回各组四舍五入轮数。"""
+        rounds, run = [], None
+        for sc in scenes:
+            if self._is_motion(sc):
+                run = [sc["t0"], sc["t1"]] if run is None else [run[0], sc["t1"]]
+            elif run is not None:
+                rounds.append(round((run[1] - run[0]) / self.T)); run = None
+        if run is not None:
+            rounds.append(round((run[1] - run[0]) / self.T))
+        return rounds
+
+    # ---- 纯 helper 单测 ----
+
+    def test_clamp_rounds_helper(self):
+        assert storyboard._clamp_rounds(5, 10, 20) == 10        # 太少 → 抬到 min
+        assert storyboard._clamp_rounds(50, 10, 20) == 20       # 太多 → 压到 max
+        assert storyboard._clamp_rounds(14, 10, 20) == 14       # 区间内 → 保持
+        assert storyboard._clamp_rounds(14.4, 10, 20) == 14     # 四舍五入到整轮
+
+    def test_is_boundary_speech_question_or_check_keyword(self):
+        assert storyboard._is_boundary_speech(["现在有什么感受？"])          # 疑问句
+        assert storyboard._is_boundary_speech(["试着给这个画面打个分"])       # 检查语义关键词
+        assert storyboard._is_boundary_speech(["就待在这里", "浮现什么想法呢？"])  # 任一句命中即边界
+
+    def test_is_boundary_speech_instruction_is_narration(self):
+        # 指令/鼓励类旁白不是边界（无疑问句、无检查语义关键词）→ 应前移
+        assert not storyboard._is_boundary_speech(["看着球，大声说出它的颜色。"])
+        assert not storyboard._is_boundary_speech(["继续保持专注。"])
+
+    def test_build_groups_folds_narration_and_sums_motion(self):
+        # [运动][旁白静止][运动][检查点静止][运动]：旁白折进本组、两段运动求和，检查点闭组
+        scenes = [
+            {"type": "ball_exercise", "t0": 6.0, "t1": 30.0, "params": {}},
+            {"type": "ball_exercise", "t0": 30.0, "t1": 40.0, "params": {"static": True}},
+            {"type": "ball_exercise", "t0": 40.0, "t1": 70.0, "params": {}},
+            {"type": "ball_exercise", "t0": 70.0, "t1": 80.0, "params": {"static": True}},
+            {"type": "ball_exercise", "t0": 80.0, "t1": 110.0, "params": {}},
+        ]
+        retimed = [{"start": 32.0, "end": 34.0, "zh": "看着球说颜色"},
+                   {"start": 72.0, "end": 74.0, "zh": "有什么感受？"}]
+        groups = storyboard._reorch_build_groups(
+            [0, 1, 2, 3, 4], scenes, retimed, {1: [0], 3: [1]})
+        assert len(groups) == 2
+        assert groups[0]["narr"] == [0] and groups[0]["motion_dur"] == 54.0    # 24+30 求和
+        assert groups[0]["bound"][0] == "speech"
+        assert groups[1]["narr"] == [] and groups[1]["motion_dur"] == 30.0
+        assert groups[1]["bound"] is None                                      # 末组无边界
+
+    # ---- 集成（build_storyboard）----
+
+    def _big_facts(self):
+        # 一条长运动 run（~118 轮），被旁白 + 检查点 + 旁白 carve 成两组
+        return {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 306.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.5, "period_estimated": True},
+        ], "warnings": []}
+
+    def _big_segs(self):
+        return [
+            {"start": 1.0, "end": 3.0, "en": "i", "zh": "引言"},               # 落 card
+            {"start": 50.0, "end": 53.0, "en": "n1", "zh": "看着球，大声说出颜色。"},  # 旁白（前移）
+            {"start": 150.0, "end": 153.0, "en": "q", "zh": "现在有什么感受？"},    # 检查点（边界）
+            {"start": 250.0, "end": 253.0, "en": "n2", "zh": "继续保持专注。"},      # 旁白（前移）
+        ]
+
+    @pytest.mark.asyncio
+    async def test_clamps_each_group_to_range(self):
+        sb = await self._build(self._big_facts(), self._big_segs(),
+                               [2.0, 3.0, 3.0, 3.0], [10, 20], duration=306.0)
+        rounds = self._motion_group_rounds(sb["scenes"])
+        assert len(rounds) == 2                                    # 检查点把 run 分成两组
+        assert all(10 <= r <= 20 for r in rounds), rounds         # 各组轮数 ∈[min,max]
+        assert rounds == [20, 20]                                  # 原 ~55 轮 → 压到 max=20
+        storyboard.validate_storyboard(sb)
+
+    @pytest.mark.asyncio
+    async def test_clamps_short_group_up_to_min(self):
+        # 单条短运动（~8 轮）无 carve → 一组，clamp 抬到 min=10
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 26.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.5, "period_estimated": True},
+        ], "warnings": []}
+        sb = await self._build(facts, [{"start": 1.0, "end": 3.0, "en": "i", "zh": "引言"}],
+                               [2.0], [10, 20], duration=26.0)
+        assert self._motion_group_rounds(sb["scenes"]) == [10]
+        storyboard.validate_storyboard(sb)
+
+    @pytest.mark.asyncio
+    async def test_zero_speech_within_motion_groups(self):
+        # 组内语音=零：任一台词句语音窗 [start,end+0.5] 不与任何运动场景相交（真正互斥）
+        sb = await self._build(self._big_facts(), self._big_segs(),
+                               [2.0, 3.0, 3.0, 3.0], [10, 20], duration=306.0)
+        motions = [s for s in sb["scenes"] if self._is_motion(s)]
+        for seg in sb["retimed_segments"]:
+            if seg.get("start") is None or seg.get("no_dub"):
+                continue
+            w0, w1 = seg["start"], seg["end"] + 0.5
+            for m in motions:
+                assert min(w1, m["t1"]) - max(w0, m["t0"]) <= 1e-6, \
+                    f"句 {seg['zh']} 落在运动组内 [{m['t0']},{m['t1']}]"
+
+    @pytest.mark.asyncio
+    async def test_narration_folds_into_opening_static(self):
+        # 零散旁白前移：旁白句落在某静止场景内，且该静止在其组运动之前（组开头）
+        sb = await self._build(self._big_facts(), self._big_segs(),
+                               [2.0, 3.0, 3.0, 3.0], [10, 20], duration=306.0)
+        narr = next(s for s in sb["retimed_segments"] if s["zh"] == "看着球，大声说出颜色。")
+        scenes = sb["scenes"]
+        host = next(s for s in scenes if self._is_static(s)
+                    and s["t0"] - 1e-6 <= narr["start"] and narr["end"] <= s["t1"] + 1e-6)
+        # 该静止窗之后紧邻的是运动（旁白说完球才起摆）
+        assert self._is_motion(scenes[scenes.index(host) + 1])
+
+    @pytest.mark.asyncio
+    async def test_functional_rest_is_group_boundary(self):
+        # 功能性留白 rest（≥8s 无语音）= 天然组边界，把两段运动分成两组，且 rest 保留原时长
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 36.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 2.5, "period_estimated": True},
+            {"t0": 36.0, "t1": 50.0, "kind": "ball_exercise", "static": True},   # 14s rest 无语音
+            {"t0": 50.0, "t1": 80.0, "kind": "ball_exercise",
+             "ball_color_hex": "#A2C40C", "period_s": 2.5, "period_estimated": True},
+        ], "warnings": []}
+        sb = await self._build(facts, [{"start": 1.0, "end": 3.0, "en": "i", "zh": "引言"}],
+                               [2.0], [10, 20], duration=80.0)
+        assert len(self._motion_group_rounds(sb["scenes"])) == 2      # rest 分成两组
+        statics = [s for s in sb["scenes"] if self._is_static(s)]
+        assert statics and max(s["t1"] - s["t0"] for s in statics) >= 12.0  # rest 原时长保留（未缩成语音窗）
+        storyboard.validate_storyboard(sb)
+
+    @pytest.mark.asyncio
+    async def test_identity_when_set_rounds_range_none(self):
+        # 恒等锚：srr=None 与不传逐字节一致（重编排 pass 门控在 set_rounds_range，不改 None 路径）
+        facts, segs = self._big_facts(), self._big_segs()
+        cd = [2.0, 3.0, 3.0, 3.0]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            omitted = await storyboard.build_storyboard(
+                facts, duration=306.0, segments=[dict(s) for s in segs],
+                clip_durations=cd, period_s=self.T)
+            explicit_none = await storyboard.build_storyboard(
+                facts, duration=306.0, segments=[dict(s) for s in segs],
+                clip_durations=cd, period_s=self.T, set_rounds_range=None)
+        import json as _json
+        assert (_json.dumps(omitted, sort_keys=True, ensure_ascii=False)
+                == _json.dumps(explicit_none, sort_keys=True, ensure_ascii=False))
+
+    @pytest.mark.asyncio
+    async def test_reorch_preserves_fill_and_anchor_invariants(self):
+        sb = await self._build(self._big_facts(), self._big_segs(),
+                               [2.0, 3.0, 3.0, 3.0], [10, 20], duration=306.0)
+        scenes = sb["scenes"]
+        for a, b in zip(scenes, scenes[1:]):
+            assert a["t1"] == pytest.approx(b["t0"], abs=1e-9)        # 铺满/衔接
+            assert b["t1"] > b["t0"]                                  # 无零长残留
+        assert scenes[0]["t0"] == 0.0                                 # 首锚
+        assert sb["source"]["duration_s"] == scenes[-1]["t1"]         # 末锚
+        storyboard.validate_storyboard(sb)

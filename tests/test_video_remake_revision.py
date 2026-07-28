@@ -108,6 +108,21 @@ class TestParseInstructions:
         assert ops == arr
 
     @pytest.mark.asyncio
+    async def test_parse_ball_style_set_rounds_range(self):
+        # 第五轮扩展：摆动组临床剂量区间
+        arr = [{"type": "ball_style", "set_rounds_range": [24, 40]}]
+        ops, _ = await _parse(json.dumps(arr, ensure_ascii=False))
+        assert ops == arr
+
+    @pytest.mark.asyncio
+    async def test_parse_prompt_mentions_set_rounds_range(self):
+        _, fake = await _parse(
+            json.dumps([{"type": "ball_style", "set_rounds_range": [24, 40]}]))
+        prompt = fake.call_args.kwargs["messages"][0]["content"]
+        # schema 提及键名 + 「一左一右算一轮」措辞，LLM 才能命中「每组 24-40 轮」类剂量诉求
+        assert "set_rounds_range" in prompt and "一左一右" in prompt
+
+    @pytest.mark.asyncio
     async def test_parse_card_edit_duration_s(self):
         # 反馈②：改卡片页面停留时长
         arr = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
@@ -358,6 +373,38 @@ class TestValidateEditPlan:
                     [{"type": "ball_style", "color_cycle_periods": bad}],
                     REWRITTEN, STORYBOARD)
 
+    # ---- 第五轮扩展：set_rounds_range（摆动组临床剂量区间）校验边界 ----
+
+    def test_validate_set_rounds_range_ok(self):
+        for rng in ([24, 40], [1, 1], [10, 100]):
+            assert revision.validate_edit_plan(
+                [{"type": "ball_style", "set_rounds_range": rng}],
+                REWRITTEN, STORYBOARD) is None
+
+    def test_validate_set_rounds_range_wrong_length(self):
+        for bad in ([24], [24, 40, 60], []):
+            with pytest.raises(EditPlanError) as ei:
+                revision.validate_edit_plan(
+                    [{"type": "ball_style", "set_rounds_range": bad}],
+                    REWRITTEN, STORYBOARD)
+            assert "两个正整数" in ei.value.detail
+
+    def test_validate_set_rounds_range_non_positive_int(self):
+        # 非整/非正/bool 都非法
+        for bad in ([0, 40], [24, 0], [-1, 40], [24.5, 40], [True, 40], ["24", "40"]):
+            with pytest.raises(EditPlanError) as ei:
+                revision.validate_edit_plan(
+                    [{"type": "ball_style", "set_rounds_range": bad}],
+                    REWRITTEN, STORYBOARD)
+            assert "正整数" in ei.value.detail
+
+    def test_validate_set_rounds_range_min_gt_max(self):
+        with pytest.raises(EditPlanError) as ei:
+            revision.validate_edit_plan(
+                [{"type": "ball_style", "set_rounds_range": [40, 24]}],
+                REWRITTEN, STORYBOARD)
+        assert "不能大于" in ei.value.detail
+
     def test_validate_global_param_unknown_key(self):
         with pytest.raises(EditPlanError) as ei:
             revision.validate_edit_plan(
@@ -461,6 +508,12 @@ class TestApplyEdits:
         ops = [{"type": "ball_style", "color_cycle_periods": 1}]
         _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
         assert ov["ball"] == {"color_cycle_periods": 1}
+
+    def test_apply_ball_style_set_rounds_range_writes_override(self):
+        # 第五轮扩展：set_rounds_range 落进 ball 覆盖（storyboard 消费做摆动组重编排）
+        ops = [{"type": "ball_style", "set_rounds_range": [24, 40]}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["ball"] == {"set_rounds_range": [24, 40]}
 
     def test_apply_card_edit_duration_writes_override(self):
         # 端点 resolve 已 baked duration_source_span；apply 累积进 card_duration_overrides

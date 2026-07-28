@@ -330,6 +330,7 @@ async def _handle_storyboard(job, session, ctx):
         period_s=ball.get("period_s"), color_mode=ball.get("color_mode"),
         color_cycle_periods=ball.get("color_cycle_periods"),
         static_source_spans=ball.get("static_source_spans"),
+        set_rounds_range=ball.get("set_rounds_range"),
         sentence_gap=glob.get("sentence_gap"),
         card_duration_overrides=ov.get("card_duration_overrides"))
     _apply_card_overrides(sb, ov["cards"])      # card_edit：覆盖对应卡片场景 content
