@@ -94,8 +94,10 @@ class Settings(BaseSettings):
     VIDEO_MT_MODEL: str = "qwen-mt-plus"
     # 重写/解析/本地化等通用 LLM 档(openai 兼容 chat)
     VIDEO_LLM_MODEL: str = "qwen3.7-plus"
-    # 关键帧视觉理解(qwen-vl-max,openai 兼容 multimodal,本地图转 base64 data URL 内联)
-    VIDEO_VL_MODEL: str = "qwen-vl-max"
+    # 关键帧视觉理解(openai 兼容 multimodal,本地图转 base64 data URL 内联)
+    # 2026-07-30 qwen-vl-max→qwen3-vl-plus：旧模型 2026-10-10 下线；新模型不带
+    # enable_thinking 参数时默认非思考,与本调用形态兼容(已实测)
+    VIDEO_VL_MODEL: str = "qwen3-vl-plus"
 
     # ── 豆包语音 TTS(声音复刻 v3 / seed-icl-2.0),视频配音默认走此 provider ──
     # v3 HTTP chunked 流式:多行 JSON event,音频在各行 data(base64 mp3 分片),须按行拼接
