@@ -34,6 +34,9 @@ class PublishJob(Base):
     # 发布成功后回填的笔记 id / url
     note_id: Mapped[str | None] = mapped_column(default=None)
     note_url: Mapped[str | None] = mapped_column(default=None)
+    # 权威发布时刻:由 published_notes 台账同步时按唯一标题匹配回填(接口 visible_time),
+    # 匹配不唯一就留 None。发布链路自身拿不到这个时刻(成功页 URL 不含笔记信息)。
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     # 最近一次失败原因
     error: Mapped[str | None] = mapped_column(Text, default=None)
     retries: Mapped[int] = mapped_column(default=0)
