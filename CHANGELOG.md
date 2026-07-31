@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.18.0 (2026-07-31)
+
+**矩阵互动:发布成功后,矩阵内其余账号在窗口内随机时刻点赞 / 收藏 / 评论。**
+实施前先在真号上做了可行性实验(headed 真屏 + 全程 SyncHumanActions),实验结论推翻了
+旧仓三处认知,设计与证据见 `docs/design/2026-07-31-matrix-interact-design.md`。
+
+- 笔记定位走**主页路径 + 标题匹配**:库里没有真实笔记 URL(publish_jobs.note_url 存的是
+  creator 发布成功页、note_id 全空),而从发布者主页点进笔记时 URL 会自动带上 xsec_token;
+  标题匹配不到即放弃,**绝不退而求其次点第一篇**(窗口内可能发了多篇)。
+- 已赞/已藏只看 `use[xlink:href]`(`#like`/`#liked`、`#collect`/`#collected`)。旧仓
+  `already_liked = "like-active" in class` 是错的:实测该 class 点赞前后常驻,照搬会 100%
+  误判为已点赞。
+- `.not-active.inner-when-not-active` 是**未激活的评论入口本身**,不是遮罩层;旧仓用 JS
+  `display:none` 把它隐藏等于拆掉入口,正确做法是拟人点击它激活输入框。
+- 全程 `SyncHumanActions` + headed 真屏,**零 JS 注入**(`page.evaluate` 只做只读取证);
+  进笔记先滚动浏览再互动,动作间随机间隔。
+- 延时靠**落库排期**:执行时刻写进 payload 的 `not_before`,`list_dispatchable` 按它过滤;
+  执行方不得领了任务再 sleep 干等(会占死 browser_slot,阻塞 cookie_check/note_export/发布)。
+- `matrix_interact` 非幂等(重跑会取消已点的赞),未进 `_IDEMPOTENT_KINDS`;登记侧按
+  `source_publish_job_id` 去重,`operator_id=0` 避免这批 queued 行占掉运营的未终态配额。
+- 评论文案是 payload 入参(后续承载营销钩子话术),不内嵌 LLM 生成;为空记 `not_requested`
+  而非 `skipped`——后者语义是"已赞已藏、目标本就达成"属成功,若混用则 comment 常年空串时
+  点赞收藏双双失败也会落假 done。
+- ⚠️ 风险已披露并由用户拍板按全员方案执行:同机同出口 IP 会把风控图上原本孤立的号连成
+  完全图、100% 到场率易被检出、收益有限。保守版(稀疏抽样/拉长窗口/只点赞)复用同一动作层,
+  只需改选号与排期策略。
+
 ## 0.17.0 (2026-07-28)
 
 **风格档案「多套 + 每套独立版本链」(profile_set)。** 在 operator↔档案间加套层,版本链挂到套上,
