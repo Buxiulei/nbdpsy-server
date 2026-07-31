@@ -31,10 +31,37 @@ from app.browser.note_visibility import NoteVisibilityError, set_note_visibility
 from app.browser.sync_client import SyncClient
 from app.core.db import get_session
 from app.models.published_note import PublishedNote
+from app.services import browser_jobs_repo
 from app.services.cookie_check import load_account_cookies
 
 # 本期支持的档位(设计第四节:其余三档与 user_ids 格式未验证,一律不做)
 SUPPORTED_PRIVACY = (0, 1)
+
+
+def start_change(
+    account_id: int,
+    note_id: str,
+    title: str,
+    target_privacy: int,
+    operator_id: int | None,
+) -> str:
+    """REST 触发一次可见性切换;登记 browser_jobs 台账,返回轮询 id。
+
+    ``operator_id`` 写进 payload 供 ``_record_change`` 落 ``visibility_changed_by``
+    ——execute 的契约签名只有 ``(account_id, payload)``,拿不到请求上下文。
+    档位合法性由入口(REST 请求体)与 ``execute`` 各自把关,本函数只负责登记。
+    """
+    payload = {
+        "note_id": note_id,
+        "title": title,
+        "target_privacy": target_privacy,
+        "operator_id": operator_id,
+    }
+    change_id = browser_jobs_repo.enqueue_from_request(
+        "note_visibility", payload, account_id=account_id
+    )
+    browser_jobs_repo.spawn_inline(change_id, lambda: execute(account_id, payload))
+    return change_id
 
 
 async def execute(account_id: int, payload: dict) -> dict:

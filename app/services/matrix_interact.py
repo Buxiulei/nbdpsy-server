@@ -128,6 +128,33 @@ def schedule_matrix_interact(db_path: str, publish_job_id: int) -> list[str]:
         return []
 
 
+# ---------------- 手工触发一次互动(REST 请求路径)----------------
+
+
+def start_interact(
+    account_id: int, publisher_user_id: str, title: str, comment: str
+) -> str:
+    """REST 手工指定某号对某篇笔记做一次互动;登记 browser_jobs 台账,返回轮询 id。
+
+    与 ``schedule_matrix_interact``(发布钩子群发)的差别:只派一个指定账号、不带
+    ``not_before`` 排期(立刻可派)、也不认 ``source_publish_job_id``(手工触发不属于
+    任何一次发布)。动作仍是写死的点赞 + 收藏 + 评论三件套(见 ``execute``),
+    ``comment`` 为空则评论那一步记 ``not_requested``,实际只点赞收藏。
+    """
+    payload = {
+        "publisher_user_id": publisher_user_id,
+        "title": title,
+        "comment": comment,
+    }
+    interaction_id = browser_jobs_repo.enqueue_from_request(
+        "matrix_interact", payload, account_id=account_id
+    )
+    browser_jobs_repo.spawn_inline(
+        interaction_id, lambda: execute(account_id, payload)
+    )
+    return interaction_id
+
+
 # ---------------- 契约执行(account_worker 子进程消费)----------------
 
 
