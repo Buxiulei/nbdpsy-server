@@ -5,7 +5,7 @@
 - POST /api/accounts/{account_id}/cookie-checks:鉴权后解密该号 cookie → 交
   app.services.cookie_check 起后台任务(不阻塞等待,约 20-40s)→ 立即返回 check_id。
 - GET /api/cookie-checks/{check_id}:轮询该 check_id 的检测结果,鉴权用台账里存的
-  account_id 防越权;checking/valid/invalid/captcha/error 五态含义见 MANIFEST_ENTRIES。
+  account_id 防越权;checking/valid/invalid/captcha/restricted/error 六态含义见 MANIFEST_ENTRIES。
 """
 
 import json
@@ -37,10 +37,12 @@ MANIFEST_ENTRIES = [
         "method": "GET", "path": "/api/cookie-checks/{check_id}",
         "summary": "轮询 cookie 活性检测结果",
         "admin_only": False, "params": {"check_id": "path,str"},
-        "returns": "{status, user_info?, reason?}",
+        "returns": "{status, user_info?, reason?, wall?}",
         "errors": "403=无该号授权;404=check_id 不存在或已过期",
-        "notes": "status 五态:checking(仍在跑,继续轮询)/valid(登录态有效,附 user_info)/"
+        "notes": "status 六态:checking(仍在跑,继续轮询)/valid(登录态有效,附 user_info)/"
                  "invalid(未登录,cookie 真失效,需人重新扫码)/captcha(被验证码拦截,需人工过验证)/"
+                 "restricted(cookie 有效但账号被挂风控验证墙,附 wall 取证;wall.wall_type=scan_qr 时"
+                 "用手机小红书 App 扫码即可恢复,=rate_limit 时已被限流,别再起会话,晾一阵再检测)/"
                  "error(浏览器起不来/超时等基础设施失败,不代表 cookie 失效,别据此让人重登,附 reason)。"
                  "check_id 是进程级内存台账,进程重启即丢,404 时重新发起检测。",
     },
@@ -65,7 +67,10 @@ async def start_cookie_check_endpoint(account_id: int) -> dict:
 
 @router.get("/api/cookie-checks/{check_id}")
 async def get_cookie_check_endpoint(check_id: str) -> dict:
-    """轮询检测结果:checking / valid / invalid / captcha / error(error≠cookie 失效)。"""
+    """轮询检测结果:checking / valid / invalid / captcha / restricted / error。
+
+    error≠cookie 失效(基础设施失败);restricted≠cookie 失效(账号被风控,附 wall 取证)。
+    """
     entry = cookie_check.get_check(check_id)
     if entry is None:
         raise NotFoundError(f"check_id {check_id} 不存在或已过期")
@@ -77,6 +82,8 @@ async def get_cookie_check_endpoint(check_id: str) -> dict:
         result["user_info"] = entry["user_info"]
     if entry.get("reason") is not None:
         result["reason"] = entry["reason"]
+    if entry.get("wall") is not None:
+        result["wall"] = entry["wall"]
     return result
 
 

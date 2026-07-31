@@ -147,7 +147,7 @@ async def check_cookie(account_id: int) -> dict:
     """检测某账号登录态(cookie)是否有效,内部轮询到终态后一次性返回结果。
 
     发起检测约 20-40s,本工具内部每隔几秒轮询一次直到出终态:valid(登录有效,附 user_info)/
-    invalid(已失效,需人重新扫码登录)/captcha(被验证码拦截,需人工处理)/error(浏览器起不来
+    invalid(已失效,需人重新扫码登录)/captcha(被验证码拦截,需人工处理)/restricted(cookie 有效但账号被挂风控验证墙,需人用小红书 App 扫码验证)/error(浏览器起不来
     等基础设施失败,不代表 cookie 失效)。若超过内部等待预算仍未出结果,返回 {status:"checking",
     check_id},调用方可稍后自行凭 check_id 继续查。
     """

@@ -121,9 +121,12 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 本服务无前端,查看都通过带 **admin apikey** 的请求调 REST 端点:
 
 - **所有小红书账号 + 登录状态**:`GET /api/accounts`(admin 全见)→ 每个含 `status` /
-  `cookie_status`(valid/invalid/captcha/unknown)/ `last_check_at` / 昵称等(不含 cookie)。
+  `cookie_status`(valid/invalid/captcha/restricted/unknown)/ `last_check_at` / 昵称等(不含 cookie)。
+  `restricted` = cookie 有效但账号被小红书挂了风控验证墙(检测时探他人主页撞出),
+  需运营用手机小红书 App 扫码验证后重新检测;撞墙历史见 `risk_events` 表。
 - **刷新某号实时活性**:`POST /api/accounts/{id}/cookie-checks` **异步**——返回 `{check_id}` 后用
-  `GET /api/cookie-checks/{check_id}` 轮询到 valid/invalid/captcha/error,把三态写回。
+  `GET /api/cookie-checks/{check_id}` 轮询到 valid/invalid/captcha/restricted/error,
+  把非 error 的状态写回(error 是基础设施失败,保留原值不误标)。
   想自动周期巡检:设 `COOKIE_CHECK_INTERVAL`(秒,>0 才起,默认 0)。
 - **发布任务状态**:`GET /api/publish-jobs?account_id=&status=`(均可选)。
 - **所有运营者**:`GET /api/operators` → id/name/role/enabled(不含 apikey);某人授权了哪些号:
@@ -258,7 +261,8 @@ runner 里再物料化成本地文件,端点本身不碰浏览器。
   启动时锁定字段集合,运行中改配置不生效。
 - 可选后台 cookie 巡检:`COOKIE_CHECK_INTERVAL` 设为 >0(秒)时,lifespan 起一个轻量
   协程周期性对 `cookie_status=valid` 的号逐个跑登录检测并写回状态(号间隔 ≥5s 防频控);
-  默认 0 关闭。
+  默认 0 关闭。**`restricted`(被风控)的号不进周期巡检**——继续每轮起浏览器只会把限流
+  催得更狠,恢复靠人工扫码后手动触发一次检测。
 
 ---
 

@@ -39,7 +39,7 @@ async def test_start_check_returns_202_check_id_then_valid(tmp_path, monkeypatch
     async with rest_client(tmp_path, monkeypatch) as c:
         acc1 = await seed_account("号1", "u1", _COOKIES)
 
-        def fake_check_login_once(account_id, cookies):
+        def fake_check_login_once(account_id, cookies, probe_user_id=None):
             return {
                 "status": "valid",
                 "user_info": {"nickname": "小蓝", "user_id": "u1"},
@@ -78,7 +78,7 @@ async def test_start_check_denied_without_access(tmp_path, monkeypatch):
         acc1 = await seed_account("号1", "u1", _COOKIES)
         called = {"n": 0}
 
-        def fake_check_login_once(account_id, cookies):
+        def fake_check_login_once(account_id, cookies, probe_user_id=None):
             called["n"] += 1
             return {"status": "valid", "user_info": None}
 
@@ -110,7 +110,7 @@ async def test_check_error_state_carries_reason(tmp_path, monkeypatch):
     async with rest_client(tmp_path, monkeypatch) as c:
         acc1 = await seed_account("号1", "u1", _COOKIES)
 
-        def fake_check_login_once(account_id, cookies):
+        def fake_check_login_once(account_id, cookies, probe_user_id=None):
             return {
                 "status": "error",
                 "user_info": None,
@@ -148,7 +148,7 @@ async def test_get_check_denied_cross_operator(tmp_path, monkeypatch):
     async with rest_client(tmp_path, monkeypatch) as c:
         acc1 = await seed_account("号1", "u1", _COOKIES)
 
-        def fake_check_login_once(account_id, cookies):
+        def fake_check_login_once(account_id, cookies, probe_user_id=None):
             return {"status": "valid", "user_info": None}
 
         monkeypatch.setattr(

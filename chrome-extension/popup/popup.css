@@ -282,6 +282,12 @@ body {
   color: #856404;
 }
 
+/* restricted = 被风控挂验证墙:cookie 没坏但号不能用,配色比 captcha 更重以示需人处理 */
+.account-badge.restricted {
+  background: #f5d5b8;
+  color: #8a4b08;
+}
+
 .account-badge.error {
   background: #f8d7da;
   color: #721c24;

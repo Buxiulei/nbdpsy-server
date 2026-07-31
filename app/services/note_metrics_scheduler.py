@@ -117,11 +117,14 @@ class NoteMetricsScheduler:
 
         async with self._session_factory() as session:
             # 所有已接入 cookie 的账号(不筛 cookie_status;无 cookie 必然失败,跳过)
+            # 例外:restricted(被风控挂验证墙)的号排除——补采是可延后的后台任务,给挂墙的号
+            # 继续起 camoufox 只会把限流催得更狠(2026-07-31 实测),等人扫码恢复后自然回队。
             account_ids = list((await session.execute(
                 select(XhsAccount.id)
                 .where(
                     XhsAccount.login_cookies.isnot(None),
                     XhsAccount.login_cookies != "",
+                    XhsAccount.cookie_status != "restricted",
                 )
                 .order_by(XhsAccount.id)
             )).scalars().all())

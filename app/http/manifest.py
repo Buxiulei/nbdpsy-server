@@ -34,7 +34,7 @@ _WORKFLOWS = [
     "安装步骤,把插件递给操作者装好扫码;之后每 ~10s GET /api/login/poll?since=<server_time> 直到 "
     "done=true——登新号不传 account_id,重登旧号传 account_id;建议设 5-10 分钟超时。",
     "cookie 活性:POST /api/accounts/{id}/cookie-checks 发起(202 回 check_id),每 2-5s "
-    "GET /api/cookie-checks/{check_id} 轮询到 valid/invalid/captcha/error;error 是基础设施失败,"
+    "GET /api/cookie-checks/{check_id} 轮询到 valid/invalid/captcha/restricted/error;restricted 是账号被挂风控验证墙(cookie 没坏);error 是基础设施失败,"
     "不代表 cookie 失效。别用它探登录进度——等登录用 /api/login/poll。",
     "发布:POST /api/publish-jobs(202 回 job_id)→ 每 5-10s GET /api/publish-jobs/{job_id} 轮询到 "
     "published/failed;publishing 常态 1-3 分钟,失败自动重试最多 3 次(退避约 2/10/30 分钟),"
