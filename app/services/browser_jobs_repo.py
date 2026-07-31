@@ -105,7 +105,13 @@ async def count_unfinished_for_operator(operator_id: int) -> int:
 
 
 async def list_dispatchable() -> list[dict]:
-    """取全量 queued 行(按 created_at 升序),供 supervisor 扫描派单。"""
+    """取可派发的 queued 行(按 created_at 升序),供 supervisor 扫描派单。
+
+    payload 里带 ``not_before``(未来时刻)的行按排期过滤掉,下轮到点再派 —— 延时任务
+    (matrix_interact)靠这条落库排期实现,执行方**不得**领了任务再进程内 sleep 等待
+    (会占死 browser_slot 闸,阻塞 cookie_check / note_export / 发布)。
+    """
+    now = datetime.utcnow()
     async with get_session() as session:
         rows = (
             (
@@ -118,7 +124,19 @@ async def list_dispatchable() -> list[dict]:
             .scalars()
             .all()
         )
-    return [_orm_to_dict(r) for r in rows]
+    return [d for d in (_orm_to_dict(r) for r in rows) if _schedule_due(d, now)]
+
+
+def _schedule_due(job: dict, now: datetime) -> bool:
+    """排期是否到点:payload 无 ``not_before`` 视为立即可派;值坏了也放行(不卡死任务)。"""
+    raw = (job.get("payload") or {}).get("not_before")
+    if not raw:
+        return True
+    try:
+        return datetime.fromisoformat(raw) <= now
+    except (TypeError, ValueError):
+        logger.warning(f"[browser_jobs] not_before 值非法,按立即可派处理 job_id={job.get('id')}")
+        return True
 
 
 async def recover_stale() -> int:

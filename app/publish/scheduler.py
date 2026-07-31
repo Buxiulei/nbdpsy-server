@@ -359,6 +359,16 @@ class PublishScheduler:
                 )
             except Exception:  # noqa: BLE001 — 归档绝不阻断发布终态
                 logger.warning(f"[content_archive] scheduler 归档 job={job_id} 异常(忽略)")
+            # 矩阵互动:给矩阵内其余账号登记窗口内随机时刻的互动任务(幂等 + 绝不抛错阻断)。
+            try:
+                from app.services import browser_jobs_repo
+                from app.services.matrix_interact import schedule_matrix_interact
+
+                await asyncio.to_thread(
+                    schedule_matrix_interact, browser_jobs_repo.current_db_path(), job_id
+                )
+            except Exception:  # noqa: BLE001 — 登记绝不阻断发布终态
+                logger.warning(f"[matrix_interact] scheduler 登记 job={job_id} 异常(忽略)")
 
     def start(self) -> None:
         """启动 lifespan 循环:起队列 worker,后台协程每 poll 周期 recover_stale→scan→submit。"""
