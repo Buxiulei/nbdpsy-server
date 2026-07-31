@@ -27,15 +27,21 @@ def upgrade() -> None:
         'published_notes',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('account_id', sa.Integer(), nullable=False),
-        sa.Column('note_id', sa.String(), nullable=False),
+        # 平台侧字段:T0 发布当场拿不到,由 T1/T2 列表同步后补(note_id 未补上前为 NULL)
+        sa.Column('note_id', sa.String(), nullable=True),
         sa.Column('xsec_token', sa.String(), nullable=True),
         sa.Column('xsec_source', sa.String(), nullable=True),
         sa.Column('note_url', sa.String(), nullable=True),
-        sa.Column('title', sa.String(), nullable=False),
         sa.Column('note_type', sa.String(), nullable=True),
-        sa.Column('published_at', sa.DateTime(), nullable=True),
+        sa.Column('platform_published_at', sa.DateTime(), nullable=True),
+        # 内容侧字段:T0 发布当场写死,published_at 永不为空
+        sa.Column('title', sa.String(), nullable=False),
+        sa.Column('published_at', sa.DateTime(), nullable=False),
+        sa.Column('generated_at', sa.DateTime(), nullable=True),
+        sa.Column('operator_id', sa.Integer(), nullable=True),
         sa.Column('source_publish_job_id', sa.Integer(), nullable=True),
         sa.Column('content_archive_id', sa.Integer(), nullable=True),
+        sa.Column('sync_status', sa.String(), nullable=False),
         sa.Column('first_seen_at', sa.DateTime(), nullable=False),
         sa.Column('last_synced_at', sa.DateTime(), nullable=False),
         sa.Column('likes', sa.Integer(), nullable=False),
@@ -48,6 +54,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['content_archive_id'], ['content_archive.id']),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('account_id', 'note_id', name='uq_published_notes_account_note'),
+        sa.UniqueConstraint('source_publish_job_id', name='uq_published_notes_pubjob'),
     )
     op.add_column(
         'publish_jobs', sa.Column('published_at', sa.DateTime(), nullable=True)
