@@ -59,8 +59,10 @@ class _FakePage:
     goto 消费一项,fake human 的 scroll 也消费一项。脚本耗尽后不再投递。
     """
 
-    def __init__(self, script):
+    def __init__(self, script, notes_count=None):
         self._script = list(script)
+        # 接口自报的笔记总数(data.tags[0].notes_count);None = 响应里没这项
+        self._notes_count = notes_count
         self._handlers: list = []
         self.gotos: list[str] = []
         self.removed = False
@@ -98,7 +100,10 @@ class _FakePage:
         notes = self._script.pop(0)
         if notes is None:
             return
-        self._emit(_FakeResponse(_POSTED_URL, {"code": 0, "data": {"notes": notes}}))
+        data: dict = {"notes": notes}
+        if self._notes_count is not None:
+            data["tags"] = [{"name": "所有笔记", "notes_count": self._notes_count}]
+        self._emit(_FakeResponse(_POSTED_URL, {"code": 0, "data": data}))
 
     def _emit(self, response):
         for event, fn in list(self._handlers):
@@ -200,6 +205,62 @@ def test_paging_stops_at_max_pages(fast_timeouts, fake_human):
 
     assert [n["id"] for n in notes] == ["n0", "n1", "n2"]
     assert fake_human[0].scrolls == 2  # 首批来自 goto,再滚两次即达上限
+
+
+class _LogRecorder:
+    """假 logger:只记 warning 文案,其余级别吞掉(断言"抓不满有没有告警")。"""
+
+    def __init__(self):
+        self.warnings: list[str] = []
+
+    def warning(self, msg):
+        self.warnings.append(str(msg))
+
+    def info(self, _msg):
+        pass
+
+    def exception(self, _msg):
+        pass
+
+    def error(self, _msg):
+        pass
+
+
+def test_paging_retries_scroll_when_short_of_expected(fast_timeouts, fake_human):
+    """没抓够接口自报的总数时,滚动没触发分页要重试 —— 修 37 篇只抓到 20 篇的缺口。
+
+    脚本第二次滚动不产生响应,旧行为会当场收工只返 2 篇;现在因为 notes_count=3 还没抓够,
+    继续滚,把第 3 篇捞回来。
+    """
+    page = _FakePage([[_note("a"), _note("b")], None, [_note("c")]], notes_count=3)
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    assert [n["id"] for n in notes] == ["a", "b", "c"]
+    # 第 3 次滚动抓够了 3 篇,此时"无新分页"才被认定为到底
+    assert fake_human[0].scrolls == 3
+
+
+def test_paging_warns_when_short_of_expected(fast_timeouts, fake_human, monkeypatch):
+    """重试完仍不足接口自报的总数 → **告警**,绝不静默当成"这号就这么多篇"。"""
+    recorder = _LogRecorder()
+    monkeypatch.setattr(cnl, "logger", recorder)
+    page = _FakePage([[_note("a"), _note("b")], None, None, None], notes_count=37)
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    assert len(notes) == 2  # 抓不满也返回已抓到的(半份列表照样能刷已有台账行)
+    assert any("少于接口自报的 37 篇" in w for w in recorder.warnings)
+
+
+def test_paging_does_not_retry_when_expected_unknown(fast_timeouts, fake_human):
+    """响应里没有 notes_count(期望未知)→ 维持旧行为,一次无响应即停,不空转重试。"""
+    page = _FakePage([[_note("a")], None, [_note("b")]])
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    assert [n["id"] for n in notes] == ["a"]
+    assert fake_human[0].scrolls == 1
 
 
 def test_empty_first_batch_returns_no_notes(fast_timeouts, fake_human):

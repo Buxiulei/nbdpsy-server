@@ -53,6 +53,19 @@ class PublishedNote(Base):
         DateTime, nullable=True
     )
 
+    # ── 可见性:平台原值(T2 同步纠正)+ 我们自己的切换留痕 ──
+    # 存平台原值,**不自造 public/private 枚举**:只实测了 0=公开 / 1=仅自己可见两档,
+    # 另外三档(仅互关好友/部分人可见/部分人不可见)语义未验证,自造映射遇第三态会丢信息。
+    # ⚠️ NULL 表示**未知**,不等于公开 —— 今天就是因为台账缺这个字段,把一篇用户刻意
+    # 隐藏的笔记误判成"低价值公开笔记"。
+    permission_code: Mapped[int | None] = mapped_column(nullable=True)
+    permission_msg: Mapped[str | None] = mapped_column(nullable=True)
+    # **我们主动**切换成功的时刻与发起人;T2 同步不动这两列(那是平台侧事实之外的操作留痕)
+    visibility_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    visibility_changed_by: Mapped[int | None] = mapped_column(nullable=True)
+
     # ── 内容侧字段:T0 发布当场写死 ──
     # 发布时先写我们自己的标题;T2 同步时用平台 display_title 纠正(运营可能改过标题)
     title: Mapped[str] = mapped_column(default="")

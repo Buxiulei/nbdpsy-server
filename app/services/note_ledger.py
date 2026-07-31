@@ -37,7 +37,12 @@ from sqlalchemy import select
 
 from app.browser.account_locks import account_locks
 from app.browser.browser_gate import browser_slot
-from app.browser.creator_note_list import CreatorNoteListError, fetch_posted_notes
+from app.browser.creator_note_list import (
+    CreatorNoteListError,
+    fetch_posted_notes,
+    permission_code_of,
+    permission_msg_of,
+)
 from app.browser.sync_client import SyncClient
 from app.core.db import get_session
 from app.models.content_archive import ContentArchive
@@ -298,6 +303,14 @@ def _apply_platform_fields(row: PublishedNote, raw: dict, now: datetime) -> None
     platform_title = raw.get("display_title") or ""
     if platform_title or not (row.title or ""):
         row.title = platform_title
+    # 可见性同款纪律:平台是权威(运营在 APP 上手改也会被纠正回来),但**读不出就不覆盖**
+    # ——拿 None 盖掉已知档位等于把事实抹成"未知"。两列绑在一起写:msg 是 code 的文案面,
+    # 公开笔记的 msg 实测就是空串,单独判空会把这对值写拧。
+    # 不动 visibility_changed_at / visibility_changed_by:那是我们自己的操作留痕,不是平台事实。
+    permission_code = permission_code_of(raw)
+    if permission_code is not None:
+        row.permission_code = permission_code
+        row.permission_msg = permission_msg_of(raw)
     row.likes = _safe_int(raw.get("likes"))
     row.collects = _safe_int(raw.get("collected_count"))
     row.comments = _safe_int(raw.get("comments_count"))
