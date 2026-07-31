@@ -1,4 +1,13 @@
-"""矩阵互动器(纯同步,吃已登录 page):点赞 / 收藏 / 评论。
+"""笔记互动器(纯同步,吃已登录 page):矩阵互动(点赞 / 收藏)+ 独立评论。
+
+两个对外入口,共用同一套主页定位与拟人浏览:
+
+- ``interact_with_note``:矩阵互动,**只做点赞 + 收藏**(发布成功后自动触发);
+- ``comment_on_note``:单篇评论(手工触发,走 REST ``note-comments``)。
+
+评论 2026-07-31 从矩阵互动三件套里**结构上移除**——不是靠传空文案绕过,而是矩阵互动
+压根不再有评论这一步;两件事的触发方式与幂等性都不同,合在一起只会让成败判定变形
+(见 ``interact_with_note`` 末尾关于成败判定的注释)。
 
 设计见 docs/design/2026-07-31-matrix-interact-design.md(真号实验结论),三条硬约定:
 
@@ -232,12 +241,14 @@ def _icon_action(
 def _do_comment(page, human: SyncHumanActions, text: str) -> Dict[str, Any]:
     """评论:激活入口 → 等输入区可交互 → 逐字输入 → 等发送键可用 → 发送 → 复核。
 
-    文案由调用方(payload)传入,为空记 ``not_requested``——**不是** ``skipped``:
-    skipped 语义是"已赞/已藏,目标本就达成"属成功,而没传文案是这次压根没要求做,
-    不能拿它当成功证据顶替真失败(否则 comment 常年空串时,点赞收藏双双失败也会落 done)。
+    返回 ``{"status": "done"|"error", "reason"?}``。文案由调用方传入且**必填**——评论
+    自 2026-07-31 起是独立能力(``comment_on_note`` / REST ``note-comments``),不再是
+    矩阵互动里那个"可以不传就跳过"的可选动作,故空文案是**入参错误**记 error。
+    (历史上这里返回过 ``not_requested``,那是为了让"没要求评论"不被当成失败证据;
+    评论独立后不存在"没要求"这回事,该状态一并取消,见 ``interact_with_note`` 的成败判定。)
     """
     if not (text or "").strip():
-        return {"status": "not_requested", "reason": "无评论文案"}
+        return {"status": "error", "reason": "comment_text_empty: 未提供评论文案"}
 
     entry_sel = _resolve_selector(page, _COMMENT_ENTRY_SELECTORS)
     if entry_sel is None:
@@ -307,21 +318,20 @@ def interact_with_note(
     account_id: int,
     publisher_user_id: str,
     title: str,
-    comment_text: str = "",
 ) -> Dict[str, Any]:
-    """对发布者某篇笔记执行点赞 + 收藏 + 评论(动作粒度汇总,互不阻断)。
+    """对发布者某篇笔记执行点赞 + 收藏(动作粒度汇总,互不阻断)。
+
+    2026-07-31 起**不含评论**:评论是独立能力,走 ``comment_on_note``。
 
     Args:
         page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
         account_id: 互动方账号 id(日志用)。
         publisher_user_id: 发布者的小红书 user_id(主页路径定位用)。
         title: 目标笔记标题(标题匹配,匹配不到即放弃)。
-        comment_text: 评论文案(payload 入参);为空则跳过评论,只点赞收藏。
 
     Returns:
-        ``{"note_url": str, "actions": {"like"/"collect"/"comment": {...}}}``;
-        本次要求做的动作全部未成功(既无 done 也无 skipped)时额外带 ``"error"`` 键,
-        让台账落 error 而非假 done。状态 ``not_requested``(没传评论文案)不参与成败判定。
+        ``{"note_url": str, "actions": {"like"/"collect": {...}}}``;两个动作**全部**
+        未成功(既无 done 也无 skipped)时额外带 ``"error"`` 键,让台账落 error 而非假 done。
 
     Raises:
         MatrixInteractError: 笔记定位/打开失败(此时一个动作都没做)。
@@ -336,7 +346,6 @@ def interact_with_note(
             page, human, "点赞", _LIKE_SELECTORS, "#like", "#liked")),
         ("collect", lambda: _icon_action(
             page, human, "收藏", _COLLECT_SELECTORS, "#collect", "#collected")),
-        ("comment", lambda: _do_comment(page, human, comment_text)),
     )
     for i, (key, step) in enumerate(steps):
         if i:
@@ -352,9 +361,64 @@ def interact_with_note(
         )
 
     result: Dict[str, Any] = {"note_url": note_url, "actions": actions}
-    # 成败只由**本次要求做的**动作决定:not_requested(没传评论文案)既不算成功也不算
-    # 失败,必须先剔除——否则 comment 常年空串,点赞收藏双双失败也会被它顶成 done。
-    attempted = [a for a in actions.values() if a["status"] != "not_requested"]
-    if attempted and not any(a["status"] in ("done", "skipped") for a in attempted):
-        result["error"] = "全部互动动作失败"
+    # 成败判定:两个动作都不是 done/skipped 才算整体失败。
+    #
+    # 这里**故意不再有**"先剔除某些状态、剔空则不判失败"那一层。评论还在三件套里时,它
+    # 可以是 not_requested(没传文案 = 这次没要求做),必须先剔除、且剔空后不判失败,
+    # 否则空文案会把真失败顶成 done;而那个"剔空不判失败"的兜底本身就是老缺陷的形状——
+    # 一旦所有动作都可缺席,error 就永远落不下来。评论移走后 like/collect 由上面的循环
+    # **无条件各跑一次**(异常也被 except 兜成 error 写回 actions),actions 恒为 2 条、
+    # 恒无 not_requested,所以判据可以、也必须是直接对全部动作取 any:没有任何一个动作
+    # 成功 = 失败。将来若要再加"可缺席"的动作,不能退回旧写法,而应让缺席动作压根不进
+    # actions,判据保持不变。
+    if not any(a["status"] in ("done", "skipped") for a in actions.values()):
+        result["error"] = "点赞与收藏均失败"
     return result
+
+
+def comment_on_note(
+    page,
+    account_id: int,
+    publisher_user_id: str,
+    title: str,
+    comment_text: str,
+) -> Dict[str, Any]:
+    """对发布者某篇笔记发一条评论(独立能力,不含点赞收藏)。
+
+    定位与拟人浏览完全复用矩阵互动那套(主页 → 按标题匹配卡片 → 进详情 → 滚动阅读),
+    评论动作复用真号验证过的 ``_do_comment``,**不重写**。
+
+    Args:
+        page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
+        account_id: 评论方账号 id(日志用)。
+        publisher_user_id: 发布者的小红书 user_id(主页路径定位用)。
+        title: 目标笔记标题(标题匹配,匹配不到即放弃)。
+        comment_text: 评论文案,**必填**(空文案在 ``_do_comment`` 里记 error)。
+
+    Returns:
+        成功 ``{"note_url": str, "commented": True}``;评论未发出时带 ``"error"`` 键
+        (调用方据此落台账 error)。
+
+    Raises:
+        MatrixInteractError: 笔记定位/打开失败(此时没评论出去)。
+    """
+    human = SyncHumanActions(page)
+    note_url = _open_note_by_title(page, human, publisher_user_id, title)
+    _browse_note(human)
+
+    try:
+        outcome = _do_comment(page, human, comment_text)
+    except Exception as exc:  # 兜底:异常也要给结构化结果,别让上层拿不到 note_url
+        logger.warning(f"[note_comment] 账号{account_id} 评论动作异常: {exc}")
+        outcome = {"status": "error", "reason": f"comment_exception: {exc}"}
+    logger.info(
+        f"[note_comment] 账号{account_id} 评论: {outcome['status']}"
+        f" {outcome.get('reason', '')}"
+    )
+
+    if outcome["status"] != "done":
+        return {
+            "note_url": note_url,
+            "error": outcome.get("reason") or "comment_failed",
+        }
+    return {"note_url": note_url, "commented": True}

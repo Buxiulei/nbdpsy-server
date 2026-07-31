@@ -3,7 +3,8 @@
 - 矩阵选号:全部 cookie_status='valid' 排除发布者本人(失效/未知 cookie 号不派);
 - 标题匹配定位:命中才点,匹配不到抛错放弃(**绝不默认取第一篇**);
 - 已赞/已藏跳过分支:图标读到 #liked / #collected 记 skipped 且一次都不点;
-- 评论文案为空时跳过评论;
+- 成败判定:两个动作全失败必落 error(评论移走后 not_requested 状态一并取消,
+  判据改为直接对全部动作取 any——回归锁死"永远落不下 error"的老缺陷不复发);
 - 延时排期:payload 的 not_before 未到点则不派发(执行方不 sleep 等待);
 - matrix_interact 非幂等,不得进 _IDEMPOTENT_KINDS(重复执行会取消已点的赞)。
 
@@ -228,60 +229,160 @@ def test_like_icon_unreadable_does_not_click():
     assert human.clicks == []
 
 
-# ---------------- 评论文案为空 ----------------
+# ---------------- 成败判定(评论移除后)----------------
+
+
+def _patch_interact(monkeypatch, icon_result: dict) -> None:
+    """把 interact_with_note 的定位/浏览/图标动作都换成替身,只留成败判定这一层。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "_icon_action", lambda *a, **k: icon_result)
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+
+
+def test_interact_has_no_comment_step(monkeypatch):
+    """矩阵互动只剩点赞 + 收藏两个动作:actions 恒为这两条,不含 comment。
+
+    评论是**结构上**移除的,不是靠传空文案绕过——所以 comment 这个键压根不该出现,
+    也不该再有任何 not_requested 状态(它正是老成败判定漏洞的载体)。
+    """
+    _patch_interact(monkeypatch, {"status": "done"})
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert set(result["actions"]) == {"like", "collect"}
+    assert all(
+        a["status"] != "not_requested" for a in result["actions"].values()
+    )
+    assert "error" not in result
+
+
+def test_both_actions_failed_falls_to_error(monkeypatch):
+    """点赞收藏双双失败 → 必须落 error,绝不能显示 done。
+
+    回归老缺陷:旧判定先剔掉 not_requested 再要求"剔剩的非空"才判失败,一旦所有动作
+    都可缺席,error 就永远落不下来,错误上报被彻底架空。评论移走后两个动作无条件各跑
+    一次,判据直接对全部动作取 any,不存在可剔空的集合。
+    """
+    _patch_interact(monkeypatch, {"status": "error", "reason": "点不动"})
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert result["actions"]["like"]["status"] == "error"
+    assert result["actions"]["collect"]["status"] == "error"
+    assert result.get("error") == "点赞与收藏均失败"
+
+
+def test_action_exception_still_counts_as_failure(monkeypatch):
+    """动作抛异常被 except 兜成 error 写回 actions,照样参与判定 → 整体 error。
+
+    这条锁死"异常动作没进 actions 导致集合为空、于是不判失败"的另一条退路。
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("页面炸了")
+
+    _patch_interact(monkeypatch, {"status": "done"})
+    monkeypatch.setattr(browser_mi, "_icon_action", _boom)
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert set(result["actions"]) == {"like", "collect"}
+    assert all(a["status"] == "error" for a in result["actions"].values())
+    assert result.get("error") == "点赞与收藏均失败"
+
+
+def test_one_action_succeeds_is_not_error(monkeypatch):
+    """一个成功一个失败 → 不落 error(动作互不阻断,有成果就不算整体失败)。"""
+    calls = {"n": 0}
+
+    def _alternating(*a, **k):
+        calls["n"] += 1
+        return {"status": "done"} if calls["n"] == 1 else {"status": "error",
+                                                           "reason": "点不动"}
+
+    _patch_interact(monkeypatch, {"status": "done"})
+    monkeypatch.setattr(browser_mi, "_icon_action", _alternating)
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert "error" not in result
+
+
+def test_already_liked_and_collected_counts_as_success(monkeypatch):
+    """已赞已藏(skipped)→ 目标本就达成,不得落 error。"""
+    _patch_interact(monkeypatch, {"status": "skipped", "reason": "已激活"})
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert "error" not in result
+
+
+# ---------------- 独立评论(comment_on_note)----------------
 
 
 @pytest.mark.parametrize("text", ["", "   ", None])
-def test_comment_skipped_when_no_text(text):
-    """payload 没给文案(或全空白)→ 记 not_requested,不碰页面任何元素。
-
-    刻意区别于 skipped:skipped 是"已赞/已藏,目标本就达成"算成功,而没传文案是本次
-    没要求做,不能当成功证据(见 test_all_actions_failed_not_masked_by_empty_comment)。
-    """
+def test_comment_empty_text_is_error_not_skip(text):
+    """空文案 → error(评论独立后没有"这次没要求做"这回事),且不碰页面任何元素。"""
     page = _FakePage(elements={"boom": None})
     human = _FakeHuman()
 
     result = browser_mi._do_comment(page, human, text)
 
-    assert result["status"] == "not_requested"
+    assert result["status"] == "error"
+    assert "comment_text_empty" in result["reason"]
     assert human.clicks == [] and human.typed == []
 
 
-def test_all_actions_failed_not_masked_by_empty_comment(monkeypatch):
-    """点赞收藏双双失败 + 评论没传文案 → 必须落 error,不得被 not_requested 顶成 done。
-
-    回归:调度侧写进 payload 的 comment 固定是空串,若把"没传文案"也算作成功证据,
-    则任何一次真实失败都会在台账上显示 done,错误上报被彻底架空。
-    """
+def test_comment_on_note_success(monkeypatch):
+    """评论发出并复核 → {note_url, commented:True},无 error 键(台账落 done)。"""
     monkeypatch.setattr(browser_mi, "_open_note_by_title",
                         lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
     monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
-    monkeypatch.setattr(browser_mi, "_icon_action",
-                        lambda *a, **k: {"status": "error", "reason": "点不动"})
+    monkeypatch.setattr(browser_mi, "_do_comment",
+                        lambda *a, **k: {"status": "done"})
     monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
 
-    result = browser_mi.interact_with_note(
-        _FakePage(), account_id=9, publisher_user_id="u1", title="标题", comment_text=""
+    result = browser_mi.comment_on_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题",
+        comment_text="写得真好",
     )
 
-    assert result["actions"]["comment"]["status"] == "not_requested"
-    assert result.get("error") == "全部互动动作失败"
+    assert result == {
+        "note_url": "https://www.xiaohongshu.com/explore/x", "commented": True
+    }
 
 
-def test_already_liked_and_collected_counts_as_success(monkeypatch):
-    """已赞已藏(skipped)+ 没传文案 → 目标本就达成,不得落 error。"""
+def test_comment_on_note_failure_carries_error_and_url(monkeypatch):
+    """评论没发出 → 带 error 键(台账落 error)且仍给 note_url 供人工核对。"""
     monkeypatch.setattr(browser_mi, "_open_note_by_title",
                         lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
     monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
-    monkeypatch.setattr(browser_mi, "_icon_action",
-                        lambda *a, **k: {"status": "skipped", "reason": "已激活"})
+    monkeypatch.setattr(
+        browser_mi, "_do_comment",
+        lambda *a, **k: {"status": "error", "reason": "comment_unverified: 没复核到"},
+    )
     monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
 
-    result = browser_mi.interact_with_note(
-        _FakePage(), account_id=9, publisher_user_id="u1", title="标题", comment_text=""
+    result = browser_mi.comment_on_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题",
+        comment_text="写得真好",
     )
 
-    assert "error" not in result
+    assert "comment_unverified" in result["error"]
+    # 非幂等链路,人工核对是重试前的必要步骤,所以失败也要把链接交出去
+    assert result["note_url"] == "https://www.xiaohongshu.com/explore/x"
+    assert "commented" not in result
 
 
 # ---------------- 矩阵选号 + 登记(schedule_matrix_interact) ----------------
@@ -351,7 +452,7 @@ def test_schedule_selects_valid_accounts_excluding_publisher(matrix_db):
 
 
 def test_schedule_payload_carries_locator_and_window(matrix_db):
-    """payload 带主页定位三件套 + 窗口内随机 not_before;评论文案留空接口。"""
+    """payload 带主页定位三件套 + 窗口内随机 not_before;**不再有 comment 字段**。"""
     _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
     _add_account(matrix_db, 2, "矩阵号A", "valid")
     _add_published_job(matrix_db, 88, 1, "焦虑发作时的五个自救动作")
@@ -363,7 +464,8 @@ def test_schedule_payload_carries_locator_and_window(matrix_db):
     assert payload["publisher_user_id"] == "pub-uid"
     assert payload["title"] == "焦虑发作时的五个自救动作"
     assert payload["source_publish_job_id"] == 88
-    assert payload["comment"] == ""  # 文案是入参,本期不生成
+    # 评论已从矩阵互动移除(独立走 note_comment),payload 里不该再有这个字段
+    assert "comment" not in payload
     not_before = datetime.fromisoformat(payload["not_before"])
     assert before <= not_before <= before + timedelta(seconds=svc.WINDOW_SECONDS + 1)
 

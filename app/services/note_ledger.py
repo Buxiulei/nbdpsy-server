@@ -199,6 +199,23 @@ def schedule_note_ledger_sync(db_path: str, publish_job_id: int) -> Optional[str
         return None
 
 
+# ---------------- 手工触发一次同步(REST 请求路径)----------------
+
+
+def start_sync(account_id: int) -> str:
+    """REST 手工触发该号一次台账同步;登记 browser_jobs 台账,返回轮询 id。
+
+    与 ``schedule_note_ledger_sync``(发布钩子)的差别只有两处:不带 ``not_before``
+    排期(立刻可派),也不按 ``source_publish_job_id`` 去重(手工触发本就该次次生效)。
+    ``note_ledger_sync`` 是幂等 kind,重复触发只会把同一批行再刷一遍。
+    """
+    sync_id = browser_jobs_repo.enqueue_from_request(
+        "note_ledger_sync", {}, account_id=account_id
+    )
+    browser_jobs_repo.spawn_inline(sync_id, lambda: execute(account_id, {}))
+    return sync_id
+
+
 # ---------------- T1/T2:契约执行(account_worker 子进程消费)----------------
 
 

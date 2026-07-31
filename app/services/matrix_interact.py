@@ -1,4 +1,4 @@
-"""矩阵互动服务:发布成功钩子登记延时任务 + 契约 execute()。
+"""矩阵互动服务(点赞 + 收藏):发布成功钩子登记延时任务 + 契约 execute()。
 
 设计见 docs/design/2026-07-31-matrix-interact-design.md。分层与 note_export /
 note_delete 一致(浏览器动作在 app.browser.matrix_interact,本模块只管台账与调度):
@@ -16,7 +16,8 @@ note_delete 一致(浏览器动作在 app.browser.matrix_interact,本模块只�
   ``{"error": reason}``,**绝不抛出**。
 - ``matrix_interact`` **非幂等**(重复执行会取消已点的赞),故不在
   ``browser_jobs_repo._IDEMPOTENT_KINDS`` 里:僵死置 error 不自动重跑。
-- 评论文案是 payload 入参(``comment``),本模块不做 LLM 生成;为空即只点赞收藏。
+- **不含评论**(2026-07-31 起):评论是独立能力,走 ``app.services.note_comment`` 与
+  REST ``note-comments`` 手工触发,payload 里也不再有 ``comment`` 字段。
 
 已知边界:``NBDPSY_ROLE=all``(单进程回滚位/测试位)无 Supervisor,登记的延时任务无人
 派发,会一直 queued —— 生产走 api + worker 拆分部署(worker 的 Supervisor 扫
@@ -102,8 +103,6 @@ def schedule_matrix_interact(db_path: str, publish_job_id: int) -> list[str]:
                 "publisher_account_id": publisher_id,
                 "publisher_user_id": publisher["user_id"],
                 "title": job["title"],
-                # 评论文案入参(后续承载营销钩子话术);为空则只点赞收藏,不做 LLM 生成
-                "comment": "",
                 # 窗口内的随机执行时刻:派发侧按它过滤,执行方不 sleep 等待
                 "not_before": (
                     now + timedelta(seconds=random.uniform(0, WINDOW_SECONDS))
@@ -134,13 +133,12 @@ def schedule_matrix_interact(db_path: str, publish_job_id: int) -> list[str]:
 async def execute(account_id: int, payload: dict) -> dict:
     """执行一次矩阵互动(契约函数,不碰 browser_jobs 台账)。
 
-    payload: ``{"publisher_user_id","title","comment",...}``。成功返回
-    ``{"note_url","actions"}``;定位失败 / 任何异常 → ``{"error": reason}``,**不抛出**。
+    payload: ``{"publisher_user_id","title",...}``。成功返回 ``{"note_url","actions"}``
+    (actions 只含 like / collect);定位失败 / 任何异常 → ``{"error": reason}``,**不抛出**。
     """
     payload = payload or {}
     publisher_user_id = (payload.get("publisher_user_id") or "").strip()
     title = (payload.get("title") or "").strip()
-    comment = payload.get("comment") or ""
     if not publisher_user_id or not title:
         return {"error": "payload 缺 publisher_user_id / title,无法定位目标笔记"}
     try:
@@ -152,7 +150,7 @@ async def execute(account_id: int, payload: dict) -> dict:
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队。
             async with browser_slot():
                 return await asyncio.to_thread(
-                    _interact_sync, account_id, cookies, publisher_user_id, title, comment
+                    _interact_sync, account_id, cookies, publisher_user_id, title
                 )
     except MatrixInteractError as exc:
         # 定位类语义失败(笔记没找到 / 详情没打开):记 error,不重跑
@@ -170,7 +168,6 @@ def _interact_sync(
     cookies: list[dict],
     publisher_user_id: str,
     title: str,
-    comment: str,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 互动 → stop 收尾(finally 防泄漏 camoufox)。
 
@@ -182,8 +179,6 @@ def _interact_sync(
         start = client.start()
         if not start.get("success"):
             raise MatrixInteractError(f"browser_start_failed: {start.get('error')}")
-        return interact_with_note(
-            client.page, account_id, publisher_user_id, title, comment
-        )
+        return interact_with_note(client.page, account_id, publisher_user_id, title)
     finally:
         client.stop()

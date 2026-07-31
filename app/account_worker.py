@@ -348,6 +348,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import matrix_interact
 
         return lambda account_id, payload: matrix_interact.execute(account_id, payload)
+    if kind == "note_comment":
+        from app.services import note_comment
+
+        return lambda account_id, payload: note_comment.execute(account_id, payload)
     if kind == "note_visibility":
         from app.services import note_visibility
 
