@@ -95,14 +95,48 @@ GET https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=0
 
 - `id` 主键
 - `account_id` + `note_id` **联合唯一**(幂等键)
-- `note_id` / `xsec_token` / `xsec_source` / `note_url`(拼好的完整链接)
-- `title`(`display_title`,可空串)
-- `note_type`(`type` 原样落,**不做映射**——真实取值集合尚未穷举)
-- `published_at`(由 `visible_time` unix 秒转,权威发布时间)
+- `note_id` / `xsec_token` / `xsec_source` / `note_url`(拼好的完整链接)——**后补**
+- `title`(发布时先写我们自己的标题;同步时用 `display_title` 纠正)
+- `note_type`(`type` 原样落,**不做映射**——真实取值集合尚未穷举)——后补
+- `published_at`:**发布成功那一刻的本机时间**,发布时即写,永不为空
+- `platform_published_at`:由接口 `visible_time` unix 秒转,平台权威时间——后补
+- `generated_at`:生成时间(取 `publish_jobs.created_at`,见 4.5 语义说明)
+- `operator_id`:生成用户(取 `publish_jobs.created_by`)
 - `source_publish_job_id`(可空 FK → publish_jobs,非本系统发布的为 NULL)
 - `content_archive_id`(可空 FK → content_archive,正文与媒体在那边)
+- `sync_status`:`pending_id`(已发布待补 id)/ `linked`(已补上)/ `orphan`
+  (列表里有但本系统没发过,如 NBDpsy-夕夕 那 26 篇)
 - `first_seen_at` / `last_synced_at`
 - 互动快照 `likes` / `collects` / `comments` / `shares` / `views`(对账用,非权威指标源)
+
+### 4.1.1 写入时序(核心:发布时即落库,列表接口只做补充与纠正)
+
+**T0 — 发布成功那一刻(主写路径,必须成功)**
+
+在 `_apply_publish_decision` 的 published 分支、与 `archive_published_job` 同址,
+**直接建 `published_notes` 行**,把此刻已知的一切全写进去:`account_id`、`title`、
+`published_at`(本机时钟)、`generated_at`、`operator_id`、`source_publish_job_id`、
+`content_archive_id`;`note_id` / `xsec_token` / `platform_published_at` /
+`note_type` 留空,`sync_status='pending_id'`。
+
+这条行**不依赖任何浏览器操作**,纯 DB 写入,发布成功即存在。哪怕后续同步永远失败,
+"我们发过这篇笔记、什么内容、谁发的、什么时候发的"也已经完整落库。
+
+**T1 — 补充(发布后触发一次列表同步)**
+
+拉一次笔记列表,按 (title, 时间邻近) 匹配刚发的那篇 → 补 `note_id` / `xsec_token` /
+`note_url` / `platform_published_at` / `note_type`,`sync_status='linked'`。
+匹配不到就留着 `pending_id`,交给 T2。**注意笔记进列表可能有延迟**,T1 失败是常态,
+不重试不阻断。
+
+**T2 — 定时纠正(周期性全量同步)**
+
+- 补上 T1 没匹配到的 `pending_id` 行;
+- 刷新互动快照、纠正 `title`(运营可能在平台改过标题);
+- 列表里有、台账里没有的笔记 → 建行,`source_publish_job_id=NULL`、
+  `sync_status='orphan'`(这类只有平台侧信息,没有正文与媒体);
+- 台账里有、列表里连续多次查不到的 → 只记录不删行(笔记可能被删/被限流,
+  台账是历史事实的记录,**不因平台侧消失而抹掉**)。
 
 ### 4.2 抓取层 `app/browser/creator_note_list.py`
 
@@ -128,19 +162,26 @@ GET https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=0
 
 ### 4.4 触发
 
-1. **发布成功后**:与 `archive_published_job` 同址(`account_worker.py:198` /
-   `publish/scheduler.py:358`)登记一条 `note_ledger_sync`。注意发布后笔记入列表
-   可能有延迟,失败不重试不阻断(下次定时同步会兜住)。
-2. **定时对账**:复用 `note_metrics_scheduler` 的模式,每账号周期性全量同步一次。
-3. **存量回填**:上线后手工对每个可用账号触发一次。
+1. **发布成功那一刻**(T0,与 `archive_published_job` 同址):**先同步写台账行**
+   (纯 DB,不碰浏览器),**再**登记一条 `note_ledger_sync` 去补 id(T1)。
+   两步都幂等、都绝不抛错阻断发布终态。顺序不能颠倒——台账行必须先于同步存在,
+   否则同步回来的数据没有落点。
+2. **定时对账**(T2):复用 `note_metrics_scheduler` 的模式,每账号周期性全量同步。
+3. **存量回填**:上线后手工对每个可用账号触发一次全量同步。
 
 ### 4.5 时间语义(明确回答需求)
 
-| 需求里的说法 | 落到哪 | 说明 |
-|---|---|---|
-| 发布时间 | `published_notes.published_at` | 由接口 `visible_time` 转,权威 |
-| 生成时间 | `publish_jobs.created_at` | **代理值**:发布任务提交时刻 |
-| 生成用户 | `publish_jobs.created_by` → `content_archive.source_operator_id` | 语义是"谁的 apikey 提交了发布",不区分内容是人写还是 AI 代写 |
+| 需求里的说法 | 落到哪 | 何时写 | 说明 |
+|---|---|---|---|
+| 发布时间 | `published_notes.published_at` | **T0 发布当场** | 本机时钟,永不为空 |
+| 发布时间(平台侧) | `published_notes.platform_published_at` | T1/T2 后补 | 由接口 `visible_time` 转,平台权威;与 `published_at` 有分钟级差异属正常 |
+| 生成时间 | `published_notes.generated_at` | **T0 发布当场** | 取 `publish_jobs.created_at`,**代理值**:发布任务提交时刻 |
+| 生成用户 | `published_notes.operator_id` | **T0 发布当场** | 取 `publish_jobs.created_by`,语义是"谁的 apikey 提交了发布",不区分内容是人写还是 AI 代写 |
+| 笔记 id / 链接 | `note_id` / `xsec_token` / `note_url` | T1/T2 后补 | 发布当场拿不到,只能事后从列表接口补 |
+
+**为什么 `published_at` 不等 T0 就写不行**:发布成功当场是我们唯一 100% 掌握的时刻。
+平台的 `visible_time` 要事后查,而查询可能延迟、失败、或账号被挂验证墙(见风险 1)。
+两个时间都存,`published_at` 保证永远有值,`platform_published_at` 有则更准。
 
 **必须如实告知用户的语义偏差**:nbdpsy-server 是纯发布 API 服务,内容生成发生在调用方
 (外部 agent/skill)内部,本仓库看到的最早时间戳就是任务提交时刻。真正的"内容生成时刻"
@@ -177,8 +218,11 @@ GET https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=0
 
 ## 七、验收
 
-1. 单元测试:分页遍历终止条件、upsert 幂等(同一 note_id 跑两次不产生重复行)、
-   关联不上时留 NULL 不猜、`visible_time` → `published_at` 转换。
+1. 单元测试:**T0 发布当场即建台账行且内容字段齐全**(不依赖任何浏览器/同步)、
+   **同步全程失败时台账行仍完整保留 `pending_id`**、分页遍历终止条件、
+   upsert 幂等(同一 note_id 跑两次不产生重复行)、关联不上时留 NULL 不猜、
+   `visible_time` → `platform_published_at` 转换、
+   T2 遇到列表里查不到的行只记录不删。
 2. 真号 e2e:对一个健康账号(NBDpsy 或 NBDpsy-我们都有病)跑一次全量同步,
    核对台账行数与创作中心页面显示的笔记总数一致(实测 NBDpsy 显示"全部 61")。
 3. 回填后核对:`publish_jobs.note_id` 不再全空;台账里空标题与重复标题的笔记
