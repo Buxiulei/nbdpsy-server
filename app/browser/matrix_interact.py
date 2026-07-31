@@ -232,10 +232,12 @@ def _icon_action(
 def _do_comment(page, human: SyncHumanActions, text: str) -> Dict[str, Any]:
     """评论:激活入口 → 等输入区可交互 → 逐字输入 → 等发送键可用 → 发送 → 复核。
 
-    文案由调用方(payload)传入,为空即跳过评论(记 skipped 非 error)。
+    文案由调用方(payload)传入,为空记 ``not_requested``——**不是** ``skipped``:
+    skipped 语义是"已赞/已藏,目标本就达成"属成功,而没传文案是这次压根没要求做,
+    不能拿它当成功证据顶替真失败(否则 comment 常年空串时,点赞收藏双双失败也会落 done)。
     """
     if not (text or "").strip():
-        return {"status": "skipped", "reason": "无评论文案"}
+        return {"status": "not_requested", "reason": "无评论文案"}
 
     entry_sel = _resolve_selector(page, _COMMENT_ENTRY_SELECTORS)
     if entry_sel is None:
@@ -318,8 +320,8 @@ def interact_with_note(
 
     Returns:
         ``{"note_url": str, "actions": {"like"/"collect"/"comment": {...}}}``;
-        三个动作全部未成功(既无 done 也无 skipped)时额外带 ``"error"`` 键,
-        让台账落 error 而非假 done。
+        本次要求做的动作全部未成功(既无 done 也无 skipped)时额外带 ``"error"`` 键,
+        让台账落 error 而非假 done。状态 ``not_requested``(没传评论文案)不参与成败判定。
 
     Raises:
         MatrixInteractError: 笔记定位/打开失败(此时一个动作都没做)。
@@ -350,6 +352,9 @@ def interact_with_note(
         )
 
     result: Dict[str, Any] = {"note_url": note_url, "actions": actions}
-    if not any(a["status"] in ("done", "skipped") for a in actions.values()):
+    # 成败只由**本次要求做的**动作决定:not_requested(没传评论文案)既不算成功也不算
+    # 失败,必须先剔除——否则 comment 常年空串,点赞收藏双双失败也会被它顶成 done。
+    attempted = [a for a in actions.values() if a["status"] != "not_requested"]
+    if attempted and not any(a["status"] in ("done", "skipped") for a in attempted):
         result["error"] = "全部互动动作失败"
     return result

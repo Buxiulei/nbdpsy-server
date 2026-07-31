@@ -233,14 +233,55 @@ def test_like_icon_unreadable_does_not_click():
 
 @pytest.mark.parametrize("text", ["", "   ", None])
 def test_comment_skipped_when_no_text(text):
-    """payload 没给文案(或全空白)→ 跳过评论,不碰页面任何元素。"""
+    """payload 没给文案(或全空白)→ 记 not_requested,不碰页面任何元素。
+
+    刻意区别于 skipped:skipped 是"已赞/已藏,目标本就达成"算成功,而没传文案是本次
+    没要求做,不能当成功证据(见 test_all_actions_failed_not_masked_by_empty_comment)。
+    """
     page = _FakePage(elements={"boom": None})
     human = _FakeHuman()
 
     result = browser_mi._do_comment(page, human, text)
 
-    assert result["status"] == "skipped"
+    assert result["status"] == "not_requested"
     assert human.clicks == [] and human.typed == []
+
+
+def test_all_actions_failed_not_masked_by_empty_comment(monkeypatch):
+    """点赞收藏双双失败 + 评论没传文案 → 必须落 error,不得被 not_requested 顶成 done。
+
+    回归:调度侧写进 payload 的 comment 固定是空串,若把"没传文案"也算作成功证据,
+    则任何一次真实失败都会在台账上显示 done,错误上报被彻底架空。
+    """
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "_icon_action",
+                        lambda *a, **k: {"status": "error", "reason": "点不动"})
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题", comment_text=""
+    )
+
+    assert result["actions"]["comment"]["status"] == "not_requested"
+    assert result.get("error") == "全部互动动作失败"
+
+
+def test_already_liked_and_collected_counts_as_success(monkeypatch):
+    """已赞已藏(skipped)+ 没传文案 → 目标本就达成,不得落 error。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "_icon_action",
+                        lambda *a, **k: {"status": "skipped", "reason": "已激活"})
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+
+    result = browser_mi.interact_with_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题", comment_text=""
+    )
+
+    assert "error" not in result
 
 
 # ---------------- 矩阵选号 + 登记(schedule_matrix_interact) ----------------
