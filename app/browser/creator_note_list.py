@@ -18,8 +18,15 @@
 
 翻页终止条件(三选一,任一命中即停,防死循环):
 1. 某批响应的 ``notes`` 为空列表 —— 页码已超界;
-2. 滚动后 ``_NEXT_BATCH_TIMEOUT_S`` 内没有新的列表响应 —— 前端没有更多可加载;
+2. 滚动后 ``_NEXT_BATCH_TIMEOUT_S`` 内没有新的列表响应,**且**已抓够接口自报的总数
+   (或总数未知)—— 前端没有更多可加载;
 3. 累计批数达 ``max_pages`` —— 兜底硬上限,命中即告警停止。
+
+**期望总数校验**:响应里 ``data.tags[0].notes_count`` 是该号笔记总数(真号实测 37)。
+条件 2 曾经把"滚了但前端这次没发分页请求"误判成"没有更多",实测导致 37 篇只抓到 20 篇、
+台账长期漏 17 篇。故:没抓够期望总数时,连续空滚要重试 ``_EMPTY_SCROLL_RETRIES`` 次才
+认定到底;最终仍不足即**告警**(``fetch_posted_notes`` 不为此抛错——半份列表照样能刷
+已有台账行,但绝不静默当成"这号就这么多篇")。
 """
 
 import time
@@ -45,6 +52,8 @@ _FIRST_BATCH_TIMEOUT_S = 20.0
 _NEXT_BATCH_TIMEOUT_S = 8.0
 # 批数硬上限(实测单号 61 篇分若干页,60 批远超真实需要,纯防死循环)
 MAX_PAGES = 60
+# 还没抓够期望总数时,连续几次滚动都不触发新分页才认定到底(实测下拉偶发不触发请求)
+_EMPTY_SCROLL_RETRIES = 3
 
 
 class CreatorNoteListError(Exception):
@@ -64,6 +73,8 @@ class _PostedCollector:
 
     def __init__(self) -> None:
         self.batches: List[List[Dict[str, Any]]] = []
+        # 接口自报的笔记总数(data.tags[0].notes_count);读不到就是 None = 期望未知
+        self.expected_total: Optional[int] = None
 
     def handle(self, response) -> None:
         try:
@@ -85,6 +96,21 @@ class _PostedCollector:
             )
             return
         self.batches.append(notes)
+        self._take_expected_total(body)
+
+    def _take_expected_total(self, body: dict) -> None:
+        """从 ``data.tags[0].notes_count`` 记下期望总数(只取第一次读到的,读不到就留 None)。
+
+        ``data.tags`` 实测只有一项「所有笔记」,不分可见性维度,故 ``tags[0]`` 就是全量口径。
+        """
+        if self.expected_total is not None:
+            return
+        tags = ((body or {}).get("data") or {}).get("tags")
+        if not isinstance(tags, list) or not tags:
+            return
+        count = (tags[0] or {}).get("notes_count")
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            self.expected_total = count
 
 
 def _wait_for_new_batch(
@@ -122,6 +148,35 @@ def _merge_batches(batches: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     if dropped:
         logger.warning(f"[creator_note_list] {dropped} 条响应项无 id,已丢弃(无法入台账)")
     return merged
+
+
+def _merged_count(collector: _PostedCollector) -> int:
+    """当前已抓到的去重后篇数(与最终返回的口径一致)。"""
+    return len(_merge_batches(collector.batches))
+
+
+def _short_of_expected(collector: _PostedCollector) -> bool:
+    """期望总数已知且还没抓够 —— 此时"滚动无响应"不足以判定到底。"""
+    expected = collector.expected_total
+    return expected is not None and _merged_count(collector) < expected
+
+
+def permission_code_of(raw: Dict[str, Any]) -> Optional[int]:
+    """列表项的 ``permission_code``(0=公开 / 1=仅自己可见,其余档位语义未验证)。
+
+    **存平台原值,不自造 public/private 枚举**:只实测了 2 档,自造映射遇到第三态会丢
+    信息或误判。读不到 / 不是整数 → None = **未知**,注意 None 不等于公开。
+    """
+    value = (raw or {}).get("permission_code")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def permission_msg_of(raw: Dict[str, Any]) -> Optional[str]:
+    """列表项的 ``permission_msg`` 平台原文案(公开笔记实测是空串);非字符串 → None。"""
+    value = (raw or {}).get("permission_msg")
+    return value if isinstance(value, str) else None
 
 
 def fetch_posted_notes(
@@ -169,17 +224,29 @@ def fetch_posted_notes(
             logger.info(f"[creator_note_list] 账号{account_id}: 首批即空,该号无笔记")
             return []
 
+        empty_scrolls = 0
         while len(collector.batches) < max_pages:
             seen = len(collector.batches)
             human.wait(0.8, 2.0, context="笔记列表浏览")
             human.scroll("down")
             batch = _wait_for_new_batch(page, collector, seen, _NEXT_BATCH_TIMEOUT_S)
             if batch is None:
+                # 还差着期望总数就再滚几次:实测下拉偶发不触发分页请求,一次没响应就收工
+                # 正是"37 篇只抓到 20 篇"的成因。期望未知(读不到 notes_count)时维持旧行为。
+                empty_scrolls += 1
+                if _short_of_expected(collector) and empty_scrolls < _EMPTY_SCROLL_RETRIES:
+                    logger.info(
+                        f"[creator_note_list] 账号{account_id}: 滚动后无新分页响应,"
+                        f"但只抓到 {_merged_count(collector)}/{collector.expected_total} 篇,"
+                        f"重试第 {empty_scrolls}/{_EMPTY_SCROLL_RETRIES - 1} 次"
+                    )
+                    continue
                 logger.info(
                     f"[creator_note_list] 账号{account_id}: 滚动后无新分页响应,遍历结束"
                     f"(共 {len(collector.batches)} 批)"
                 )
                 break
+            empty_scrolls = 0
             if not batch:
                 logger.info(
                     f"[creator_note_list] 账号{account_id}: 返回空列表,页码已超界,遍历结束"
@@ -197,6 +264,14 @@ def fetch_posted_notes(
             f"[creator_note_list] 账号{account_id}: 抓到 {len(notes)} 篇笔记"
             f"({len(collector.batches)} 批响应)"
         )
+        expected = collector.expected_total
+        if expected is not None and len(notes) < expected:
+            # 抓不满**绝不静默成功**:少掉的那些笔记会在台账里凭空消失(或被当成"已删"),
+            # 今天就是因为只抓到 20/37 让 17 篇长期不在台账里。
+            logger.warning(
+                f"[creator_note_list] 账号{account_id}: 只抓到 {len(notes)} 篇,"
+                f"少于接口自报的 {expected} 篇 —— 翻页提前终止,本次结果不完整"
+            )
         return notes
     finally:
         # 监听器必须摘掉:同一个 page 会被后续任务复用,留着会继续吃响应体
