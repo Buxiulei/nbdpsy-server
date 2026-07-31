@@ -40,6 +40,7 @@ from app.browser.browser_gate import browser_slot
 from app.browser.creator_note_list import CreatorNoteListError, fetch_posted_notes
 from app.browser.sync_client import SyncClient
 from app.core.db import get_session
+from app.models.content_archive import ContentArchive
 from app.models.publish_job import PublishJob
 from app.models.published_note import PublishedNote
 from app.services import browser_jobs_repo
@@ -53,6 +54,12 @@ SYNC_DELAY_SECONDS = 300
 # 偏差(秒)。两者本就有分钟级差异(T0 是发布成功那一刻的本机时钟,visible_time 是平台
 # 侧时刻),取 30 分钟足够宽容;同标题笔记若隔了半小时以上,就不该被认成同一篇。
 MATCH_WINDOW_SECONDS = 1800
+
+# 存量笔记按标题回连 publish_jobs 时允许的最大时间偏差(秒)。比上面那个窗口宽得多,
+# 因为存量 job 没有 published_at(那时这列还不存在),只能拿 started_at / created_at
+# 当锚点,而 created_at 是任务提交时刻——定时发布能比实际发布早好几个小时。取 ±1 天:
+# 足够容纳这类偏差,又能把"同标题隔几天又发一篇"排除在外。
+LEGACY_MATCH_WINDOW_SECONDS = 86400
 
 _NOTE_URL_BASE = "https://www.xiaohongshu.com/explore/"
 
@@ -333,12 +340,14 @@ def _pick_pending(
 async def sync_notes(session, account_id: int, notes: list[dict], now: datetime) -> dict:
     """把一次列表抓取的结果同步进台账;返回计数字典。
 
-    四条路径:
-    - 台账里已有该 note_id → 刷新平台侧字段与互动快照(纠正 title);
+    路径:
+    - 台账里已有该 note_id → 刷新平台侧字段与互动快照(纠正 title);**若该行还没连上
+      发布任务,再试一次按标题回连**(自愈早先落成 orphan 的存量行);
     - 匹配上某条 pending_id 行 → 补平台侧字段,置 linked,并回填该行对应的
       ``publish_jobs.note_id`` / ``published_at``(行自带 job id,无需靠标题猜);
     - 同标题 pending 有多条、认不准 → 什么都不做(既不认也不建 orphan,见 ``_pick_pending``);
-    - 确实不是我们发的 → 建 orphan 行(``source_publish_job_id=NULL``,只有平台侧信息);
+    - 没有 T0 行(存量笔记:台账上线前发的)→ 先建行,再按标题回连 publish_jobs,
+      连上即 linked,连不上才是真 orphan;
     - **台账里有、列表里查不到的 → 只记日志不删行**(笔记可能被删/被限流,台账是历史
       事实的记录)。
     """
@@ -349,8 +358,19 @@ async def sync_notes(session, account_id: int, notes: list[dict], now: datetime)
     ).scalars().all()
     by_note_id = {r.note_id: r for r in rows if r.note_id}
     pending = [r for r in rows if not r.note_id]
+    # 已被任何台账行认领的发布任务(全表,不限本账号):source_publish_job_id 有唯一约束,
+    # 认一个已被占的 job 会在 commit 时炸掉整次同步,必须先排除。
+    taken_jobs: set[int] = set(
+        (
+            await session.execute(
+                select(PublishedNote.source_publish_job_id).where(
+                    PublishedNote.source_publish_job_id.is_not(None)
+                )
+            )
+        ).scalars().all()
+    )
 
-    refreshed = linked = orphan = ambiguous = 0
+    refreshed = linked = linked_by_title = orphan = ambiguous = 0
     seen_ids: set[str] = set()
 
     for raw in notes:
@@ -362,6 +382,12 @@ async def sync_notes(session, account_id: int, notes: list[dict], now: datetime)
         if row is not None:
             _apply_platform_fields(row, raw, now)
             refreshed += 1
+            # 自愈:存量行早先落成了 orphan(那时还没有按标题回连这条路),重跑再试一次。
+            # 已连上的行不重找,故 linked 行不会被改回 orphan(幂等)。
+            if row.source_publish_job_id is None and await _try_link_by_title(
+                session, account_id, row, taken_jobs
+            ):
+                linked_by_title += 1
             continue
 
         platform_at = platform_published_at_of(raw)
@@ -378,14 +404,19 @@ async def sync_notes(session, account_id: int, notes: list[dict], now: datetime)
         else:
             row = PublishedNote(
                 account_id=account_id,
-                # 非本系统发布:没有 T0 时刻可用,退而用平台时间;连它都没有就记同步时刻
+                # 没有 T0 时刻可用,退而用平台时间;连它都没有就记同步时刻
                 published_at=platform_at or now,
                 sync_status="orphan",
                 first_seen_at=now,
             )
             _apply_platform_fields(row, raw, now)
             session.add(row)
-            orphan += 1
+            # 存量笔记(台账上线前发的)没有 T0 行,但可能确实是本系统发的:按标题回连
+            # publish_jobs,连上才不是 orphan。连不上就老实留 orphan + NULL。
+            if await _try_link_by_title(session, account_id, row, taken_jobs):
+                linked_by_title += 1
+            else:
+                orphan += 1
 
     missing = [r for r in rows if r.note_id and r.note_id not in seen_ids]
     if missing:
@@ -399,6 +430,7 @@ async def sync_notes(session, account_id: int, notes: list[dict], now: datetime)
     stats = {
         "refreshed": refreshed,
         "linked": linked,
+        "linked_by_title": linked_by_title,
         "orphan": orphan,
         "ambiguous": ambiguous,
         "pending_remaining": len(pending),
@@ -406,6 +438,90 @@ async def sync_notes(session, account_id: int, notes: list[dict], now: datetime)
     }
     logger.info(f"[note_ledger] 账号{account_id} 台账同步:{stats}")
     return stats
+
+
+def _job_time(job: PublishJob) -> Optional[datetime]:
+    """发布任务的时间锚点:优先 published_at,其次 started_at(开发布那一刻),再次 created_at。
+
+    存量任务(台账上线前的)没有 published_at —— 那时这列还不存在;started_at 是发布真正
+    开始的时刻,离笔记进平台最近(实测两者相差 160~284s),故作为首选替补。
+    """
+    return job.published_at or job.started_at or job.created_at
+
+
+def _within(
+    jobs: list[PublishJob], platform_at: datetime, window_s: int
+) -> list[PublishJob]:
+    """筛出时间锚点距 ``platform_at`` 不超过 ``window_s`` 的发布任务(锚点取不到的不算)。"""
+    return [
+        job
+        for job in jobs
+        if (anchor := _job_time(job)) is not None
+        and abs((anchor - platform_at).total_seconds()) <= window_s
+    ]
+
+
+async def _try_link_by_title(
+    session, account_id: int, row: PublishedNote, taken_jobs: set[int]
+) -> bool:
+    """按标题把台账行回连到 publish_jobs;连上返回 True,认不准返回 False(留 orphan)。
+
+    存量笔记走这条路:它们发布于台账上线之前,没有 T0 行,行里也就没有权威的
+    ``source_publish_job_id``,只能靠标题认。判据全部满足才认:
+
+    - 标题非空且与 ``publish_jobs.title`` **精确相等**(空标题、平台改过标题的都认不了);
+    - 该 job 还没被别的台账行认领(``source_publish_job_id`` 有唯一约束,抢已占的会炸库);
+    - 平台发布时间已知时,时间锚点落在两档窗口之一内(先紧后松,见下方注释);
+    - 候选**唯一**。0 条或多条一律不认 —— 同标题同时段发过两次的本就无法区分,宁可留 orphan。
+
+    连上时一并写 ``content_archive_id``(正文与媒体在归档那边)与 ``sync_status='linked'``,
+    并回填 ``publish_jobs.note_id`` / ``published_at``。
+    """
+    title = (row.title or "").strip()
+    if not title:
+        return False
+    jobs = (
+        await session.execute(
+            select(PublishJob).where(
+                PublishJob.account_id == account_id,
+                PublishJob.status == "published",
+                PublishJob.title == title,
+            )
+        )
+    ).scalars().all()
+    candidates = [job for job in jobs if job.id not in taken_jobs]
+    if row.platform_published_at is not None:
+        # 两档窗口,先紧后松,**每档都要求唯一**(任何一档都不做"取最近的那条"这种猜测):
+        # 1) 紧档 MATCH_WINDOW_SECONDS(30 分钟):笔记进平台距发布开始实测只有 160~284s,
+        #    落在这一档的证据强得多。生产实测正是靠它区分开同标题发过两次的那篇——两条
+        #    job 一条距笔记 246s、另一条差 4.4 小时,松档会同时命中而判成认不准。
+        # 2) 松档 LEGACY_MATCH_WINDOW_SECONDS(±1 天):存量 job 可能只有 created_at 当
+        #    锚点(提交时刻,定时发布能比实际发布早数小时),紧档够不着,才放宽。
+        # 紧档命中多于一条时直接放弃:放宽只会引入更多候选,不可能变唯一。
+        tight = _within(candidates, row.platform_published_at, MATCH_WINDOW_SECONDS)
+        if len(tight) > 1:
+            return False
+        candidates = tight or _within(
+            candidates, row.platform_published_at, LEGACY_MATCH_WINDOW_SECONDS
+        )
+    if len(candidates) != 1:
+        return False
+
+    job = candidates[0]
+    row.source_publish_job_id = job.id
+    row.content_archive_id = await session.scalar(
+        select(ContentArchive.id).where(
+            ContentArchive.source_publish_job_id == job.id
+        )
+    )
+    row.sync_status = "linked"
+    taken_jobs.add(job.id)
+    await _backfill_publish_job(session, row)
+    logger.info(
+        f"[note_ledger] 账号{account_id} 笔记 {row.note_id} 按标题回连到发布任务 {job.id}"
+        f"(归档 {row.content_archive_id})"
+    )
+    return True
 
 
 async def _backfill_publish_job(session, row: PublishedNote) -> None:
