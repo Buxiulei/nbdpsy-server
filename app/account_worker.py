@@ -196,6 +196,9 @@ def _apply_publish_decision(
             # 内容资产库:发布成功自动归档(幂等 + 绝不抛错阻断)。
             from app.services.content_archive import archive_published_job
             archive_published_job(db_path, job_id)
+            # 矩阵互动:给矩阵内其余账号登记窗口内随机时刻的互动任务(幂等 + 绝不抛错阻断)。
+            from app.services.matrix_interact import schedule_matrix_interact
+            schedule_matrix_interact(db_path, job_id)
         elif decision["status"] == "pending":
             # 排重试:retries 递增 + next_retry_at 排期 + 回 pending
             next_retry = now + timedelta(seconds=decision["next_retry_delta_s"])
@@ -331,6 +334,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_delete
 
         return lambda account_id, payload: note_delete.execute(account_id, payload)
+    if kind == "matrix_interact":
+        from app.services import matrix_interact
+
+        return lambda account_id, payload: matrix_interact.execute(account_id, payload)
     if kind == "draft_clean":
         from app.services import draft_clean
 
