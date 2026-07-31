@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.core.db as db_module
 from app.browser import creator_note_list as cnl
+from app.models.content_archive import ContentArchive
 from app.models.publish_job import PublishJob
 from app.models.published_note import PublishedNote
 from app.services import browser_jobs_repo as repo
@@ -600,16 +601,202 @@ async def test_sync_keeps_our_title_when_platform_title_empty(db):
 
 
 async def test_sync_creates_orphan_for_unknown_note(db):
-    """列表里有、台账里没有(非本系统发布)→ 建 orphan 行,source_publish_job_id 留 NULL。"""
+    """列表里有、publish_jobs 里也查无此标题 → 真 orphan,两个外键都留 NULL。"""
     stats = await svc.sync_notes(db, 1, [_note("x1")], datetime.utcnow())
 
     rows = await _rows(db)
-    assert stats["orphan"] == 1
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
     assert rows[0].sync_status == "orphan"
     assert rows[0].source_publish_job_id is None and rows[0].content_archive_id is None
     assert rows[0].note_id == "x1"
     # 没有 T0 时刻可用,退而用平台时间(published_at 永不为空)
     assert rows[0].published_at == _VISIBLE_DT
+
+
+# ---------------- 存量笔记:没有 T0 行,按标题回连 publish_jobs ----------------
+
+
+async def _add_legacy_job(
+    db,
+    job_id: int,
+    account_id: int = 1,
+    title: str = "标题-n1",
+    status: str = "published",
+    started_at: datetime | None = None,
+    archive_id: int | None = None,
+) -> PublishJob:
+    """造一条台账上线前的发布任务(没有对应 T0 台账行),可选带归档。"""
+    job = PublishJob(
+        id=job_id, account_id=account_id, title=title, content="正文",
+        images_json="[]", topics_json="[]", status=status,
+        started_at=started_at if started_at is not None else _VISIBLE_DT,
+    )
+    db.add(job)
+    if archive_id is not None:
+        db.add(ContentArchive(
+            id=archive_id, title=title, content="正文", topics_json="[]", media_json="[]",
+            kind="image_note", source_account_id=account_id, source_publish_job_id=job_id,
+        ))
+    await db.commit()
+    return job
+
+
+async def test_sync_links_legacy_note_to_publish_job(db):
+    """存量场景:有 published 的 job、没有 T0 台账行 → 建行后按标题唯一回连,置 linked。
+
+    这正是真号首次同步暴露的缺陷:20 篇全落 orphan,其中 9 篇本该连上自己的正文与媒体。
+    """
+    await _add_legacy_job(db, 10, title="标题-n1", archive_id=5)
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    rows = await _rows(db)
+    job = await db.get(PublishJob, 10)
+    assert stats["linked_by_title"] == 1 and stats["orphan"] == 0
+    assert rows[0].sync_status == "linked"
+    assert rows[0].source_publish_job_id == 10
+    assert rows[0].content_archive_id == 5  # 顺带挂上正文与媒体
+    assert job.note_id == "n1"  # publish_jobs.note_id 不再全空
+    assert job.published_at == rows[0].published_at
+
+
+async def test_sync_heals_existing_orphan_row(db):
+    """自愈:上线前那次同步落下的 orphan 行(已有 note_id),重跑时补上回连。
+
+    生产库里已经躺着 20 行这样的 orphan,修复必须能把它们救回来,而不是只对新行生效。
+    """
+    db.add(PublishedNote(
+        account_id=1, note_id="n1", title="标题-n1", published_at=_VISIBLE_DT,
+        platform_published_at=_VISIBLE_DT, sync_status="orphan",
+    ))
+    await _add_legacy_job(db, 10, title="标题-n1", archive_id=5)
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    rows = await _rows(db)
+    assert len(rows) == 1 and stats["refreshed"] == 1 and stats["linked_by_title"] == 1
+    assert rows[0].sync_status == "linked" and rows[0].source_publish_job_id == 10
+    assert rows[0].content_archive_id == 5
+
+
+async def test_sync_legacy_link_is_idempotent(db):
+    """同一份数据跑两次:linked 行不被改回 orphan,也不重复回连。"""
+    await _add_legacy_job(db, 10, title="标题-n1", archive_id=5)
+
+    await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    rows = await _rows(db)
+    assert stats["linked_by_title"] == 0 and stats["orphan"] == 0  # 已连上,不再找
+    assert len(rows) == 1 and rows[0].sync_status == "linked"
+    assert rows[0].source_publish_job_id == 10
+
+
+async def test_sync_legacy_stays_orphan_when_title_matches_many_jobs(db):
+    """标题在 publish_jobs 里匹配到多条 → 无法区分,留 orphan + NULL(绝不猜)。"""
+    await _add_legacy_job(db, 10, title="同一个标题")
+    await _add_legacy_job(db, 11, title="同一个标题")
+
+    stats = await svc.sync_notes(
+        db, 1, [_note("n1", display_title="同一个标题")], datetime.utcnow()
+    )
+
+    rows = await _rows(db)
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert rows[0].sync_status == "orphan"
+    assert rows[0].source_publish_job_id is None and rows[0].content_archive_id is None
+
+
+async def test_sync_legacy_prefers_job_inside_tight_window(db):
+    """同标题两条 job:一条紧贴笔记发布时刻、一条差好几小时 → 认紧的那条。
+
+    生产实测case:账号1 的"李冠阳"那篇同标题发过两次(job 68 差 4.4 小时、job 77 差
+    246s,而实测发布耗时就是 160~284s)。只用 ±1 天的松窗口会同时命中两条判成认不准,
+    白白丢掉一条本可确定的回连;紧窗口(30 分钟)内唯一即是强证据。
+    """
+    near = _VISIBLE_DT - timedelta(seconds=246)
+    far = _VISIBLE_DT - timedelta(hours=4, minutes=26)
+    await _add_legacy_job(db, 68, title="标题-n1", started_at=far, archive_id=38)
+    await _add_legacy_job(db, 77, title="标题-n1", started_at=near, archive_id=39)
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    row = (await _rows(db))[0]
+    assert stats["linked_by_title"] == 1 and stats["orphan"] == 0
+    assert row.source_publish_job_id == 77 and row.content_archive_id == 39
+
+
+async def test_sync_legacy_stays_orphan_when_both_jobs_inside_tight_window(db):
+    """两条同标题 job 都落在紧窗口内 → 真区分不了,放弃(不放宽也不取最近的那条)。"""
+    await _add_legacy_job(db, 68, title="标题-n1", started_at=_VISIBLE_DT - timedelta(seconds=200))
+    await _add_legacy_job(db, 77, title="标题-n1", started_at=_VISIBLE_DT - timedelta(seconds=250))
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    assert stats["linked_by_title"] == 0 and stats["orphan"] == 1
+    assert (await _rows(db))[0].source_publish_job_id is None
+
+
+async def test_sync_legacy_stays_orphan_when_title_empty(db):
+    """空标题笔记(实测 3 篇)没有可匹配的键 → 留 orphan + NULL。"""
+    await _add_legacy_job(db, 10, title="")
+
+    stats = await svc.sync_notes(db, 1, [_note("n1", display_title="")], datetime.utcnow())
+
+    rows = await _rows(db)
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert rows[0].source_publish_job_id is None
+
+
+async def test_sync_legacy_stays_orphan_when_time_far_off(db):
+    """标题对上但发布时间差得离谱(窗口外)→ 是另一篇同名笔记,留 orphan + NULL。"""
+    far = _VISIBLE_DT + timedelta(seconds=svc.LEGACY_MATCH_WINDOW_SECONDS + 3600)
+    await _add_legacy_job(db, 10, title="标题-n1", started_at=far)
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    rows = await _rows(db)
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert rows[0].source_publish_job_id is None
+
+
+async def test_sync_legacy_ignores_non_published_jobs(db):
+    """failed/canceled 的 job 从未真正发布(实测有 2 条这样的归档)→ 不参与回连。"""
+    await _add_legacy_job(db, 10, title="标题-n1", status="failed")
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert (await _rows(db))[0].source_publish_job_id is None
+
+
+async def test_sync_legacy_does_not_steal_taken_job(db):
+    """目标 job 已被别的台账行认领 → 不抢(唯一约束下抢了会炸掉整次同步)。"""
+    await _add_legacy_job(db, 10, title="同一个标题")
+    db.add(PublishedNote(
+        account_id=1, note_id="老笔记", title="同一个标题", published_at=_VISIBLE_DT,
+        sync_status="linked", source_publish_job_id=10,
+    ))
+    await db.commit()
+
+    stats = await svc.sync_notes(
+        db, 1, [_note("n2", display_title="同一个标题")], datetime.utcnow()
+    )
+
+    rows = await _rows(db)
+    new_row = [r for r in rows if r.note_id == "n2"][0]
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert new_row.source_publish_job_id is None
+
+
+async def test_sync_legacy_links_only_within_same_account(db):
+    """别号的同标题 job 不参与回连(账号维度先收窄)。"""
+    await _add_legacy_job(db, 10, account_id=2, title="标题-n1")
+
+    stats = await svc.sync_notes(db, 1, [_note("n1")], datetime.utcnow())
+
+    assert stats["orphan"] == 1 and stats["linked_by_title"] == 0
+    assert (await _rows(db))[0].source_publish_job_id is None
 
 
 async def test_sync_leaves_pending_when_title_differs(db):
