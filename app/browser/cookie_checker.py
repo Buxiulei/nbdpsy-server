@@ -21,6 +21,8 @@ from app.browser.account_locks import account_locks
 from app.browser.browser_gate import browser_slot
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
+from app.services import risk_events
+from app.services.cookie_check import pick_probe_user_id
 
 # check_login_once 返回 user_info 时回填到账号的字段(与 cookies 工具一致的子集)
 _USER_INFO_FIELDS = ("nickname", "user_id", "red_id", "avatar")
@@ -87,7 +89,14 @@ class CookieChecker:
         return checked
 
     async def _list_valid_account_ids(self) -> list[int]:
-        """选出 cookie_status='valid' 的账号 id(按 id 升序,稳定顺序)。"""
+        """选出 cookie_status='valid' 的账号 id(按 id 升序,稳定顺序)。
+
+        **restricted(被风控)的号刻意不纳入周期巡检**:墙一旦挂上,继续每隔 interval 起一次
+        camoufox 正是把「扫码验证身份」催成「请求太频繁」的原因(2026-07-31 NBDpsy-聊创伤
+        实测)。恢复走人工:运营用手机扫码后,在插件里对该号点一次检测(REST
+        POST /api/accounts/{id}/cookie-checks)即写回 valid,重新进入巡检。
+        代价:不会自动恢复——但状态在账号列表里明晃晃是"风控",本就需要人处理。
+        """
         async with self._session_factory() as session:
             result = await session.execute(
                 select(XhsAccount.id)
@@ -97,7 +106,7 @@ class CookieChecker:
             return list(result.scalars().all())
 
     async def _check_account(self, account_id: int) -> bool:
-        """检测单个号:解密 cookie → 线程内跑登录检测 → valid/invalid/captcha 写回状态。
+        """检测单个号:解密 cookie → 线程内跑登录检测 → valid/invalid/captcha/restricted 写回。
 
         返回是否真正执行了检测:无 cookie 可检时跳过(不误改状态)返回 False;基础设施
         失败(error 态)不写回、保留原状态,但仍算已检测(返回 True)。
@@ -108,6 +117,9 @@ class CookieChecker:
         if not cookies:
             return False  # 无 cookie 可检,跳过(不误改状态)
 
+        # 他人主页探测目标(矩阵内另一个号);取不到就传 None,退化为原首页判定不报错。
+        probe_user_id = await pick_probe_user_id(self._session_factory, account_id)
+
         # 阻塞的 sync 浏览器调用下沉到线程,避免卡事件循环。次序与另三入口一致:
         # account_lock(外)→ browser_slot(内)→ to_thread。
         # - 持账号锁:同号的 publish/手动检测/导出串行,防同一 profile 目录被多个 camoufox
@@ -116,10 +128,14 @@ class CookieChecker:
         async with account_locks.get(account_id):
             async with browser_slot():
                 result = await asyncio.to_thread(
-                    sync_client.check_login_once, account_id, cookies
+                    sync_client.check_login_once, account_id, cookies, probe_user_id
                 )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")
+        # 撞墙留痕(captcha / restricted 都带 wall):落库失败不影响巡检结论。
+        await risk_events.record_wall(
+            self._session_factory, account_id, result.get("wall"), "cookie_patrol"
+        )
 
         # 基础设施失败(error)不写回 —— 保留原 cookie_status,与 check_cookies 工具一致,
         # 避免后台巡检把浏览器起不来误当成 cookie 失效、把好号刷成非 valid 后续不再巡检。

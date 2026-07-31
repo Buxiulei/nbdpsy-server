@@ -112,9 +112,13 @@ async def test_retry_then_fail(db_factory):
         assert job.retries == i + 1
         assert job.error == f"boom{i}"
         assert job.started_at is None
-        # next_retry_at 排到未来,且间隔约为该次的 retry_delays[i]
+        # next_retry_at 排到未来,且间隔落在该次 retry_delays[i] 的抖动区间内。
+        # finish 里排期是 delays[retries] * random.uniform(0.8, 1.5)(去掉固定退避节律的
+        # 可指纹性),故下界必须按 0.8 倍算 —— 旧断言写死 delays[i]-1,只有抖动系数恰好
+        # 抽到 ≈1.0 以上才过,是靠全局 random 序列的运气,换个消耗 random 的测试先跑就翻。
         assert job.next_retry_at is not None
-        assert job.next_retry_at >= before + timedelta(seconds=delays[i] - 1)
+        assert job.next_retry_at >= before + timedelta(seconds=delays[i] * 0.8 - 1)
+        assert job.next_retry_at <= before + timedelta(seconds=delays[i] * 1.5 + 5)
 
     # 重试额度耗尽:再一次失败 → failed(终态)
     assert await scheduler.mark_publishing(job_id) is True

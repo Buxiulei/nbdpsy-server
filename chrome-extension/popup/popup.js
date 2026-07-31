@@ -101,6 +101,7 @@ const ACCOUNT_STATUS_LABEL = {
     valid: '有效',
     invalid: '失效',
     captcha: '验证',
+    restricted: '风控',
     error: '异常',
     unknown: '未检测',
     checking: '检测中...'
@@ -289,7 +290,7 @@ async function triggerCookieCheck(accountId, badge, detectBtn) {
         const st = data.status;
         if (st === 'checking') continue;
 
-        // 终态：valid/invalid/captcha/error。
+        // 终态：valid/invalid/captcha/restricted/error。
         detectBtn.disabled = false;
         if (st === 'error') {
             // error 是基础设施失败（浏览器起不来/超时），不代表 cookie 失效，不误伤成"失效"。
@@ -297,7 +298,7 @@ async function triggerCookieCheck(accountId, badge, detectBtn) {
             showMessage('info', `检测未完成（非 cookie 失效）: ${data.reason || '基础设施错误'}，可稍后重试`);
         } else {
             setBadge(badge, st);
-            const msg = { valid: '该账号 cookie 有效', invalid: '该账号 cookie 已失效，需重新扫码登录', captcha: '被验证码/滑块拦截，需人工过验证' }[st] || `检测完成: ${st}`;
+            const msg = { valid: '该账号 cookie 有效', invalid: '该账号 cookie 已失效，需重新扫码登录', captcha: '被验证码/滑块拦截，需人工过验证', restricted: '该账号被小红书挂了风控验证墙（cookie 没失效），请用手机小红书 App 扫码验证身份后重新检测；若提示请求太频繁，先晾一阵别再操作该号' }[st] || `检测完成: ${st}`;
             showMessage(st === 'valid' ? 'success' : 'info', msg);
             // 有效时后端可能补全了 nickname/red_id/avatar，刷新列表拉最新信息。
             if (st === 'valid') loadAccounts();

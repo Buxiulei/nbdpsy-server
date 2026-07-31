@@ -53,7 +53,7 @@ def test_check_login_once_not_logged_in_is_invalid(monkeypatch):
         SyncClient, "start", lambda self: {"success": True, "logged_in": False}
     )
     monkeypatch.setattr(
-        SyncClient, "check_login", lambda self: {"status": "invalid", "user_info": None}
+        SyncClient, "check_login", lambda self, probe=None: {"status": "invalid", "user_info": None}
     )
     monkeypatch.setattr(SyncClient, "stop", lambda self: None)
 
@@ -71,7 +71,7 @@ def test_check_login_once_valid_passthrough(monkeypatch):
     monkeypatch.setattr(
         SyncClient,
         "check_login",
-        lambda self: {"status": "valid", "user_info": {"nickname": "小蓝"}},
+        lambda self, probe=None: {"status": "valid", "user_info": {"nickname": "小蓝"}},
     )
     monkeypatch.setattr(SyncClient, "stop", lambda self: None)
 

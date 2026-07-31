@@ -47,7 +47,7 @@ async def test_execute_serializes_behind_publish_held_lock(monkeypatch):
     await _clean_locks()
     entered = {"v": False}
 
-    def fake_check_login_once(account_id, cookies):
+    def fake_check_login_once(account_id, cookies, probe_user_id=None):
         entered["v"] = True
         # 返回 error 结果 → execute 走"不写回账号"分支,测试不碰生产库
         return {"status": "error", "user_info": None, "reason": "stub"}

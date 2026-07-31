@@ -70,7 +70,7 @@ async def test_check_once_only_valid_and_writes_back(smk, monkeypatch):
 
     seen: list[int] = []
 
-    def fake_check(account_id, cookies):
+    def fake_check(account_id, cookies, probe_user_id=None):
         seen.append(account_id)
         return {"status": "captcha", "user_info": {"nickname": "小明", "user_id": "u1"}}
 
@@ -99,7 +99,7 @@ async def test_check_account_holds_lock_during_browser(smk, monkeypatch):
     acc_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
     locked_at_call: dict = {}
 
-    def fake_check(account_id, cookies):
+    def fake_check(account_id, cookies, probe_user_id=None):
         # 浏览器段在线程内跑,此刻事件循环侧应已持有该号账号锁(locked() 读 bool,跨线程读安全)。
         locked_at_call["v"] = account_locks.get(account_id).locked()
         return {"status": "valid"}
@@ -117,7 +117,7 @@ async def test_check_once_error_preserves_status(smk, monkeypatch):
     """基础设施失败(check_login_once 返回 error):不写回,保留原 cookie_status='valid'。"""
     valid_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
 
-    def fake_check(account_id, cookies):
+    def fake_check(account_id, cookies, probe_user_id=None):
         return {"status": "error", "user_info": None, "reason": "浏览器启动失败:boom"}
 
     monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
@@ -138,7 +138,7 @@ async def test_check_once_skips_valid_without_cookies(smk, monkeypatch):
 
     called = {"n": 0}
 
-    def fake_check(account_id, cookies):
+    def fake_check(account_id, cookies, probe_user_id=None):
         called["n"] += 1
         return {"status": "invalid", "user_info": None}
 
@@ -161,7 +161,7 @@ async def test_start_stop_runs_at_least_one_cycle(smk, monkeypatch):
 
     calls: list[int] = []
 
-    def fake_check(account_id, cookies):
+    def fake_check(account_id, cookies, probe_user_id=None):
         calls.append(account_id)
         return {"status": "valid", "user_info": None}
 

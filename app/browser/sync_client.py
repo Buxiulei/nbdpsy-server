@@ -14,7 +14,7 @@
 
 对外接口(P3.5 依赖,不可改名):
 - ``publish_once(account_id, cookies, title, content, image_paths, topics) -> PublishResult``
-- ``check_login_once(account_id, cookies) -> dict``
+- ``check_login_once(account_id, cookies, probe_user_id=None) -> dict``
 - ``PublishResult``:``{success, note_id, note_url, error, need_manual_login}``;
   返回契约**允许 success=True 但 note_id=""**(只有 note_url)。
 """
@@ -27,7 +27,14 @@ from loguru import logger
 
 from app.browser.atomic_tasks import XHSPublishAtomicTasks
 from app.browser.fingerprint import get_fingerprint
-from app.browser.login_detector import DETECT_LOGIN_JS, GET_USER_INFO_JS
+from app.browser.login_detector import (
+    DETECT_LOGIN_JS,
+    GET_USER_INFO_JS,
+    PAGE_TEXT_JS,
+    WALL_UNKNOWN,
+    classify_wall_text,
+    is_wall_url,
+)
 from app.browser.profile_guard import (
     clean_locks,
     delete_cookies_db,
@@ -413,6 +420,71 @@ class SyncClient:
         except Exception:
             return False
 
+    def _current_wall(self, target_url: str) -> Dict[str, Any]:
+        """按当前页构造一份风控墙取证 dict(纯只读,不做任何交互)。
+
+        ``target_url`` 记的是**当时想访问什么**(被重定向前的目标),``landed_url`` 是实际
+        落到的墙 URL —— 排查时这两个一起看才知道"哪类操作会撞墙"。
+        """
+        landed = ""
+        text = ""
+        try:
+            landed = self.page.url or ""
+        except Exception:
+            pass
+        try:
+            text = self.page.evaluate(PAGE_TEXT_JS) or ""
+        except Exception:
+            pass  # 取证失败不影响判定,URL 才是硬判据
+        return {
+            "wall_type": classify_wall_text(text),
+            "target_url": target_url,
+            "landed_url": landed,
+            "page_text": text,
+        }
+
+    def _probe_peer_profile(self, probe_user_id: str) -> Optional[Dict[str, Any]]:
+        """访问一个**他人主页**探风控墙;撞墙返回取证 dict,正常/探测失败返回 None。
+
+        为什么非探他人主页不可:验证墙只在访问他人主页时弹,首页与自己主页照常渲染
+        (2026-07-31 NBDpsy-聊创伤 实测)——只看首页登录标志的旧判定必然漏,号被当成
+        好号继续派互动/导出任务,任务全败,人也据此做了错误决策。
+
+        只做**一次导航**,不滚动、不点击、不抓列表:反复起会话/多加请求本身就会把号
+        打成限流(同号后来文案从「扫码验证身份」变成「请求太频繁」正是这么来的)。
+        探测异常一律返回 None(不改判定):探不出来只退化回原判定,绝不能因为探测失败
+        把好号误标风控。
+        """
+        target = f"https://www.xiaohongshu.com/user/profile/{probe_user_id}"
+        try:
+            self.page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            wall = self._current_wall(target)
+            if not is_wall_url(wall["landed_url"]):
+                return None
+            logger.warning(
+                f"[SyncClient] 账号 {self.account_id} 撞风控墙 type={wall['wall_type']} "
+                f"landed={wall['landed_url']} text={wall['page_text'][:60]!r}"
+            )
+            return wall
+        except Exception as e:
+            logger.warning(f"[SyncClient] 他人主页可达性探测失败(忽略,不改判定): {e}")
+            return None
+
+    def _probe_wall(
+        self, probe_user_id: Optional[str], user_info: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """无探测目标 / 目标就是本号 → 跳过探测返回 None,不报错。
+
+        自己主页不弹墙,拿本号 user_id 去探等于白花一次导航,故显式短路。
+        """
+        pid = (probe_user_id or "").strip()
+        if not pid:
+            return None
+        own = ((user_info or {}).get("user_id") or "").strip()
+        if own and pid == own:
+            return None
+        return self._probe_peer_profile(pid)
+
     def _get_user_info(self, profile_url: Optional[str]) -> Optional[Dict[str, Any]]:
         """导航到个人主页(用登录检测提取的 profile_url)抓取昵称/小红书号等。
 
@@ -468,16 +540,24 @@ class SyncClient:
         logger.warning(f"[api_login] 验活 API 未决(res={res})，降级 DOM 启发式")
         return None
 
-    def check_login(self) -> Dict[str, Any]:
-        """检查登录态,返回 ``{status, user_info}``。
+    def check_login(self, probe_user_id: Optional[str] = None) -> Dict[str, Any]:
+        """检查登录态,返回 ``{status, user_info, wall?}``。
 
-        status: 'valid'(已登录,附 user_info)| 'invalid'(未登录)| 'captcha'(验证码拦截)。
+        status: 'valid'(已登录,附 user_info)| 'invalid'(未登录)| 'captcha'(验证码拦截)
+        | 'restricted'(cookie 有效但账号被挂风控验证墙,附 ``wall`` 取证)。
 
         判定优先级：官方 API 地面真值 > DOM 启发式。API 明确过期 → 直接 invalid；
         API 明确登录 → valid；API 不可达才回落到原 DOM 启发式(避免 API 抖动误杀好号)。
+
+        ``probe_user_id`` 给定时,在判定为 valid 后**再加一次**他人主页导航探风控墙
+        (见 ``_probe_peer_profile``);不给或探测失败则退化为原来的首页判定。
         """
         if self._is_captcha():
-            return {"status": "captcha", "user_info": None}
+            return {
+                "status": "captcha",
+                "user_info": None,
+                "wall": self._current_wall("https://www.xiaohongshu.com/explore"),
+            }
 
         api = self._api_login_status()
         if api is False:
@@ -489,6 +569,11 @@ class SyncClient:
             return {"status": "invalid", "user_info": None}
 
         user_info = self._get_user_info(detect.get("profile_url"))
+        # cookie 本身有效,但账号可能被挂验证墙:探他人主页可达性。撞墙 → restricted,
+        # 与 invalid 严格区分(cookie 没坏,是账号被风控,运营动作是扫码而非重新登录)。
+        wall = self._probe_wall(probe_user_id, user_info)
+        if wall is not None:
+            return {"status": "restricted", "user_info": user_info, "wall": wall}
         return {"status": "valid", "user_info": user_info}
 
     def publish_note(
@@ -641,14 +726,22 @@ def publish_once(
         client.stop()
 
 
-def check_login_once(account_id: int, cookies: List[Dict[str, Any]]) -> Dict[str, Any]:
+def check_login_once(
+    account_id: int,
+    cookies: List[Dict[str, Any]],
+    probe_user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """一次性登录检测:建 client → start → 登录/验证码判定 + 取 user_info → stop。
 
-    返回 ``{status, user_info, reason?}``,status 四态:
-      - ``valid`` / ``invalid`` / ``captcha``:来自 ``check_login()``,即"页面正常加载后"的
-        真实登录判定(``invalid`` = 页面加载正常但未登录,cookie 真失效);
+    返回 ``{status, user_info, reason?, wall?}``,status 五态:
+      - ``valid`` / ``invalid`` / ``captcha`` / ``restricted``:来自 ``check_login()``,即
+        "页面正常加载后"的真实判定(``invalid`` = 页面加载正常但未登录,cookie 真失效;
+        ``restricted`` = cookie 有效但账号被挂风控验证墙,附 ``wall`` 取证);
       - ``error``:浏览器基础设施失败(启动失败/页面超时/异常),带 ``reason`` 说明,**与 cookie
         失效严格区分**——调用方据此保留原状态,不把好号误标失效。
+
+    ``probe_user_id``:他人主页探测目标(矩阵内另一个账号的 user_id),由调用方从库里挑;
+    为 None 则跳过风控墙探测,退化为原来的首页判定。
 
     登录检测纯只读,故 ``block_images=True`` 瘦身(拦图省内存,不影响登录判定)。
     """
@@ -659,7 +752,7 @@ def check_login_once(account_id: int, cookies: List[Dict[str, Any]]) -> Dict[str
             reason = f"浏览器启动失败:{start.get('error')}"
             logger.warning(f"[check_login_once] {reason} account_id={account_id}")
             return {"status": "error", "user_info": None, "reason": reason}
-        return client.check_login()
+        return client.check_login(probe_user_id)
     except Exception as e:
         reason = f"浏览器异常:{e}"
         logger.error(f"[check_login_once] {reason} account_id={account_id}")

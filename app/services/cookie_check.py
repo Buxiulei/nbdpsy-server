@@ -9,8 +9,10 @@
 - execute() 为提炼出的契约执行函数(account_worker 子进程与进程内消费共用):
   持号锁串行 → 浏览器闸 → 线程内跑登录检测 → 写回账号,**不碰 browser_jobs 台账**
   (claim/finish 由调用方负责);
-- 写回沿用既有语义:valid/invalid/captcha 写回 cookie_status/last_check_at + 回填
-  user_info;error(基础设施失败)**不写回、保留原值**,避免把好号误标失效;
+- 写回沿用既有语义:valid/invalid/captcha/restricted 写回 cookie_status/last_check_at +
+  回填 user_info;error(基础设施失败)**不写回、保留原值**,避免把好号误标失效;
+- ``restricted``(2026-07-31 新增)= cookie 有效但账号被小红书挂了风控验证墙:检测在
+  首页登录判定之外多探一次**他人主页**可达性,撞墙即判定,并把事件落 ``risk_events``;
 - 同号浏览器操作靠**共享 AccountLocks**(app.browser.account_locks 的进程级单例)与
   发布链串行:检测与发布共用同一 profile 目录,SyncClient.start() 的 kill_orphans
   会按 argv 精确杀该 profile 的所有 camoufox,不串行会互杀,故不能各持独立锁;
@@ -23,6 +25,7 @@ import json
 from datetime import datetime
 
 from loguru import logger
+from sqlalchemy import select
 
 from app.browser import sync_client
 from app.browser.account_locks import account_locks
@@ -30,7 +33,7 @@ from app.browser.browser_gate import browser_slot
 from app.core.db import get_session
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
-from app.services import browser_jobs_repo
+from app.services import browser_jobs_repo, risk_events
 
 # check_login_once 返回 user_info 时回填到账号的字段(与 cookie_checker 一致的子集)
 _USER_INFO_FIELDS = ("nickname", "user_id", "red_id", "avatar")
@@ -68,12 +71,14 @@ def get_check(check_id: str) -> dict | None:
         "account_id": row["account_id"],
         "user_info": None,
         "reason": None,
+        "wall": None,
     }
     result = row["result"] or {}
     if row["status"] == "done":
         entry["status"] = result.get("status", "error")
         entry["user_info"] = result.get("user_info")
         entry["reason"] = result.get("reason")
+        entry["wall"] = result.get("wall")
     elif row["status"] == "error":
         entry["status"] = "error"
         entry["reason"] = result.get("error")
@@ -83,26 +88,38 @@ def get_check(check_id: str) -> dict | None:
 async def execute(account_id: int, payload: dict) -> dict:
     """执行一次 cookie 活性检测(契约函数,不碰 browser_jobs 台账)。
 
-    返回 {"status","user_info","reason"};任何意外兜底为 status=error,绝不抛出
+    返回 {"status","user_info","reason","wall"};任何意外兜底为 status=error,绝不抛出
     (error 属检测结果语义,台账仍记 done——与"执行崩溃"的台账 error 区分)。
+
+    检测在首页登录判定之外**多探一次他人主页**(探测目标见 ``pick_probe_user_id``):
+    撞验证墙 → status=restricted 写回账号 + 事件落 risk_events 留痕。
     """
     try:
         cookies = await load_account_cookies(account_id)
+        probe_user_id = await pick_probe_user_id(get_session, account_id)
         # 与发布链共用同一把 per-account 锁:同号发布/检测串行,避免 kill_orphans 互杀。
         async with account_locks.get(account_id):
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队(仅罩浏览器段,不含写回)。
             async with browser_slot():
                 result = await asyncio.to_thread(
-                    sync_client.check_login_once, account_id, cookies
+                    sync_client.check_login_once, account_id, cookies, probe_user_id
                 )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")
         reason = result.get("reason")
+        wall = result.get("wall")
 
         # error:基础设施失败,不写回账号(保留原 cookie_status),仅报结果。
         if status != "error":
             await _write_back(account_id, status, user_info)
-        return {"status": status, "user_info": user_info, "reason": reason}
+        # 撞墙留痕(captcha / restricted 都带 wall):落库失败不影响检测结论。
+        await risk_events.record_wall(get_session, account_id, wall, "cookie_check")
+        return {
+            "status": status,
+            "user_info": user_info,
+            "reason": reason,
+            "wall": wall,
+        }
     except Exception as exc:  # 兜底:检测异常也要给终态结果,别让轮询方死等
         logger.exception(f"cookie 检测任务异常 account_id={account_id}")
         return {"status": "error", "user_info": None, "reason": f"检测任务异常:{exc}"}
@@ -123,8 +140,37 @@ async def load_account_cookies(account_id: int) -> list[dict]:
     return json.loads(plaintext)
 
 
+async def pick_probe_user_id(session_factory, account_id: int) -> str | None:
+    """挑一个「他人主页」探测目标:矩阵内**另一个**账号的 user_id(按 id 升序取第一个)。
+
+    用矩阵内账号互为探测目标,而不是写死某个站外 user_id:不引入对陌生账号是否还存在的
+    依赖,也不给固定某个陌生人主页刷访问。取不到(库里只有本号 / 别的号都还没回填
+    user_id)→ 返回 None,调用方**跳过这一步且不报错**:探测是增量能力,没目标就退化回
+    原来的首页判定,绝不能因此让整次检测失败。
+
+    ``session_factory`` 用法同 ``risk_events.record_wall``,``get_session`` 与后台巡检的
+    ``async_sessionmaker`` 都能传。查库出错同样按"取不到"处理(告警 + None),不上抛。
+    """
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(XhsAccount.user_id)
+                .where(
+                    XhsAccount.id != account_id,
+                    XhsAccount.user_id.isnot(None),
+                    XhsAccount.user_id != "",
+                )
+                .order_by(XhsAccount.id)
+                .limit(1)
+            )
+            return result.scalars().first()
+    except Exception as exc:  # noqa: BLE001 — 探测目标取不到只降级,不能搞崩检测
+        logger.warning(f"[cookie_check] 取他人主页探测目标失败,跳过风控墙探测: {exc}")
+        return None
+
+
 async def _write_back(account_id: int, status: str, user_info: dict | None) -> None:
-    """把 valid/invalid/captcha 写回 cookie_status/last_check_at,并回填非空 user_info。
+    """把 valid/invalid/captcha/restricted 写回 cookie_status/last_check_at,并回填非空 user_info。
 
     用 get_session()(读 db_module.async_session,测试对其 monkeypatch 生效),会话内重取
     账号避免操作 detached 实例。

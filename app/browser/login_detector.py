@@ -4,6 +4,8 @@
 
 - ``DETECT_LOGIN_JS``  —— 在 explore 页执行,判定登录态(返回信号 + 结论)
 - ``GET_USER_INFO_JS`` —— 在个人主页执行,抓取昵称/小红书号/粉丝数等
+- ``PAGE_TEXT_JS``     —— 只读抓当前页正文前若干字符(风控墙文案取证)
+- ``is_wall_url`` / ``classify_wall_text`` —— 纯函数,判定"是不是风控墙"与"哪种墙"
 
 旧仓那几个 async 编排函数(``detect_login_status`` / ``check_and_get_info``)
 依赖 ``playwright.async_api``,与本仓 sync 浏览器层不匹配,故不移植 ——
@@ -156,3 +158,50 @@ GET_USER_INFO_JS = """
     return result;
 }
 """
+
+
+# ── 风控墙判定(纯函数 + 只读取证 JS)──
+#
+# 背景(2026-07-31 实测):账号 NBDpsy-聊创伤 的 cookie 首页登录态完全正常,但一访问
+# **他人主页** 就被重定向到 ``website-login/captcha?...&verifyType=124&verifyBiz=461``,
+# 页面标题「安全验证」、正文「为保护账号安全,请使用已登录该账号的「小红书APP」扫码
+# 验证身份」。只看首页"我"导航栏的旧判定必然漏掉这堵墙,号被当成好号继续派活。
+#
+# 判定分两层:
+# - URL 是**硬判据**:被重定向到验证/登录页即撞墙(``is_wall_url``);
+# - 文案只用来**分型**(``classify_wall_text``):同一个 captcha URL,号被反复起会话后
+#   文案会从「扫码验证身份」变成「请求太频繁,请稍后再试」——两者的运营动作不同
+#   (前者手机扫码即恢复,后者只能晾着别再碰),必须区分。
+
+WALL_URL_MARKERS = ("captcha", "website-login")
+
+# 墙的种类
+WALL_SCAN_QR = "scan_qr"        # 扫码验证身份:运营用手机小红书 App 扫码即可恢复
+WALL_RATE_LIMIT = "rate_limit"  # 请求太频繁:已被限流,继续起会话只会更糟,须晾置
+WALL_UNKNOWN = "unknown"        # 撞了墙但文案不认识:留证等人看
+
+# 只读抓正文前 200 字用于分型;不做任何交互,纯取证。
+PAGE_TEXT_JS = """
+() => {
+    const body = document.body;
+    return body ? (body.innerText || '').trim().slice(0, 200) : '';
+}
+"""
+
+
+def is_wall_url(url: str | None) -> bool:
+    """当前落地 URL 是否为风控验证墙(被重定向到 captcha / website-login)。"""
+    return any(marker in (url or "").lower() for marker in WALL_URL_MARKERS)
+
+
+def classify_wall_text(page_text: str | None) -> str:
+    """按墙的正文文案分型;认不出返回 ``WALL_UNKNOWN``(仍算撞墙,只是型未知)。
+
+    「频繁」判在「扫码」之前:限流态是更强的信号,此时扫码也无用,运营动作是停手。
+    """
+    text = page_text or ""
+    if "频繁" in text or "稍后再试" in text:
+        return WALL_RATE_LIMIT
+    if "扫码" in text:
+        return WALL_SCAN_QR
+    return WALL_UNKNOWN
