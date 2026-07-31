@@ -11,22 +11,30 @@
 
 - **不构造、不直调接口**:只挂响应监听,请求由页面自己发。翻页靠拟人化滚动
   (``SyncHumanActions.scroll``)让前端自己去要下一页,不改 URL 参数、不发 XHR。
-- **零 JS 注入**:全程不点击、不输入、不 ``page.evaluate`` 改页面。笔记 DOM 里根本
+- **滚动前必须先把鼠标移到笔记列表上**(见 ``_hover_note_list``)。``page.mouse.wheel``
+  把滚轮事件投在**鼠标当前位置**,而鼠标初始停在 (0,0) —— 真号实测那里是不滚动的顶栏
+  ``div.d-topbar``(祖先 ``.main-page-container`` 是 ``overflow:hidden``),滚轮事件因此
+  全部空转。列表真正的滚动容器是 ``div.content``(``overflow-y:scroll``),窗口本身根本
+  不滚(``document.scrollHeight == clientHeight``),所以连"页面往下走了一点"都不会发生。
+- **零 JS 注入**:全程不点击、不输入、不 ``page.evaluate``。笔记 DOM 里根本
   不暴露 note_id(真号实测:含 24 位 hex 的元素 0 个),这条路本就封死,只能读响应。
+  定位滚动区也不用 evaluate —— 拿第一张 ``.note-card`` 的矩形即可,它就在滚动容器里。
 - **等待必须用 ``page.wait_for_timeout``**:playwright 同步 API 的事件是在调用
   playwright 时才被派发的,``time.sleep`` 期间监听器一个都不会触发,循环会空转到超时。
 
 翻页终止条件(三选一,任一命中即停,防死循环):
 1. 某批响应的 ``notes`` 为空列表 —— 页码已超界;
-2. 滚动后 ``_NEXT_BATCH_TIMEOUT_S`` 内没有新的列表响应,**且**已抓够接口自报的总数
-   (或总数未知)—— 前端没有更多可加载;
+2. 已抓够接口自报的总数,且滚动后 ``_NEXT_BATCH_TIMEOUT_S`` 内没有新的列表响应;
+   总数未知或还没抓够时,要**连续** ``_EMPTY_SCROLL_RETRIES`` 次滚动都没响应才认定到底;
 3. 累计批数达 ``max_pages`` —— 兜底硬上限,命中即告警停止。
 
+**"滚了没响应"不等于到底**:真号实测中间就有一次滚动只挪了 260px 没触发请求,下一次滚动
+才发出 ``page=3``。故除非已抓够期望总数,单次无响应一律重试。
+
 **期望总数校验**:响应里 ``data.tags[0].notes_count`` 是该号笔记总数(真号实测 37)。
-条件 2 曾经把"滚了但前端这次没发分页请求"误判成"没有更多",实测导致 37 篇只抓到 20 篇、
-台账长期漏 17 篇。故:没抓够期望总数时,连续空滚要重试 ``_EMPTY_SCROLL_RETRIES`` 次才
-认定到底;最终仍不足即**告警**(``fetch_posted_notes`` 不为此抛错——半份列表照样能刷
-已有台账行,但绝不静默当成"这号就这么多篇")。
+抓完仍不足即**告警**(``fetch_posted_notes`` 不为此抛错——半份列表照样能刷已有台账行,
+但绝不静默当成"这号就这么多篇")。最后一页的 ``data.page`` 实测为 ``-1``(不足 10 条),
+但该约定未见文档,故不拿它当终止条件,只作观察。
 """
 
 import time
@@ -44,6 +52,9 @@ _PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish?source=official"
 
 # 笔记列表接口的 URL 特征(只认这一个,其余响应一概不读)
 _POSTED_API_MARK = "creator/note/user/posted"
+
+# 笔记卡片:只用来取滚轮落点的矩形(它在滚动容器 div.content 里),不做任何交互
+_NOTE_CARD = ".note-card"
 
 # 首批响应:先按 fast-path 短等一次(cookie 双域已登录时秒回),没等到才做 SSO 预热重进
 _FIRST_BATCH_FAST_S = 8.0
@@ -150,15 +161,49 @@ def _merge_batches(batches: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     return merged
 
 
+def _hover_note_list(page, human: SyncHumanActions, account_id: int) -> bool:
+    """把鼠标移到笔记列表上,让后续滚轮事件落进真正的滚动容器;移不过去返回 False。
+
+    **这是翻页能不能继续的前提**:``page.mouse.wheel`` 投在鼠标当前位置,而鼠标从未移动过
+    时停在 (0,0)——真号实测那里是不滚动的顶栏,滚轮全部空转,``div.content.scrollTop``
+    三次滚动后仍是 0、一个分页请求都不发。悬停到列表上之后,同样的 ``human.scroll``
+    立刻把 scrollTop 推到 450 → 710 → 1065,``page=2`` / ``page=3`` 应声而来。
+
+    只取第一张 ``.note-card`` 的矩形当落点(它就在滚动容器 ``div.content`` 里),
+    不用 ``page.evaluate`` 找容器 —— 保持本模块"零 JS 注入"的纪律。
+    """
+    try:
+        card = page.query_selector(_NOTE_CARD)
+        box = card.bounding_box() if card is not None else None
+    except Exception as exc:  # noqa: BLE001 — 定位失败只降级,不打断抓取
+        logger.warning(f"[creator_note_list] 账号{account_id}: 读笔记卡矩形失败: {exc}")
+        box = None
+    if not box:
+        logger.warning(
+            f"[creator_note_list] 账号{account_id}: 找不到笔记卡,鼠标无法移到列表上"
+            f"——滚轮会打在不滚动的顶栏上,翻页多半停在首屏"
+        )
+        return False
+    # 只悬停不点击(卡片悬停会显出操作图标,但我们一个都不碰)
+    human.hover(
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5),
+        reason="移到笔记列表滚动区(滚轮落点)",
+    )
+    return True
+
+
 def _merged_count(collector: _PostedCollector) -> int:
     """当前已抓到的去重后篇数(与最终返回的口径一致)。"""
     return len(_merge_batches(collector.batches))
 
 
-def _short_of_expected(collector: _PostedCollector) -> bool:
-    """期望总数已知且还没抓够 —— 此时"滚动无响应"不足以判定到底。"""
+def _reached_expected(collector: _PostedCollector) -> bool:
+    """已抓够接口自报的总数 —— 只有这一种情况可以凭"滚动无响应"当场收工。
+
+    期望未知时恒为 False:宁可多滚两次,也不再把中途的一次空滚当成到底。
+    """
     expected = collector.expected_total
-    return expected is not None and _merged_count(collector) < expected
+    return expected is not None and _merged_count(collector) >= expected
 
 
 def permission_code_of(raw: Dict[str, Any]) -> Optional[int]:
@@ -224,6 +269,9 @@ def fetch_posted_notes(
             logger.info(f"[creator_note_list] 账号{account_id}: 首批即空,该号无笔记")
             return []
 
+        # 滚动前必须先把鼠标移到列表上,否则滚轮打在不滚动的顶栏上,后面白滚(真号实测)
+        _hover_note_list(page, human, account_id)
+
         empty_scrolls = 0
         while len(collector.batches) < max_pages:
             seen = len(collector.batches)
@@ -231,13 +279,13 @@ def fetch_posted_notes(
             human.scroll("down")
             batch = _wait_for_new_batch(page, collector, seen, _NEXT_BATCH_TIMEOUT_S)
             if batch is None:
-                # 还差着期望总数就再滚几次:实测下拉偶发不触发分页请求,一次没响应就收工
-                # 正是"37 篇只抓到 20 篇"的成因。期望未知(读不到 notes_count)时维持旧行为。
+                # 没抓够(或压根不知道该有多少)就再滚几次:实测列表中段就有一次滚动只挪了
+                # 260px 没触发请求,下一次才发出 page=3 —— 单次无响应判不了到底。
                 empty_scrolls += 1
-                if _short_of_expected(collector) and empty_scrolls < _EMPTY_SCROLL_RETRIES:
+                if not _reached_expected(collector) and empty_scrolls < _EMPTY_SCROLL_RETRIES:
                     logger.info(
                         f"[creator_note_list] 账号{account_id}: 滚动后无新分页响应,"
-                        f"但只抓到 {_merged_count(collector)}/{collector.expected_total} 篇,"
+                        f"已抓 {_merged_count(collector)}/{collector.expected_total} 篇,"
                         f"重试第 {empty_scrolls}/{_EMPTY_SCROLL_RETRIES - 1} 次"
                     )
                     continue

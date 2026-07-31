@@ -52,6 +52,10 @@ _POSTED_URL = (
 )
 
 
+# 首张笔记卡的默认矩形(真号量级:列表在 x≈248 的滚动容器里)
+_DEFAULT_CARD_BOX = {"x": 248.0, "y": 300.0, "width": 400.0, "height": 200.0}
+
+
 class _FakePage:
     """假 page:按脚本在 goto / scroll 时投递列表响应。
 
@@ -59,10 +63,12 @@ class _FakePage:
     goto 消费一项,fake human 的 scroll 也消费一项。脚本耗尽后不再投递。
     """
 
-    def __init__(self, script, notes_count=None):
+    def __init__(self, script, notes_count=None, card_box=_DEFAULT_CARD_BOX):
         self._script = list(script)
         # 接口自报的笔记总数(data.tags[0].notes_count);None = 响应里没这项
         self._notes_count = notes_count
+        # 第一张笔记卡的矩形;**显式传 None** = 页面上找不到卡片(滚轮落点定位失败的分支)
+        self.card_box = card_box
         self._handlers: list = []
         self.gotos: list[str] = []
         self.removed = False
@@ -85,6 +91,10 @@ class _FakePage:
 
     def wait_for_timeout(self, _ms):
         time.sleep(0.01)  # 让轮询不空烧 CPU(真 page 上这里才会派发事件)
+
+    # --- 定位滚轮落点用:第一张笔记卡的矩形(纯 DOM 读,不经 JS) ---
+    def query_selector(self, _sel):
+        return _FakeCard(self.card_box)
 
     # --- 只读纪律护栏:抓取层一旦点击/注入 JS,测试立即失败 ---
     def evaluate(self, *_a, **_kw):
@@ -111,18 +121,38 @@ class _FakePage:
                 fn(response)
 
 
+class _FakeCard:
+    """假笔记卡:只提供矩形(抓取层拿它当滚轮落点)。box 为 None 表示坐标不可得。"""
+
+    def __init__(self, box):
+        self._box = box
+
+    def bounding_box(self):
+        return self._box
+
+
 class _FakeHuman:
-    """假拟人层:scroll 触发下一批投递(模拟前端下拉加载再发一次分页请求)。"""
+    """假拟人层:scroll 触发下一批投递(模拟前端下拉加载再发一次分页请求)。
+
+    **鼠标没移到列表上时 scroll 不投递任何东西** —— 真号实测滚轮打在不滚动的顶栏上
+    就是这个效果(scrollTop 纹丝不动、一个分页请求都不发)。
+    """
 
     def __init__(self, page):
         self.page = page
         self.scrolls = 0
+        self.hovers: list = []
 
     def wait(self, *_a, **_kw):
         pass
 
+    def hover(self, target, **_kw):
+        self.hovers.append(target)
+
     def scroll(self, *_a, **_kw):
         self.scrolls += 1
+        if not self.hovers:
+            return  # 滚轮空转:落点不在滚动容器里
         self.page.deliver_next()
 
 
@@ -187,14 +217,14 @@ def test_paging_stops_on_empty_batch(fast_timeouts, fake_human):
     assert page.removed  # 监听器已摘除
 
 
-def test_paging_stops_when_no_new_response(fast_timeouts, fake_human):
-    """滚动后等不到新的分页响应 → 前端没有更多可加载,停止(不无限滚)。"""
+def test_paging_stops_after_consecutive_silent_scrolls(fast_timeouts, fake_human):
+    """连续 _EMPTY_SCROLL_RETRIES 次滚动都没有新分页响应 → 认定到底,停止(不无限滚)。"""
     page = _FakePage([[_note("a")], None])
 
     notes = cnl.fetch_posted_notes(page, account_id=1)
 
     assert [n["id"] for n in notes] == ["a"]
-    assert fake_human[0].scrolls == 1
+    assert fake_human[0].scrolls == cnl._EMPTY_SCROLL_RETRIES
 
 
 def test_paging_stops_at_max_pages(fast_timeouts, fake_human):
@@ -253,14 +283,50 @@ def test_paging_warns_when_short_of_expected(fast_timeouts, fake_human, monkeypa
     assert any("少于接口自报的 37 篇" in w for w in recorder.warnings)
 
 
-def test_paging_does_not_retry_when_expected_unknown(fast_timeouts, fake_human):
-    """响应里没有 notes_count(期望未知)→ 维持旧行为,一次无响应即停,不空转重试。"""
+def test_paging_retries_even_when_expected_unknown(fast_timeouts, fake_human):
+    """期望未知时也要重试:单次"滚了没响应"判不了到底(实测列表中段就会出现)。"""
     page = _FakePage([[_note("a")], None, [_note("b")]])
 
     notes = cnl.fetch_posted_notes(page, account_id=1)
 
-    assert [n["id"] for n in notes] == ["a"]
+    assert [n["id"] for n in notes] == ["a", "b"]
+
+
+def test_paging_stops_immediately_once_expected_reached(fast_timeouts, fake_human):
+    """已抓够 notes_count 后,一次无响应即收工——不为了确认再空滚两次。"""
+    page = _FakePage([[_note("a"), _note("b")], None, None], notes_count=2)
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    assert [n["id"] for n in notes] == ["a", "b"]
     assert fake_human[0].scrolls == 1
+
+
+def test_mouse_moves_onto_note_list_before_scrolling(fast_timeouts, fake_human):
+    """滚动前必须先把鼠标移到笔记卡上,否则滚轮打在不滚动的顶栏上(37→20 的真根因)。
+
+    落点取第一张卡的矩形中心;假拟人层在没 hover 过时 scroll 不投递,故这条一旦回退,
+    下面的"抓到 b"会直接失败。
+    """
+    page = _FakePage([[_note("a")], [_note("b")], []])
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    human = fake_human[0]
+    assert human.hovers == [(448.0, 400.0)]  # 卡片矩形中心
+    assert [n["id"] for n in notes] == ["a", "b"]
+
+
+def test_missing_note_card_warns_and_degrades(fast_timeouts, fake_human, monkeypatch):
+    """找不到笔记卡(改版/没渲染)→ 告警并降级继续,不抛错炸掉整次同步。"""
+    recorder = _LogRecorder()
+    monkeypatch.setattr(cnl, "logger", recorder)
+    page = _FakePage([[_note("a")], [_note("b")]], card_box=None)
+
+    notes = cnl.fetch_posted_notes(page, account_id=1)
+
+    assert [n["id"] for n in notes] == ["a"]  # 滚轮空转,只拿到首批
+    assert any("鼠标无法移到列表上" in w for w in recorder.warnings)
 
 
 def test_empty_first_batch_returns_no_notes(fast_timeouts, fake_human):
