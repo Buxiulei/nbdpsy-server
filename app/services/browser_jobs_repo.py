@@ -39,7 +39,8 @@ STALE_AFTER_SECONDS = 900
 
 # 幂等类 kind:僵死后重置 queued 自动重跑;其余(note_delete/op_images)非幂等,
 # 置 error + 结果未知指引,绝不自动重跑(删除不可逆 / 生图烧钱)。
-_IDEMPOTENT_KINDS = ("cookie_check", "note_export")
+# note_ledger_sync 是纯只读抓取 + 按 (account_id, note_id) upsert,重跑只会刷新同一批行。
+_IDEMPOTENT_KINDS = ("cookie_check", "note_export", "note_ledger_sync")
 
 # 进程内消费任务强引用集合:防未完成的 asyncio.Task 被 GC 提前回收。
 _inline_tasks: set[asyncio.Task] = set()

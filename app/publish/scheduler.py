@@ -369,6 +369,20 @@ class PublishScheduler:
                 )
             except Exception:  # noqa: BLE001 — 登记绝不阻断发布终态
                 logger.warning(f"[matrix_interact] scheduler 登记 job={job_id} 异常(忽略)")
+            # 发布笔记永久台账:T0 当场落行(纯 DB)→ 再登记 T1 同步补 note_id。
+            # 顺序不能颠倒(台账行须先于同步存在);两步都幂等 + 绝不抛错阻断。
+            try:
+                from app.services import browser_jobs_repo
+                from app.services.note_ledger import (
+                    record_published_note,
+                    schedule_note_ledger_sync,
+                )
+
+                db_path = browser_jobs_repo.current_db_path()
+                await asyncio.to_thread(record_published_note, db_path, job_id)
+                await asyncio.to_thread(schedule_note_ledger_sync, db_path, job_id)
+            except Exception:  # noqa: BLE001 — 登记绝不阻断发布终态
+                logger.warning(f"[note_ledger] scheduler 登记 job={job_id} 异常(忽略)")
 
     def start(self) -> None:
         """启动 lifespan 循环:起队列 worker,后台协程每 poll 周期 recover_stale→scan→submit。"""

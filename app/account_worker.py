@@ -199,6 +199,16 @@ def _apply_publish_decision(
             # 矩阵互动:给矩阵内其余账号登记窗口内随机时刻的互动任务(幂等 + 绝不抛错阻断)。
             from app.services.matrix_interact import schedule_matrix_interact
             schedule_matrix_interact(db_path, job_id)
+            # 发布笔记永久台账:T0 当场落行(纯 DB,内容侧字段全写死),再登记 T1 同步去
+            # 补 note_id。**顺序不能颠倒**——台账行必须先于同步存在,否则同步回来的数据
+            # 没有落点。两步都幂等 + 绝不抛错阻断;笔记进列表有延迟,T1 补不到留 pending_id
+            # 交给定时同步,不重试。
+            from app.services.note_ledger import (
+                record_published_note,
+                schedule_note_ledger_sync,
+            )
+            record_published_note(db_path, job_id)
+            schedule_note_ledger_sync(db_path, job_id)
         elif decision["status"] == "pending":
             # 排重试:retries 递增 + next_retry_at 排期 + 回 pending
             next_retry = now + timedelta(seconds=decision["next_retry_delta_s"])
@@ -338,6 +348,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import matrix_interact
 
         return lambda account_id, payload: matrix_interact.execute(account_id, payload)
+    if kind == "note_ledger_sync":
+        from app.services import note_ledger
+
+        return lambda account_id, payload: note_ledger.execute(account_id, payload)
     if kind == "draft_clean":
         from app.services import draft_clean
 
