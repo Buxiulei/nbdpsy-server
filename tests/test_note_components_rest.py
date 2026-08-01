@@ -149,9 +149,12 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
         assert row.kind == "note_components"
         assert row.account_id == acc and row.operator_id == op_id
         payload = json.loads(row.payload)
+        # related_counselor 是推导引用笔记的由来,没传就是 None;显式给了 quoted_note_id
+        # 时推导根本不跑,登记的就是调用方给的那个 id。
         assert payload == {
             "note_id": "6a4ce556", "collection_id": "c1",
             "quoted_note_id": "n-quote", "activity_id": "43561",
+            "related_counselor": None,
         }
 
         poll = await c.get(

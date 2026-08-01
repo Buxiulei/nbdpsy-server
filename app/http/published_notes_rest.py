@@ -65,6 +65,12 @@ _FIELD_NOTES = {
         "对账用的互动快照(台账同步时刷新),**非权威指标源**;权威指标与逐日趋势走 "
         "GET /api/accounts/{account_id}/note-trends。"
     ),
+    "related_counselor": (
+        "这篇笔记推介哪位咨询师(姓名),发布当场从发布任务带过来。"
+        "**null=未知**,不代表「没推介谁」——本次改动之前发的存量笔记、以及非本系统发布的 "
+        "orphan 行,这一列一律是 null。它只是留痕,不参与任何自动逻辑;"
+        "发布时该引用哪篇笔记是建 job 那一刻就推导完落到 quoted_note_id 的。"
+    ),
     "ordering": "按 published_at 降序(最新发布在前),同刻按台账行 id 降序。",
 }
 
@@ -81,7 +87,8 @@ MANIFEST_ENTRIES = [
         "returns": "{notes:[{id,account_id,note_id,title,note_url,note_type,published_at,"
                    "platform_published_at,generated_at,permission_code,permission_msg,"
                    "visibility_changed_at,visibility_changed_by,sync_status,"
-                   "source_publish_job_id,content_archive_id,operator_id,last_synced_at,"
+                   "source_publish_job_id,content_archive_id,operator_id,"
+                   "related_counselor,last_synced_at,"
                    "interaction:{likes,collects,comments,shares,views}}, ...], "
                    "total:int(该号台账总行数,与 limit 无关), limit, offset, "
                    "meta:{field_notes(三个歧义字段的口径 + 排序口径)}}",
@@ -215,6 +222,7 @@ def _note_view(row: PublishedNote) -> dict:
         "source_publish_job_id": row.source_publish_job_id,
         "content_archive_id": row.content_archive_id,
         "operator_id": row.operator_id,
+        "related_counselor": row.related_counselor,
         "last_synced_at": _utc(row.last_synced_at),
         "interaction": {
             "likes": row.likes,

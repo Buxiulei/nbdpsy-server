@@ -84,7 +84,7 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
         with sqlite3.connect(db_path, timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             job = conn.execute(
-                "SELECT id, account_id, title, created_by, created_at"
+                "SELECT id, account_id, title, created_by, created_at, related_counselor"
                 " FROM publish_jobs WHERE id=?",
                 (publish_job_id,),
             ).fetchone()
@@ -107,9 +107,9 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
                 "INSERT INTO published_notes"
                 "(account_id,note_id,xsec_token,xsec_source,note_url,note_type,"
                 " platform_published_at,title,published_at,generated_at,operator_id,"
-                " source_publish_job_id,content_archive_id,sync_status,"
+                " related_counselor,source_publish_job_id,content_archive_id,sync_status,"
                 " first_seen_at,last_synced_at,likes,collects,comments,shares,views)"
-                " VALUES (?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,'pending_id',"
+                " VALUES (?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,'pending_id',"
                 " ?,?,0,0,0,0,0)",
                 (
                     job["account_id"],
@@ -117,6 +117,7 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
                     _fmt(now),
                     job["created_at"],
                     job["created_by"],
+                    job["related_counselor"],
                     publish_job_id,
                     archive["id"] if archive is not None else None,
                     _fmt(now),

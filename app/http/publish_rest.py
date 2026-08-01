@@ -23,6 +23,7 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
 from app.publish.runtime import get_active_scheduler
+from app.services import counselor_quote
 from app.services.quota import assert_operator_quota
 
 # 发布任务状态枚举(与 DB / 调度器生命周期一致):校验 list_publish_jobs 的 status 入参用。
@@ -115,8 +116,10 @@ MANIFEST_ENTRIES = [
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
             "collection_id": "body,str|None(加入合集,取自 GET /api/accounts/{id}/collections)",
-            "quoted_note_id": "body,str|None(引用本号的哪篇笔记)",
+            "quoted_note_id": "body,str|None(引用本号的哪篇笔记;**优先级高于 related_counselor**)",
             "activity_id": "body,str|None(关联活动,取自 GET /api/accounts/{id}/activities)",
+            "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
+                                  "没给 quoted_note_id 时据它自动推导该引用哪篇笔记)",
         },
         "returns": "{job_id, status:'pending'}",
         "errors": "400=images 为空或超 18 张;403=无该账号 access",
@@ -127,7 +130,18 @@ MANIFEST_ENTRIES = [
                  "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇),"
                  "且本端点**不回传**组件是否设上——要确认得事后看笔记或调 "
                  "POST /api/accounts/{id}/note-components 补设。"
-                 "⚠️ activity_id 会让平台把该活动的话题**追加**进正文(话题名可能与活动名不同)。",
+                 "⚠️ activity_id 会让平台把该活动的话题**追加**进正文(话题名可能与活动名不同)。"
+                 "**引用哪篇笔记可以不用自己算**:不传 quoted_note_id 时按四条规则自动推导"
+                 "(建 job 那一刻算完落库):① 标题形如「X咨询师-姓名，…」= 这篇本身就是咨询师"
+                 "推介笔记 → 引用「接待员联系方式」那篇(**这条最先判**,所以给推介笔记传 "
+                 "related_counselor 也不会让它引用自己);② 传了 related_counselor → 引用"
+                 "**本账号**该咨询师的公开推介笔记;③ 标题里提到某位已知咨询师 → 同上;"
+                 "④ 都不满足 → 不引用。**只引用 permission_code=0 的公开笔记,推不出来一律"
+                 "留空绝不猜**。⚠️ **只会引用本账号自己的咨询师推介笔记**:每个账号背后是"
+                 "不同运营,从该账号来的客户算其 KPI,跨账号引用等于把客户导到别人名下抢其"
+                 "绩效,故本账号没有该咨询师的公开推介笔记时**留空,绝不跨账号兜底**。唯一"
+                 "例外是接待员联系方式那篇(含二维码有违规风险,集中在单一账号,由服务端配置"
+                 "指定;**未配置时规则①同样留空不引用**)。两者都传以显式 quoted_note_id 为准。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs/{job_id}",
@@ -200,6 +214,9 @@ class PublishNoteRequest(BaseModel):
     collection_id: str | None = None
     quoted_note_id: str | None = None
     activity_id: str | None = None
+    # 这篇笔记推介哪位咨询师(姓名)。没给 quoted_note_id 时据它(+ 标题)推导该引用哪篇,
+    # 推不出来就留空绝不猜;两者都给时**以显式 quoted_note_id 为准**。
+    related_counselor: str | None = None
 
 
 @router.post("/api/publish-jobs", status_code=202)
@@ -233,6 +250,13 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             day_count = (await session.execute(count_stmt)).scalar_one()
             if day_count >= settings.PUBLISH_DAILY_CAP:
                 scheduled_at = _next_active_window_start(now_utc)
+        # 引用哪篇笔记:显式 quoted_note_id 优先;没给才按 related_counselor + 标题推导
+        # (规则见 app/services/counselor_quote.py),推不出来落 None —— 不引用,绝不猜。
+        # 在建 job 这一刻定下来而不是等发到一半再算:落库的就是最终值,事后翻 job 行即可
+        # 知道当时引了谁,不必去猜发布那一刻台账长什么样。
+        quoted_note_id = payload.quoted_note_id or await counselor_quote.resolve_quoted_note_id(
+            session, payload.account_id, payload.title, payload.related_counselor
+        )
         job = PublishJob(
             account_id=payload.account_id,
             title=payload.title,
@@ -243,8 +267,9 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             status="pending",
             created_by=operator.id,
             collection_id=payload.collection_id,
-            quoted_note_id=payload.quoted_note_id,
+            quoted_note_id=quoted_note_id,
             activity_id=payload.activity_id,
+            related_counselor=payload.related_counselor,
         )
         session.add(job)
         await session.commit()
