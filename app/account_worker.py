@@ -371,6 +371,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_ledger
 
         return lambda account_id, payload: note_ledger.execute(account_id, payload)
+    if kind == "note_purpose_backfill":
+        from app.services import note_purpose
+
+        return lambda account_id, payload: note_purpose.execute(account_id, payload)
     if kind == "draft_clean":
         from app.services import draft_clean
 

@@ -42,6 +42,8 @@ _NEW_ROUTES = {
     ("GET", "/api/note-ledger-syncs/{sync_id}"),
     ("POST", "/api/accounts/{account_id}/note-visibility-changes"),
     ("GET", "/api/note-visibility-changes/{change_id}"),
+    ("POST", "/api/accounts/{account_id}/note-purpose-backfills"),
+    ("GET", "/api/note-purpose-backfills/{backfill_id}"),
 }
 
 
@@ -508,7 +510,7 @@ async def test_poll_visibility_error_and_unknown(tmp_path, monkeypatch):
 
 
 def test_manifest_covers_new_routes():
-    """6 条新路由在 manifest 与实际注册路由里双向全等(全局防漂移在 test_manifest.py)。"""
+    """8 条新路由在 manifest 与实际注册路由里双向全等(全局防漂移在 test_manifest.py)。"""
     from app.http import ALL_MANIFEST_ENTRIES
     from app.server import create_app
 

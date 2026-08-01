@@ -120,6 +120,9 @@ MANIFEST_ENTRIES = [
             "activity_id": "body,str|None(关联活动,取自 GET /api/accounts/{id}/activities)",
             "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
                                   "没给 quoted_note_id 时据它自动推导该引用哪篇笔记)",
+            "note_purpose": "body,str|None(这篇笔记的核心目的,**给以后调用它的 agent 读**;"
+                             "推荐词表:推介咨询师/概念解读/案例剖析/热点分析/互动引导/"
+                             "个人记录/其他,词表会扩,传别的词也收)",
         },
         "returns": "{job_id, status:'pending'}",
         "errors": "400=images 为空或超 18 张;403=无该账号 access",
@@ -141,7 +144,11 @@ MANIFEST_ENTRIES = [
                  "不同运营,从该账号来的客户算其 KPI,跨账号引用等于把客户导到别人名下抢其"
                  "绩效,故本账号没有该咨询师的公开推介笔记时**留空,绝不跨账号兜底**。唯一"
                  "例外是接待员联系方式那篇(含二维码有违规风险,集中在单一账号,由服务端配置"
-                 "指定;**未配置时规则①同样留空不引用**)。两者都传以显式 quoted_note_id 为准。",
+                 "指定;**未配置时规则①同样留空不引用**)。两者都传以显式 quoted_note_id 为准。"
+                 "**note_purpose 建议每篇都传**:它是发布当场随任务落进笔记台账的核心目的"
+                 "(台账记 purpose_source='declared'),以后 agent 要引用/评论/排期这篇笔记时"
+                 "靠它判断意图。不传也能发,台账里那两列留 null,事后系统只能从正文推断"
+                 "(purpose_source='inferred',可信度低于你亲口声明的)。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs/{job_id}",
@@ -217,6 +224,9 @@ class PublishNoteRequest(BaseModel):
     # 这篇笔记推介哪位咨询师(姓名)。没给 quoted_note_id 时据它(+ 标题)推导该引用哪篇,
     # 推不出来就留空绝不猜;两者都给时**以显式 quoted_note_id 为准**。
     related_counselor: str | None = None
+    # 这篇笔记的核心目的(推荐词表见 app/services/note_purpose.py,不强制枚举)。
+    # T0 发布当场带进台账并记 purpose_source='declared';不传则留空,事后由回填链路推断。
+    note_purpose: str | None = None
 
 
 @router.post("/api/publish-jobs", status_code=202)
@@ -270,6 +280,7 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             quoted_note_id=quoted_note_id,
             activity_id=payload.activity_id,
             related_counselor=payload.related_counselor,
+            note_purpose=payload.note_purpose,
         )
         session.add(job)
         await session.commit()

@@ -1,4 +1,4 @@
-"""published-notes 分组 REST(6 端点):发布笔记永久台账查询 + 台账同步 + 可见性切换。
+"""published-notes 分组 REST(8 端点):台账查询 + 台账同步 + 核心目的回填 + 可见性切换。
 
 三块能力此前只有服务端实现(``app.services.note_ledger`` / ``app.services.note_visibility``),
 外部调用方一个都调不到,本模块把它们开出去:
@@ -32,7 +32,7 @@ from app.core.errors import NotFoundError
 from app.http.job_polling import base_view, load_job
 from app.models.published_note import PublishedNote
 from app.models.xhs_account import XhsAccount
-from app.services import note_ledger, note_visibility
+from app.services import note_ledger, note_purpose, note_visibility
 from app.services.quota import assert_operator_quota
 
 router = APIRouter()
@@ -71,6 +71,26 @@ _FIELD_NOTES = {
         "orphan 行,这一列一律是 null。它只是留痕,不参与任何自动逻辑;"
         "发布时该引用哪篇笔记是建 job 那一刻就推导完落到 quoted_note_id 的。"
     ),
+    "note_purpose": (
+        "这篇笔记的**核心目的**,给要调用这篇笔记的 agent 读的意图标注。"
+        "推荐词表:推介咨询师 / 概念解读 / 案例剖析 / 热点分析 / 互动引导 / 个人记录 / 其他;"
+        "**词表会扩,存的是字符串不是枚举**——按已知值匹配,遇到没见过的值不要报错。"
+        "**null=还没标注**(存量笔记、正在排队回填的、以及 LLM 分类失败留待下轮的都是 null),"
+        "不代表「这篇没有目的」。"
+    ),
+    "purpose_source": (
+        "note_purpose 这个值怎么来的:declared=发布时调用方**亲口声明**(可直接信);"
+        "inferred=系统只读进编辑页取回正文后**用 LLM 推断**的(要留余地,拿不准会填「其他」);"
+        "null=未知(此时 note_purpose 也是 null)。"
+        "两者可信度不同,**按 note_purpose 做自动决策前先看这一列**。"
+    ),
+    "content_text": (
+        "笔记正文。**只在单条端点返回**(列表端点不给,几百篇正文会把响应撑爆)。"
+        "手工发布的笔记本地本来一个字都没有,这是回填链路只读进编辑页抓回来的;"
+        "本系统发布的笔记正文在内容资产库(content_archive_id)那边,这一列可能是 null。"
+        "空串 = 抓过了但确实没正文(纯图笔记),与 null(没抓过)不是一回事;"
+        "content_fetched_at 非空即表示抓过。"
+    ),
     "ordering": "按 published_at 降序(最新发布在前),同刻按台账行 id 降序。",
 }
 
@@ -88,7 +108,8 @@ MANIFEST_ENTRIES = [
                    "platform_published_at,generated_at,permission_code,permission_msg,"
                    "visibility_changed_at,visibility_changed_by,sync_status,"
                    "source_publish_job_id,content_archive_id,operator_id,"
-                   "related_counselor,last_synced_at,"
+                   "related_counselor,note_purpose,purpose_source,content_fetched_at,"
+                   "last_synced_at,"
                    "interaction:{likes,collects,comments,shares,views}}, ...], "
                    "total:int(该号台账总行数,与 limit 无关), limit, offset, "
                    "meta:{field_notes(三个歧义字段的口径 + 排序口径)}}",
@@ -104,7 +125,8 @@ MANIFEST_ENTRIES = [
         "method": "GET", "path": "/api/published-notes/{note_id}",
         "summary": "按平台 note_id 取单条台账",
         "admin_only": False, "params": {"note_id": "path,str(24 位 hex 平台笔记 id)"},
-        "returns": "{note:{同列表单条视图}, meta:{field_notes}}",
+        "returns": "{note:{同列表单条视图 + content_text(正文,**只有本端点给**)}, "
+                   "meta:{field_notes}}",
         "errors": "403=无该笔记所属账号的授权;404=台账里没有该 note_id",
         "notes": "只能按**平台 note_id** 取。sync_status=pending_id 的行还没有 note_id"
                  "(是 null),**本端点查不到它们**——那些只能从列表端点按账号翻。"
@@ -129,7 +151,7 @@ MANIFEST_ENTRIES = [
         "summary": "轮询台账同步结果",
         "admin_only": False, "params": {"sync_id": "path,str"},
         "returns": "{status, note_count?, refreshed?, linked?, linked_by_title?, orphan?, "
-                   "ambiguous?, pending_remaining?, missing?, reason?}",
+                   "ambiguous?, pending_remaining?, missing?, purpose_backfill_id?, reason?}",
         "errors": "403=无该号授权;404=sync_id 不存在",
         "notes": "status 四态:queued(待派发)/running(同步中)/done(附计数)/error(附 reason,"
                  "如账号无可用 cookie、浏览器起不来;不代表下次必失败,可直接重发)。"
@@ -138,7 +160,50 @@ MANIFEST_ENTRIES = [
                  "发布任务;orphan=新建了几条"
                  "非本系统发布的行;ambiguous=几篇因同标题多条待补而**认不准**(既不认也不建行,"
                  "留着下次);pending_remaining=还剩几条没补上 id;missing=台账有但这次列表里没见到"
-                 "(可能被删/被限流,行保留)。本 kind 幂等,僵死会自动重跑,故**不会**出现 unknown。",
+                 "(可能被删/被限流,行保留)。本 kind 幂等,僵死会自动重跑,故**不会**出现 unknown。"
+                 "purpose_backfill_id=同步顺带登记的核心目的回填任务 id(该号已有在途回填任务、"
+                 "或没有可回填的笔记时为 null),可拿它去 GET /api/note-purpose-backfills/{id} 轮询。",
+    },
+    {
+        "method": "POST", "path": "/api/accounts/{account_id}/note-purpose-backfills",
+        "summary": "异步触发一批笔记的核心目的回填(只读抓正文 + LLM 分类,不改任何内容)",
+        "admin_only": False,
+        "params": {
+            "account_id": "path,int",
+            "note_id": "body,str|None(补录**指定**那一篇;不传则按策略自动挑几篇)",
+        },
+        "returns": '{backfill_id, status:"queued"}',
+        "errors": "403=无该号授权;404=账号不存在;429=运营者未完成任务配额已满",
+        "notes": "异步契约:起后台浏览器**深链进笔记编辑页只读取回正文**,再用 LLM 按受控词表"
+                 "分类填 note_purpose(purpose_source='inferred');拿 backfill_id 后每 5-10s "
+                 "轮询 GET /api/note-purpose-backfills/{backfill_id}。"
+                 "⚠️ **每轮有篇数上限**(NOTE_PURPOSE_BACKFILL_LIMIT,默认 3):存量手工笔记有"
+                 "上百篇,每篇要开一次编辑页,同号一小时内起 5 次会话就会被平台从「扫码验证」"
+                 "打成「请求太频繁」(已实测弹墙两个账号)。要补完存量就**隔一段时间再点一次**,"
+                 "别指望一次跑完,也别连着刷。"
+                 "自动挑篇的口径:有 note_id、**permission_code=0 的公开笔记**(私密的读者看不到、"
+                 "agent 也不会去操作,不值得花会话)、note_purpose 还是 null 的,按平台发布时间"
+                 "倒序取前 N 篇。传了 note_id 时只放宽「已有目的」这一条(可重新分类),"
+                 "公开性这条仍然照旧。"
+                 "本操作**只读**:进出编辑页不点发布、不改一个字,故**幂等**,失败可放心重发。"
+                 "同号浏览器操作(发布/cookie 检测/导出/切可见性)共享 per-account 锁串行。",
+    },
+    {
+        "method": "GET", "path": "/api/note-purpose-backfills/{backfill_id}",
+        "summary": "轮询核心目的回填结果",
+        "admin_only": False, "params": {"backfill_id": "path,str"},
+        "returns": "{status, picked?, fetched?, classified?, unclassified?, purposes?, "
+                   "failed?, reason?}",
+        "errors": "403=无该号授权;404=backfill_id 不存在",
+        "notes": "status 四态:queued / running / done(附计数)/ error(附 reason,如账号无可用 "
+                 "cookie、指定的 note_id 不符合回填条件)。本 kind 幂等,僵死会自动重跑,"
+                 "故**不会**出现 unknown。"
+                 "done 的计数含义:picked=本轮挑了几篇;fetched=几篇新抓回了正文"
+                 "(已经抓过正文的不再开页,直接拿库里那份重分类);classified=几篇填上了 "
+                 "note_purpose;unclassified=几篇没分出来(LLM 不可达或标题正文皆空)——"
+                 "**这不算失败**,正文已落库,下轮不必再开浏览器就能重分类;"
+                 "purposes={note_id: 目的} 本轮填了什么;failed=[{note_id, reason}] 哪几篇"
+                 "连正文都没读到(多半是笔记已被删)。",
     },
     {
         "method": "POST", "path": "/api/accounts/{account_id}/note-visibility-changes",
@@ -197,14 +262,17 @@ def _utc(dt: datetime | None) -> str | None:
     return dt.replace(tzinfo=timezone.utc).isoformat() if dt is not None else None
 
 
-def _note_view(row: PublishedNote) -> dict:
-    """台账行 → 对外视图。
+def _note_view(row: PublishedNote, *, include_content: bool = False) -> dict:
+    """台账行 → 对外视图;``include_content`` 时额外带正文(单条端点专用)。
 
     ``permission_code`` / ``permission_msg`` **原样透传**(None → null,0 → 0):这两个值
     的 falsy 陷阱正是本模块反复强调的坑,视图层绝不做 ``or`` 兜底把 0 变成别的东西。
     互动快照收在 ``interaction`` 子对象里,与 note-trends 的权威指标在形状上就分开。
+
+    ``content_text`` **只在单条给**:一页 200 篇笔记的正文足以把列表响应撑到不可用,
+    而列表的用途是翻找,要正文的场景本就是"锁定了某一篇"。
     """
-    return {
+    view = {
         "id": row.id,
         "account_id": row.account_id,
         "note_id": row.note_id,
@@ -223,6 +291,9 @@ def _note_view(row: PublishedNote) -> dict:
         "content_archive_id": row.content_archive_id,
         "operator_id": row.operator_id,
         "related_counselor": row.related_counselor,
+        "note_purpose": row.note_purpose,
+        "purpose_source": row.purpose_source,
+        "content_fetched_at": _utc(row.content_fetched_at),
         "last_synced_at": _utc(row.last_synced_at),
         "interaction": {
             "likes": row.likes,
@@ -232,6 +303,9 @@ def _note_view(row: PublishedNote) -> dict:
             "views": row.views,
         },
     }
+    if include_content:
+        view["content_text"] = row.content_text
+    return view
 
 
 # ---------------- 台账查询(同步读)----------------
@@ -296,7 +370,10 @@ async def get_published_note_endpoint(note_id: str) -> dict:
         if row is None:
             raise NotFoundError(f"台账里没有笔记 {note_id}")
         await assert_account_access(operator, row.account_id, session)
-    return {"note": _note_view(row), "meta": {"field_notes": _FIELD_NOTES}}
+    return {
+        "note": _note_view(row, include_content=True),
+        "meta": {"field_notes": _FIELD_NOTES},
+    }
 
 
 # ---------------- 台账同步(异步 202 + 轮询)----------------
@@ -319,6 +396,49 @@ async def start_note_ledger_sync_endpoint(account_id: int) -> dict:
 async def get_note_ledger_sync_endpoint(sync_id: str) -> dict:
     """轮询台账同步结果:queued / running / done(附各项计数)/ error(附 reason)。"""
     row = await load_job(sync_id, "note_ledger_sync", "sync_id")
+    view = base_view(row)
+    if row["status"] == "done":
+        view.update(row.get("result") or {})
+    return view
+
+
+# ---------------- 核心目的回填(异步 202 + 轮询)----------------
+
+
+class NotePurposeBackfillRequest(BaseModel):
+    """回填请求体。整个 body 可省(不传即按策略自动挑几篇)。"""
+
+    note_id: str | None = Field(
+        default=None, max_length=64,
+        description="要补录的那一篇(平台笔记 id);不传则按策略自动挑最近发布的几篇",
+    )
+
+
+@router.post("/api/accounts/{account_id}/note-purpose-backfills", status_code=202)
+async def start_note_purpose_backfill_endpoint(
+    account_id: int, payload: NotePurposeBackfillRequest | None = None
+) -> dict:
+    """异步触发核心目的回填,立即返回 backfill_id(**每轮篇数有硬上限**,见 manifest)。
+
+    过配额闸的理由与其余浏览器端点一致:回填要起真 camoufox 会话,不闸就能一口气排上
+    几百条把别的任务饿死 —— 何况这条链路正是最怕会话频次的那条。
+    """
+    operator = current_operator()
+    await assert_operator_quota(operator)
+    async with get_session() as session:
+        await assert_account_access(operator, account_id, session)
+        if await session.get(XhsAccount, account_id) is None:
+            raise NotFoundError(f"账号 {account_id} 不存在")
+    backfill_id = note_purpose.start_backfill(
+        account_id, payload.note_id if payload is not None else None
+    )
+    return {"backfill_id": backfill_id, "status": "queued"}
+
+
+@router.get("/api/note-purpose-backfills/{backfill_id}")
+async def get_note_purpose_backfill_endpoint(backfill_id: str) -> dict:
+    """轮询回填结果:queued / running / done(附各项计数)/ error(附 reason)。"""
+    row = await load_job(backfill_id, note_purpose.JOB_KIND, "backfill_id")
     view = base_view(row)
     if row["status"] == "done":
         view.update(row.get("result") or {})

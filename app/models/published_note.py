@@ -16,7 +16,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -78,6 +78,22 @@ class PublishedNote(Base):
     # 这篇笔记推介哪位咨询师(姓名):取 publish_jobs.related_counselor,T0 当场带过来。
     # 非本系统发布的 orphan 行与存量行为 NULL —— NULL 是**未知**,不代表"没推介谁"。
     related_counselor: Mapped[str | None] = mapped_column(nullable=True)
+
+    # ── 核心目的:给**调用这篇笔记的 agent** 读的意图标注 ──
+    # 存字符串**不做枚举约束**:推荐词表(见 app/services/note_purpose.py)会扩,
+    # 库层写死枚举会让新词入不了库。
+    note_purpose: Mapped[str | None] = mapped_column(nullable=True)
+    # 这个目的怎么来的:declared=发布时调用方声明(权威,可直接信)/
+    # inferred=从正文推断(机器猜的,要留余地)/ NULL=未知。
+    # **两者可信度不同**,agent 必须能区分,所以不能只存 note_purpose 一列。
+    purpose_source: Mapped[str | None] = mapped_column(nullable=True)
+
+    # ── 笔记正文:手工发布的 orphan 行本地一个字都没有,靠只读进编辑页抓回来 ──
+    # 本系统发的(linked)正文在 content_archive 副本里,这一列可留空。
+    content_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 正文抓取时刻。**非空 = 已经开过一次编辑页**:哪怕抓回来是空串(纯图笔记),也不必
+    # 再为这篇起一次浏览器会话——重开会话的代价远高于存一个空串。
+    content_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     source_publish_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("publish_jobs.id"), nullable=True
