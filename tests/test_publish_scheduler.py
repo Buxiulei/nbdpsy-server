@@ -12,7 +12,10 @@
   (monkeypatch publish_once,不起浏览器)。
 - runner 兜底:publish_once 抛异常 → 占用后统一 finish(fail),job 不卡 publishing,
   按状态机排重试(pending + retries 递增 + error)或耗尽转 failed。
-- 调度循环:start 每 poll 周期先 recover_stale 再 scan→submit,两条 job 均落 published;可 stop。
+- 调度循环:start 每 poll 周期先 recover_stale 再 scan→submit,两条(分属不同账号的)job 均落
+  published;可 stop。
+- 账号级冷却门:同账号第二条 job 在第一条发布后被拦下——保持 pending、不发布、next_retry_at
+  按抖动间隔顺延。
 - 周期 recover:recover_stale 被每个 poll 周期调用(非仅启动一次)。
 """
 
@@ -447,15 +450,21 @@ async def test_publish_runner_exception_exhausts_to_failed(db_factory, monkeypat
 
 
 async def test_scheduler_loop_recovers_and_publishes(db_factory, monkeypatch):
-    """start:先 recover_stale(僵死 publishing 回 pending)再周期 scan→submit,两条均 published。"""
-    account_id = await _make_account(db_factory)
+    """start:先 recover_stale(僵死 publishing 回 pending)再周期 scan→submit,两条均 published。
+
+    两条 job 必须**分属不同账号**:account_cooldown_gate 按账号隔离,同账号相邻发布本就会被
+    冷却门顺延(生产上同号秒级连发是封号指纹,不应发生),那条路径由
+    test_account_cooldown_gate_defers_second_job_same_account 单独覆盖。
+    """
+    stale_account_id = await _make_account(db_factory, name="acc_stale")
+    pending_account_id = await _make_account(db_factory, name="acc_pending")
     stale_id = await _make_job(
         db_factory,
-        account_id,
+        stale_account_id,
         status="publishing",
         started_at=datetime.utcnow() - timedelta(seconds=settings.PUBLISH_JOB_TIMEOUT + 60),
     )
-    pending_id = await _make_job(db_factory, account_id)
+    pending_id = await _make_job(db_factory, pending_account_id)
 
     def fake_publish_once(*args, **kwargs):
         return PublishResult(success=True, note_url="https://xhs/ok")
@@ -465,17 +474,81 @@ async def test_scheduler_loop_recovers_and_publishes(db_factory, monkeypatch):
     scheduler = PublishScheduler(db_factory, poll_interval=0.02)
     scheduler.start()
     try:
-        for _ in range(300):
+        # 等两条都落 published(正常 0.2s 内出结果;上限放宽到 10s 是因为发布成功后 runner
+        # 还要跑发布后登记,机器满载时这段会明显变慢,budget 卡太紧会假红)。
+        for _ in range(1000):
             s = await _get_job(db_factory, stale_id)
             p = await _get_job(db_factory, pending_id)
             if s.status == "published" and p.status == "published":
                 break
             await asyncio.sleep(0.01)
     finally:
+        # 先等队列排空再 stop:published 是 finish 提交那一刻就可见的,此时 runner 还有收尾
+        # (发布后登记)在跑,扫表周期投进来的重复 job 也可能正开着会话。stop() 直接 cancel
+        # worker 会把 sqlite 连接停在未结事务上,fixture 的 drop_all 随后撞 "database is
+        # locked"(偶发,加压下约 1/20)。排空后再停即无在途协程可被 cancel。
+        try:
+            await asyncio.wait_for(scheduler._queue._queue.join(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         await scheduler.stop()
 
     assert (await _get_job(db_factory, stale_id)).status == "published"
     assert (await _get_job(db_factory, pending_id)).status == "published"
+
+
+# ---------------- 账号级发布冷却门 ----------------
+
+
+async def test_account_cooldown_gate_defers_second_job_same_account(
+    db_factory, monkeypatch
+):
+    """同账号第二条 job:第一条发布后被冷却门拦下——保持 pending、不发布、next_retry_at 顺延到未来。
+
+    冷却门取该账号最近一条 published/publishing 的 started_at,间隔现抽
+    random.uniform(PUBLISH_MIN_INTERVAL_MIN, PUBLISH_MIN_INTERVAL_MAX),
+    顺延点 = 上次 started_at + 该间隔,故断言按抖动上下界(不写死单点)。
+    """
+    account_id = await _make_account(db_factory)
+    first_id = await _make_job(db_factory, account_id)
+    second_id = await _make_job(db_factory, account_id)
+
+    calls = {"n": 0}
+
+    def fake_publish_once(*args, **kwargs):
+        calls["n"] += 1
+        return PublishResult(success=True, note_url="https://xhs/ok")
+
+    monkeypatch.setattr(scheduler_mod.sync_client, "publish_once", fake_publish_once)
+
+    scheduler = PublishScheduler(db_factory)
+    runner = make_publish_runner(db_factory, scheduler, AccountLocks())
+
+    # 第一条:该账号无发布历史 → 放行、正常发出
+    await runner(first_id)
+    first = await _get_job(db_factory, first_id)
+    assert first.status == "published"
+    assert calls["n"] == 1
+
+    # 第二条:紧随其后 → 冷却门拦下,不占用不发布
+    await runner(second_id)
+    assert calls["n"] == 1, "冷却期内第二条不应真发布"
+
+    second = await _get_job(db_factory, second_id)
+    assert second.status == "pending"  # 未被占用,留给下轮 scan
+    assert second.started_at is None
+    assert second.error is None  # 顺延不是失败,不写 error 不增 retries
+    assert second.retries == 0
+    # 顺延点 = 上次发布 started_at + 抖动间隔,落在 [MIN, MAX] 区间内
+    assert second.next_retry_at is not None
+    assert second.next_retry_at >= first.started_at + timedelta(
+        seconds=settings.PUBLISH_MIN_INTERVAL_MIN
+    )
+    assert second.next_retry_at <= first.started_at + timedelta(
+        seconds=settings.PUBLISH_MIN_INTERVAL_MAX
+    )
+    # 顺延真生效:next_retry_at 在未来 → scan_once 不再捞它(否则会空转重撞冷却门)
+    assert second_id not in await scheduler.scan_once()
 
 
 async def test_scheduler_loop_recovers_every_cycle(db_factory, monkeypatch):
