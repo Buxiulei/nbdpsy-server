@@ -7,9 +7,10 @@
 - ``execute()`` 为契约执行函数(account_worker 子进程消费):持号锁串行 → 浏览器闸 →
   线程内跑同步切换,**不碰 browser_jobs 台账**(claim/finish 由调用方);任何异常收敛成
   ``{"error": reason}``,**绝不抛出**。
-- payload:``{"note_id","title","target_privacy","operator_id"?}``。``note_id`` 用于
-  **回读校验**(列表 DOM 不暴露 note_id,定位只能靠 title),缺了就没法确认切换是否生效,
-  故与 title 一样是必填。``operator_id`` 是 ``visibility_changed_by`` 的来源——execute
+- payload:``{"note_id","title"?,"target_privacy","operator_id"?}``。``note_id`` 是
+  **定位主键 + 回读校验**依据(2026-08-01 起浏览器层先用它从 posted 接口翻译出平台当前
+  标题再匹配卡片),必填;``title`` 降级为**兜底**(平台列表里查不到该 note_id 时才用),
+  可省。``operator_id`` 是 ``visibility_changed_by`` 的来源——execute
   的契约签名只有 ``(account_id, payload)``,拿不到 browser_jobs 行的 operator_id,
   只能由登记方写进 payload;缺失则留痕记 NULL(不阻断切换)。
 - **本期只做 0=公开可见 / 1=仅自己可见两档**:另外三档与 ``user_ids`` 格式完全未验证,
@@ -75,10 +76,7 @@ async def execute(account_id: int, payload: dict) -> dict:
     title = str(payload.get("title") or "").strip()
     target = payload.get("target_privacy")
     if not note_id:
-        return {"error": "payload 缺 note_id,无法回读校验切换是否生效"}
-    if not title:
-        # 标题是唯一的定位手段(列表 DOM 不暴露 note_id),空标题的笔记本期定位不了
-        return {"error": "note_not_locatable: payload 缺 title,无法定位笔记"}
+        return {"error": "payload 缺 note_id,无法定位笔记 / 回读校验切换是否生效"}
     if isinstance(target, bool) or target not in SUPPORTED_PRIVACY:
         return {
             "error": f"unsupported_privacy: 本期只做 0=公开可见 / 1=仅自己可见,"

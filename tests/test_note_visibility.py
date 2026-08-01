@@ -2,7 +2,9 @@
 
 - **目标档位已达成 → skipped 且一次都不提交**(点「取消」退出,不点「确定」、不回读);
 - **回读未变 → error**,绝不"点了就当成功";回读列表里找不到该 note_id 同样 error;
-- **标题为空 / 在该号下重复 → note_not_locatable**,绝不猜一张卡去点;
+- **定位优先 note_id**:先拿 note_id 去平台列表翻译出**当前**标题再匹配卡片(台账 title
+  会过期),平台查不到才用调用方给的 title 兜底;
+- **(解析出的)标题为空 / 在该号下重复 → note_not_locatable**,绝不猜一张卡去点;
 - ``note_visibility`` **不进** ``_IDEMPOTENT_KINDS``(僵死重跑可能把运营刚改回公开的笔记
   再次藏起来);
 - ``permission_code`` / ``permission_msg`` 落库与 T2 同步覆盖(读不出时不覆盖已知值);
@@ -26,6 +28,10 @@ from app.models.published_note import PublishedNote
 from app.services import browser_jobs_repo as repo
 from app.services import note_ledger as ledger
 from app.services import note_visibility as svc
+
+# 在 autouse fixture 打桩前抓住真实实现:绝大多数用例关心的是"定位到卡以后"的那些闸,
+# 故默认把 note_id→平台标题的解析打桩成"用调用方给的标题",只有专门测解析的用例还原它。
+_REAL_RESOLVE = bnv._resolve_locating_title
 
 
 # ---------------- 测试替身 ----------------
@@ -176,6 +182,12 @@ def _wire_browser_layer(monkeypatch):
     """把浏览器层的外部依赖换成假的:导航 no-op、拟人层可观测、轮询窗口压到一次。"""
     monkeypatch.setattr(bnv, "_goto_creator", lambda *_a, **_kw: None)
     monkeypatch.setattr(bnv, "SyncHumanActions", _FakeHuman)
+    # 定位标题解析默认打桩成恒等(它自己会去抓 posted 列表,与本文件多数用例无关);
+    # 解析逻辑本身由 test_locates_by_platform_title 与 test_note_components.py 覆盖
+    monkeypatch.setattr(
+        bnv, "_resolve_locating_title",
+        lambda _page, _account_id, _note_id, title: title,
+    )
     # 轮询节奏是 0.5s / 0.4s 一跳,窗口设成刚够跑一跳:逻辑不变,只缩时间
     monkeypatch.setattr(bnv, "_MODAL_TIMEOUT_S", 0.6)
     monkeypatch.setattr(bnv, "_OPTIONS_TIMEOUT_S", 0.5)
@@ -205,13 +217,35 @@ def _raw(note_id, code, msg=""):
 
 
 def test_empty_title_is_not_locatable(no_readback):
-    """标题为空 → note_not_locatable,且一次都没点/悬停(3 篇无标题私密笔记就属这类)。"""
+    """解析出来的标题为空 → note_not_locatable,且一次都没点/悬停。
+
+    (3 篇无标题的私密笔记就属这类:平台侧 display_title 也是空的,兜底 title 又没给。)
+    """
     page = _page_with(["某篇笔记"], [_PERM_MODAL_OK])
 
     with pytest.raises(bnv.NoteVisibilityError) as exc:
         bnv.set_note_visibility(page, 1, "n1", "   ", 1)
 
     assert exc.value.reason.startswith("note_not_locatable")
+
+
+def test_locates_by_platform_title_not_stale_ledger_title(monkeypatch):
+    """端到端:按 note_id 现拉平台标题定位卡片,台账里那个**过期**标题匹配不上也不影响。
+
+    实测平台显示「粤语咨询师-黄安麟」而台账里记的是「心理咨询师-黄安麟」——旧实现按台账
+    标题精确匹配,必然 note_not_locatable。
+    """
+    monkeypatch.setattr(bnv, "_resolve_locating_title", _REAL_RESOLVE)
+    _readback(
+        monkeypatch,
+        [{"id": "n1", "display_title": "粤语咨询师-黄安麟",
+          "permission_code": 1, "permission_msg": "仅自己可见"}],
+    )
+    page = _page_with(["粤语咨询师-黄安麟"], [_PERM_MODAL_OK], current="公开可见")
+
+    result = bnv.set_note_visibility(page, 1, "n1", "心理咨询师-黄安麟", 1)
+
+    assert result["status"] == "done"
 
 
 def test_duplicate_title_is_not_locatable(no_readback):
@@ -419,7 +453,6 @@ def test_unsupported_privacy_never_touches_page(no_readback):
     "payload, mark",
     [
         ({"title": "t", "target_privacy": 1}, "缺 note_id"),
-        ({"note_id": "n1", "target_privacy": 1}, "note_not_locatable"),
         ({"note_id": "n1", "title": "t", "target_privacy": 2}, "unsupported_privacy"),
         ({"note_id": "n1", "title": "t", "target_privacy": "1"}, "unsupported_privacy"),
         ({"note_id": "n1", "title": "t"}, "unsupported_privacy"),
@@ -436,6 +469,27 @@ async def test_execute_rejects_bad_payload(monkeypatch, payload, mark):
     result = await svc.execute(1, payload)
 
     assert mark in result["error"]
+
+
+async def test_execute_accepts_missing_title(monkeypatch):
+    """不给 title 也放行:定位主键是 note_id,标题只是平台查不到时的兜底。"""
+
+    async def fake_load(_account_id):
+        return [{"name": "a", "value": "b"}]
+
+    seen = {}
+
+    def fake_set(_aid, _cookies, note_id, title, target):
+        seen.update({"note_id": note_id, "title": title})
+        return {"status": "done", "permission_code": target, "permission_msg": ""}
+
+    monkeypatch.setattr(svc, "load_account_cookies", fake_load)
+    monkeypatch.setattr(svc, "_set_sync", fake_set)
+
+    result = await svc.execute(1, {"note_id": "n1", "target_privacy": 1})
+
+    assert result["status"] == "done"
+    assert seen == {"note_id": "n1", "title": ""}
 
 
 async def test_execute_returns_error_without_cookies(monkeypatch):

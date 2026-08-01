@@ -139,14 +139,14 @@ MANIFEST_ENTRIES = [
         "admin_only": False,
         "params": {
             "account_id": "path,int",
-            "note_id": "body,str(平台笔记 id,**回读校验**切换是否生效用,必填)",
-            "title": "body,str(笔记标题,**精确匹配**定位用,必填)",
+            "note_id": "body,str(平台笔记 id,**定位主键 + 回读校验**,必填)",
+            "title": "body,str|None(**兜底用**,平台列表里查不到该 note_id 时才拿它匹配卡片)",
             "target_privacy": "body,int(**只接受 0=公开可见 / 1=仅自己可见**,其余值 422)",
         },
         "returns": '{change_id, status:"queued"}',
         "errors": "400=账号无 user_id 等入参前置不满足;403=无该号授权;404=账号不存在;"
                   "422=target_privacy 不是整数 0/1(布尔 true/false 也拒,别指望它当 1/0),"
-                  "或 note_id/title 为空;"
+                  "或 note_id 为空;"
                   "429=运营者未完成任务配额已满",
         "notes": "异步契约:起后台浏览器进笔记管理页 → 定位卡片 → 开权限弹窗 → 选档位 → 提交 → "
                  "**回读校验生效**(约 1-2 分钟);拿 change_id 后每 5-10s 轮询 "
@@ -154,8 +154,10 @@ MANIFEST_ENTRIES = [
                  "⚠️ 三条硬约束:"
                  "① **只支持这两档**——平台还有「仅互关好友可见」「部分人可见」「部分人不可见」,"
                  "接口参数完全未验证,一律不开放,传别的值直接 422;"
-                 "② **靠标题精确匹配定位**——标题为空、或同一账号下有重复标题的笔记**定位不了**,"
-                 "会返回 error + reason 含 note_not_locatable,这是已知限制,只能先改标题再切;"
+                 "② **定位优先 note_id**——先拿 note_id 去平台列表里翻译出**当前**标题再匹配卡片"
+                 "(台账 title 会过期:实测平台显示「粤语咨询师-…」而台账是「心理咨询师-…」),"
+                 "body 里的 title 只在平台列表查不到该 note_id 时兜底。平台标题为空、或同一账号下"
+                 "重复的笔记仍**定位不了**(error + reason 含 note_not_locatable),这是已知限制;"
                  "③ **非幂等,失败不自动重跑**——调用方看到 error/unknown 必须先核对该笔记**当前**"
                  "可见性(重新同步台账或去创作中心看)再决定,**不要盲目重试**:僵死任务重跑可能把"
                  "运营刚手工改回公开的笔记再次藏起来。"
@@ -327,10 +329,12 @@ class NoteVisibilityChangeRequest(BaseModel):
     """
 
     note_id: str = Field(
-        min_length=1, max_length=64, description="平台笔记 id(回读校验切换是否生效)"
+        min_length=1, max_length=64,
+        description="平台笔记 id(定位主键 + 回读校验切换是否生效)",
     )
-    title: str = Field(
-        min_length=1, max_length=100, description="笔记标题(精确匹配定位,重复标题定位不了)"
+    title: str | None = Field(
+        default=None, max_length=100,
+        description="笔记标题,**兜底用**(平台列表里查不到该 note_id 时才拿它匹配卡片)",
     )
     target_privacy: Literal[0, 1] = Field(
         description="目标档位:0=公开可见 / 1=仅自己可见(本期只做这两档)"
@@ -369,7 +373,7 @@ async def start_note_visibility_change_endpoint(
     change_id = note_visibility.start_change(
         account_id,
         payload.note_id,
-        payload.title,
+        payload.title or "",
         payload.target_privacy,
         operator.id,
     )

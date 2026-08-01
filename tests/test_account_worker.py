@@ -123,7 +123,9 @@ def _get_job(engine, job_id: int) -> PublishJob:
 def _patch_publish_once(monkeypatch, result_or_exc, calls=None):
     """monkeypatch 拟人层入口:记录调用并返回固定结果 / 抛异常。"""
 
-    def fake_publish_once(account_id, cookies, title, content, image_paths, topics):
+    def fake_publish_once(
+        account_id, cookies, title, content, image_paths, topics, components=None
+    ):
         if calls is not None:
             calls.append((account_id, cookies, title, content, image_paths, topics))
         if isinstance(result_or_exc, Exception):

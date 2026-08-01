@@ -41,6 +41,12 @@ class PublishJob(Base):
     error: Mapped[str | None] = mapped_column(Text, default=None)
     retries: Mapped[int] = mapped_column(default=0)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    # 笔记三组件(合集 / 引用笔记 / 关联活动),发布时在 step6 之后、step7 之前设置。
+    # 全可空 = 不设置;存平台侧 id 字符串(活动 bizId 实测是字符串,合集/笔记 id 是 hex)。
+    # ⚠️ activity_id 会让平台把该活动的话题**追加**进正文(注入的话题名与活动名可能不同)。
+    collection_id: Mapped[str | None] = mapped_column(default=None)
+    quoted_note_id: Mapped[str | None] = mapped_column(default=None)
+    activity_id: Mapped[str | None] = mapped_column(default=None)
     # 创建该任务的 operator id
     created_by: Mapped[int | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -268,8 +268,15 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
         # 同进程此刻绝无运行中的事件循环:publish 批全程 sync,browser job 的 asyncio.run
         # 严格排在所有 publish job 之后(见 main()),故 asyncio.run 安全。
         image_paths = asyncio.run(dewatermark_all(image_paths))
+        # 三组件(值全空 = 不设置,发布链路跳过组件那一步)。job 是 SELECT * 出来的整行,
+        # 没跑迁移的库里没有这三列 → .get 兜底成 None,与"不设置"同义。
+        components = {
+            field: job.get(field)
+            for field in ("collection_id", "quoted_note_id", "activity_id")
+        }
         return sync_client.publish_once(
-            account_id, cookies, job["title"], job["content"], image_paths, topics
+            account_id, cookies, job["title"], job["content"], image_paths, topics,
+            components,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -356,6 +363,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_visibility
 
         return lambda account_id, payload: note_visibility.execute(account_id, payload)
+    if kind == "note_components":
+        from app.services import note_components
+
+        return lambda account_id, payload: note_components.execute(account_id, payload)
     if kind == "note_ledger_sync":
         from app.services import note_ledger
 

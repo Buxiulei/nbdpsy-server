@@ -140,12 +140,38 @@ def _resolve_selector(page, candidates: List[str]) -> Optional[str]:
     return None
 
 
-def _open_note_by_title(
-    page, human: SyncHumanActions, publisher_user_id: str, title: str
-) -> str:
-    """拟人导航发布者主页 → 按标题匹配笔记卡 → 点进详情;返回详情页 URL。
+def _card_matches_note_id(card, note_id: str) -> bool:
+    """卡片的任一链接 href 里是否含该 note_id(主页卡片的封面链接带笔记 id)。
 
-    匹配不到标题即抛 ``MatrixInteractError``(绝不退而求其次点第一篇)。
+    读 href 用 ``get_attribute`` 直接读 DOM,不经 ``page.evaluate`` —— 与本模块"只读取证"
+    的口径一致,连读都尽量不进 JS。
+    """
+    if not note_id:
+        return False
+    try:
+        for link in card.query_selector_all("a"):
+            href = link.get_attribute("href") or ""
+            if note_id in href:
+                return True
+    except Exception:  # noqa: BLE001 — 单张卡读失败当不命中
+        return False
+    return False
+
+
+def _open_note_by_title(
+    page,
+    human: SyncHumanActions,
+    publisher_user_id: str,
+    title: str,
+    note_id: Optional[str] = None,
+) -> str:
+    """拟人导航发布者主页 → **优先按 note_id**、否则按标题匹配笔记卡 → 点进详情;返回 URL。
+
+    ``note_id`` 优先(2026-08-01):主页卡片的链接 href 里带笔记 id,是稳定主键;而标题
+    会变(实测平台上「粤语咨询师-黄安麟…」在台账里记的是「心理咨询师-…」)。给了 note_id
+    但页面上没有对应卡片时**回退标题匹配**(可能是没滚到 / 卡片结构变了),不直接判失败。
+
+    两种方式都匹配不到即抛 ``MatrixInteractError``(绝不退而求其次点第一篇)。
     """
     url = _PROFILE_URL.format(user_id=publisher_user_id)
     human.navigate(url)
@@ -157,18 +183,27 @@ def _open_note_by_title(
         )
     human.wait(1.2, 2.8, context="主页浏览")
 
-    hit = None
-    for card in page.query_selector_all(_NOTE_CARD):
-        try:
-            text = card.inner_text()
-        except Exception:
-            continue
-        if _title_matches(text, title):
-            hit = card
-            break
+    cards = page.query_selector_all(_NOTE_CARD)
+    hit = next((c for c in cards if _card_matches_note_id(c, note_id or "")), None)
+    if hit is not None:
+        logger.info(f"[matrix_interact] 按 note_id={note_id} 命中笔记卡")
+    else:
+        if note_id:
+            logger.warning(
+                f"[matrix_interact] 主页 {len(cards)} 张卡里没有 note_id={note_id} 的链接,"
+                f"回退按标题「{title}」匹配"
+            )
+        for card in cards:
+            try:
+                text = card.inner_text()
+            except Exception:
+                continue
+            if _title_matches(text, title):
+                hit = card
+                break
     if hit is None:
         raise MatrixInteractError(
-            f"note_not_found: 发布者主页未找到标题「{title}」的笔记卡"
+            f"note_not_found: 发布者主页未找到 note_id={note_id!r} / 标题「{title}」的笔记卡"
         )
 
     human.scroll_to_element(hit)
@@ -382,6 +417,7 @@ def comment_on_note(
     publisher_user_id: str,
     title: str,
     comment_text: str,
+    note_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """对发布者某篇笔记发一条评论(独立能力,不含点赞收藏)。
 
@@ -392,8 +428,9 @@ def comment_on_note(
         page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
         account_id: 评论方账号 id(日志用)。
         publisher_user_id: 发布者的小红书 user_id(主页路径定位用)。
-        title: 目标笔记标题(标题匹配,匹配不到即放弃)。
+        title: 目标笔记标题(``note_id`` 给不出时的兜底匹配依据,匹配不到即放弃)。
         comment_text: 评论文案,**必填**(空文案在 ``_do_comment`` 里记 error)。
+        note_id: 目标笔记的平台 id,**定位优先用它**(主页卡片链接里带 id,比标题稳)。
 
     Returns:
         成功 ``{"note_url": str, "commented": True}``;评论未发出时带 ``"error"`` 键
@@ -403,7 +440,7 @@ def comment_on_note(
         MatrixInteractError: 笔记定位/打开失败(此时没评论出去)。
     """
     human = SyncHumanActions(page)
-    note_url = _open_note_by_title(page, human, publisher_user_id, title)
+    note_url = _open_note_by_title(page, human, publisher_user_id, title, note_id)
     _browse_note(human)
 
     try:
