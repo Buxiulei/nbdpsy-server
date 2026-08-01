@@ -352,7 +352,9 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
         "app.imagegen.postprocess.dewatermark", fake_dewatermark, raising=True
     )
 
-    def fake_publish_once(acc_id, cookies, title, content, image_paths, topics):
+    def fake_publish_once(
+        acc_id, cookies, title, content, image_paths, topics, components=None
+    ):
         captured["args"] = (acc_id, cookies, title, content, image_paths, topics)
         return PublishResult(success=True, note_id="nid", note_url="https://xhs/1")
 

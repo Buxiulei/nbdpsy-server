@@ -9,8 +9,10 @@
 - ``execute()`` 为契约执行函数(account_worker 子进程消费):持号锁串行 → 浏览器闸 →
   线程内跑同步评论,**不碰 browser_jobs 台账**(claim/finish 由调用方);任何异常收敛成
   ``{"error": reason}``,**绝不抛出**。
-- payload:``{"publisher_user_id","title","text"}``,三者皆必填。``publisher_user_id``
-  用于进发布者主页,``title`` 精确匹配定位笔记(与矩阵互动同一套定位),``text`` 是评论文案。
+- payload:``{"publisher_user_id","title","text","note_id"?}``,前三者必填。
+  ``publisher_user_id`` 用于进发布者主页;定位**优先 note_id**(主页卡片链接里带笔记 id,
+  比标题稳——台账 title 会过期),给不出或页面上找不到才回退 ``title`` 匹配;
+  ``text`` 是评论文案。
 
 ``note_comment`` **非幂等**:重复执行会**再发一条一模一样的评论**(不像点赞那样是开关,
 评论是追加)。故不在 ``browser_jobs_repo._IDEMPOTENT_KINDS`` 里——僵死任务置 error +
@@ -31,7 +33,11 @@ from app.services.cookie_check import load_account_cookies
 
 
 def start_comment(
-    account_id: int, publisher_user_id: str, title: str, text: str
+    account_id: int,
+    publisher_user_id: str,
+    title: str,
+    text: str,
+    note_id: str | None = None,
 ) -> str:
     """REST 触发一次单篇评论;登记 browser_jobs 台账,返回轮询 id。
 
@@ -41,6 +47,7 @@ def start_comment(
         "publisher_user_id": publisher_user_id,
         "title": title,
         "text": text,
+        "note_id": note_id,
     }
     comment_id = browser_jobs_repo.enqueue_from_request(
         "note_comment", payload, account_id=account_id
@@ -59,6 +66,7 @@ async def execute(account_id: int, payload: dict) -> dict:
     publisher_user_id = (payload.get("publisher_user_id") or "").strip()
     title = (payload.get("title") or "").strip()
     text = (payload.get("text") or "").strip()
+    note_id = (payload.get("note_id") or "").strip()
     if not publisher_user_id or not title:
         return {"error": "payload 缺 publisher_user_id / title,无法定位目标笔记"}
     if not text:
@@ -73,7 +81,8 @@ async def execute(account_id: int, payload: dict) -> dict:
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队。
             async with browser_slot():
                 return await asyncio.to_thread(
-                    _comment_sync, account_id, cookies, publisher_user_id, title, text
+                    _comment_sync,
+                    account_id, cookies, publisher_user_id, title, text, note_id,
                 )
     except MatrixInteractError as exc:
         # 定位类语义失败(笔记没找到 / 详情没打开):记 error,不重跑
@@ -92,6 +101,7 @@ def _comment_sync(
     publisher_user_id: str,
     title: str,
     text: str,
+    note_id: str = "",
 ) -> dict:
     """同一线程内:建 SyncClient → start → 评论 → stop 收尾(finally 防泄漏 camoufox)。
 
@@ -103,6 +113,8 @@ def _comment_sync(
         start = client.start()
         if not start.get("success"):
             raise MatrixInteractError(f"browser_start_failed: {start.get('error')}")
-        return comment_on_note(client.page, account_id, publisher_user_id, title, text)
+        return comment_on_note(
+            client.page, account_id, publisher_user_id, title, text, note_id
+        )
     finally:
         client.stop()

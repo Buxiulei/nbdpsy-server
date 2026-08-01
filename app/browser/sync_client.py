@@ -35,6 +35,7 @@ from app.browser.login_detector import (
     classify_wall_text,
     is_wall_url,
 )
+from app.browser.note_components import ComponentResponses, apply_components
 from app.browser.profile_guard import (
     clean_locks,
     delete_cookies_db,
@@ -42,6 +43,7 @@ from app.browser.profile_guard import (
     profile_dir,
     sanitize_launch_options,
 )
+from app.browser.sync_human_actions import SyncHumanActions
 
 def _build_ark_blackhole_pac() -> str:
     """构造把 ``ark.xiaohongshu.com`` 指向死代理、其余全 DIRECT 的 PAC data URL。
@@ -582,17 +584,26 @@ class SyncClient:
         content: str,
         image_paths: List[str],
         topics: Optional[List[str]] = None,
+        components: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """走 step1-6 录入内容 + step7 真发布。
+        """走 step1-6 录入内容 + 三组件(可选)+ step7 真发布。
 
         step1 会打开新窗口并把内部 page 引用切到创作中心;这里发布结束后把
         ``self.page`` 同步到 atomic 的最终 page,供 stop() 正确收尾。
+
+        ``components``:``{"collection_id","quoted_note_id","activity_id"}``,值全空即
+        完全跳过组件那一步(行为与本功能上线前逐字节一致)。设置在 step6 之后、step7 之前
+        (设计 3.1),失败**只告警不阻断发布** —— 图都传完了,为一个辅助组件把整篇笔记
+        废掉不划算;逐项结果记在返回值的 ``components`` 里。
 
         (历史:曾有"只存草稿"模式规避点发布时刻的人机检测——已删除:网页版草稿只存在
         服务器浏览器本地,用户手机/其它设备看不到,毫无交付价值;且拟人化链路多轮真发
         验证后该保险已无必要。)
         """
         atomic = XHSPublishAtomicTasks(self.page)
+        # 三组件要用到编辑器加载时页面自己发的活动列表响应,故监听必须在 step1 之后、
+        # 编辑器加载之前就挂上(响应过期了就读不回来了)。不设组件时一个监听都不挂。
+        responses = None
         try:
             logger.info(f"[SyncClient] 开始发布: {title} | 图片 {len(image_paths or [])} 张 | 话题 {len(topics or [])}")
 
@@ -605,6 +616,9 @@ class SyncClient:
                     "error": r.get("error"),
                     "need_manual_login": r.get("need_manual_login", False),
                 }
+            if components and any(components.values()):
+                responses = ComponentResponses()
+                responses.attach(self.page)
 
             # step2 上传图片
             if image_paths:
@@ -644,6 +658,9 @@ class SyncClient:
                 if not r6.get("success"):
                     logger.warning(f"步骤6警告: {r6.get('error')}")
 
+            # step6.5 三组件(设计 3.1:step6 之后、step7 之前);失败仅告警,不阻断发布
+            component_result = self._apply_components(atomic, responses, components)
+
             # step7 点击发布并等待
             r = atomic.step7_click_publish_and_wait(max_wait=30)
             self.page = atomic.page
@@ -661,11 +678,47 @@ class SyncClient:
                 "success": True,
                 "note_url": r.get("note_url", "") or "",
                 "note_id": r.get("note_id", "") or "",
+                "components": component_result,
             }
 
         except Exception as e:
             logger.error(f"[SyncClient] 发布异常: {e}")
             return {"success": False, "error": f"发布笔记失败: {e}"}
+        finally:
+            if responses is not None:
+                responses.detach()
+
+    def _apply_components(self, atomic, responses, components) -> Dict[str, Any]:
+        """发布链路里设置三组件(step6 与 step7 之间);**失败只告警不阻断发布**。
+
+        与编辑已发布笔记的区别:这里没有"提交后重进页面回读"那一步 —— 新笔记要等发布拿到
+        note_id 才能回读,而那时窗口已经关了。故这里的 done 只是**编辑器内**回读确认
+        (合集区显示了名字 / 引用区出现了标题 / 活动按钮翻转成「取消关联」)。它足以逮住
+        实测的静默失效(活动首次点击不生效),但逮不住服务端静默丢弃(私密笔记的合集绑定)
+        —— 后者要事后调 POST /api/accounts/{id}/note-components 或人工核对。
+        """
+        if responses is None or not components or not any(components.values()):
+            return {}
+        try:
+            # 用 atomic.page 而非 self.page:窗口引用以 atomic 为准(step1 会换窗)
+            page = atomic.page
+            human = SyncHumanActions(page)
+            outcomes = apply_components(
+                page, human, responses,
+                collection_id=components.get("collection_id"),
+                quoted_note_id=components.get("quoted_note_id"),
+                activity_id=components.get("activity_id"),
+            )
+        except Exception as exc:  # noqa: BLE001 — 组件失败绝不阻断发布
+            logger.warning(f"[SyncClient] 三组件设置异常(不阻断发布): {exc}")
+            return {"error": f"components_exception: {exc}"}
+        failed = [k for k, v in outcomes.items() if v["status"] == "error"]
+        if failed:
+            logger.warning(
+                f"[SyncClient] 三组件部分未设上(不阻断发布): "
+                f"{[(k, outcomes[k].get('reason')) for k in failed]}"
+            )
+        return outcomes
 
     def stop(self) -> None:
         """关闭浏览器(page → context → playwright,逐层容错)。"""
@@ -699,10 +752,12 @@ def publish_once(
     content: str,
     image_paths: List[str],
     topics: Optional[List[str]] = None,
+    components: Optional[Dict[str, Any]] = None,
 ) -> PublishResult:
-    """一次性:建 client → start → 录入内容 → step7 真发布 → stop。
+    """一次性:建 client → start → 录入内容 → 三组件(可选)→ step7 真发布 → stop。
 
     供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。任何阶段失败都落到 ``PublishResult``。
+    ``components`` 为 None / 全空时完全跳过组件那一步(默认值,行为不变)。
     """
     client = SyncClient(account_id, cookies)
     try:
@@ -710,7 +765,7 @@ def publish_once(
         if not start.get("success"):
             return PublishResult(success=False, error=start.get("error"))
 
-        result = client.publish_note(title, content, image_paths, topics)
+        result = client.publish_note(title, content, image_paths, topics, components)
         return PublishResult(
             success=bool(result.get("success")),
             note_id=result.get("note_id", "") or "",

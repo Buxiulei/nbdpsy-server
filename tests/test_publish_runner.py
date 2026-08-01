@@ -71,7 +71,9 @@ async def test_runner_materializes_images_and_cleans_workdir(
     monkeypatch.setattr(scheduler_mod, "materialize_images", fake_materialize)
     _patch_dewatermark(monkeypatch)
 
-    def fake_publish_once(acc_id, cookies, title, content, image_paths, topics):
+    def fake_publish_once(
+        acc_id, cookies, title, content, image_paths, topics, components=None
+    ):
         captured["image_paths"] = image_paths
         # 发布时 workdir 及物料文件仍在
         captured["exists_during"] = captured["workdir"].exists()

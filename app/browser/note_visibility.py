@@ -2,8 +2,9 @@
 
 设计 docs/design/2026-07-31-note-visibility-design.md 第 2.3 / 3.3 节(真号受控实验结论)。
 
-按**笔记标题**在「笔记管理」页把一篇笔记切到目标可见性档位:
-    进笔记管理页 → 滚动加载全部卡片 → 按标题精确定位(命中必须恰好 1 张)→
+在「笔记管理」页把一篇笔记切到目标可见性档位:
+    **按 note_id 从 posted 接口翻译出平台当前标题** → 滚动加载全部卡片 →
+    按该标题精确定位(命中必须恰好 1 张)→
     拟人悬停显出操作图标 → 断言图标结构 → 点①权限设置 → **事后校验弹窗** →
     只读回读当前档位(已是目标即取消返回 skipped)→ 展开下拉选目标档 → 确定 →
     **重抓 posted 接口回读 permission_code 确认真的变了**。
@@ -24,8 +25,14 @@
 - **点了不算成功**:确定之后必须重抓一次 posted 接口,``permission_code`` 变成目标值
   才算 ``done``,否则抛错。
 
-定位限制(如实记录,可接受的 v1 限制):靠标题定位,故**标题为空、或在该号下重复的
-笔记无法定位**,一律 ``note_not_locatable`` —— 绝不猜。
+定位口径(2026-08-01 改为 note_id 优先):列表 DOM 里不暴露 note_id(实测含 24 位 hex 的
+元素 0 个),没法直接按 id 点卡片,但可以先抓 posted 接口把 **note_id → 平台当前标题**
+翻译出来再按标题匹配 —— 这么绕一道是因为**台账 title 会过期**(实测平台显示
+「粤语咨询师-黄安麟…」而台账里是「心理咨询师-…」,按台账标题定位必然 note_not_locatable)。
+调用方给的 title 降级为兜底(平台列表里查不到该 note_id 时才用)。
+
+仍然存在的限制:最终还是按标题精确匹配卡片,故**平台标题为空、或在该号下重复的笔记
+无法定位**,一律 ``note_not_locatable`` —— 绝不猜。
 """
 
 import time
@@ -35,6 +42,7 @@ from loguru import logger
 
 from app.browser.creator_export import _goto_creator
 from app.browser.creator_note_list import (
+    CreatorNoteListError,
     fetch_posted_notes,
     permission_code_of,
     permission_msg_of,
@@ -185,6 +193,57 @@ def _title_hits(card, title: str) -> bool:
         return False
     target = _norm(title)
     return any(_norm(line) == target for line in (text or "").splitlines())
+
+
+def _platform_title(notes: List[Dict[str, Any]], note_id: str) -> Optional[str]:
+    """从 posted 列表里取该 note_id 的**平台当前标题**;没有该笔记 / 标题为空 → None。"""
+    raw = next(
+        (n for n in notes if ((n or {}).get("id") or "").strip() == note_id), None
+    )
+    if raw is None:
+        return None
+    return ((raw.get("display_title") or "").strip()) or None
+
+
+def _resolve_locating_title(
+    page, account_id: int, note_id: str, title: str
+) -> str:
+    """定位用的标题:**优先按 note_id 从平台现拉**,拿不到才回退调用方给的 title。
+
+    设计 2026-08-01 三组件设计 3.2 的实测:平台上「粤语咨询师-黄安麟…」在台账里记的是
+    「心理咨询师-…」——**台账 title 会过期**,拿它去精确匹配卡片会 note_not_locatable。
+    note_id 才是稳定主键,故先抓一次 posted 列表把 id 翻译成平台此刻的标题。
+
+    顺带:``fetch_posted_notes`` 自己就会打开笔记管理页并滚到底加载全部卡片,所以这一步
+    **不额外增加**页面开销,它同时替代了原来的 ``_open_note_manager``;抓取失败(或该号
+    一篇都没有)才退回单独开页 + 用调用方的 title。
+    """
+    notes: List[Dict[str, Any]] = []
+    try:
+        notes = fetch_posted_notes(page, account_id)
+    except CreatorNoteListError as exc:
+        logger.warning(
+            f"[note_visibility] 账号{account_id}: 拉平台列表失败({exc.reason}),"
+            f"回退用调用方给的标题定位"
+        )
+    if not notes:
+        _open_note_manager(page, account_id)
+    platform_title = _platform_title(notes, note_id) if notes else None
+    if platform_title:
+        if title and _norm(platform_title) != _norm(title):
+            logger.warning(
+                f"[note_visibility] note_id={note_id} 的平台标题「{platform_title}」与"
+                f"调用方给的「{title}」不一致 —— 按**平台标题**定位(台账 title 会过期)"
+            )
+        return platform_title
+    if not title:
+        raise NoteVisibilityError(
+            f"note_not_locatable: 平台列表里没有 note_id={note_id},且调用方没给 title 兜底"
+        )
+    logger.info(
+        f"[note_visibility] 平台列表里没找到 note_id={note_id},回退用调用方标题定位"
+    )
+    return title
 
 
 def _locate_card(page, human: SyncHumanActions, title: str):
@@ -391,8 +450,10 @@ def set_note_visibility(
     Args:
         page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
         account_id: 账号 id(日志用)。
-        note_id: 笔记 id(**回读校验用**,不是定位用——列表 DOM 里不暴露 note_id)。
-        title: 笔记标题(定位用,精确匹配且必须唯一)。
+        note_id: 笔记 id(**定位主键 + 回读校验**)。列表 DOM 里不暴露 note_id,故先用它
+            从 posted 接口翻译出平台**当前**标题,再按那个标题精确匹配卡片。
+        title: 笔记标题,**兜底用**(平台列表里查不到该 note_id 时才用)。台账 title 会
+            过期(实测平台显示「粤语咨询师-…」而台账是「心理咨询师-…」),故不作首选。
         target_privacy: 目标档位,0=公开可见 / 1=仅自己可见(本期只做这两档)。
 
     Returns:
@@ -405,24 +466,25 @@ def set_note_visibility(
     """
     target_label = label_of(target_privacy)
     human = SyncHumanActions(page)
-    _open_note_manager(page, account_id)
+    # 定位优先 note_id:先把 id 翻译成平台此刻的标题(这一步顺带打开笔记管理页)
+    locate_title = _resolve_locating_title(page, account_id, note_id, title)
     human.wait(1.0, 2.0, context="笔记管理页浏览")
 
-    card = _locate_card(page, human, title)
-    btns = _action_buttons(page, human, card, title)
+    card = _locate_card(page, human, locate_title)
+    btns = _action_buttons(page, human, card, locate_title)
     _open_permission_modal(page, human, btns)
 
     current = _current_label(page)
     if current == target_label:
         logger.info(
-            f"[note_visibility] 账号{account_id} 笔记「{title[:15]}」本就是"
+            f"[note_visibility] 账号{account_id} 笔记「{locate_title[:15]}」本就是"
             f"「{target_label}」,点取消不提交"
         )
         _dismiss(page, human, "已是目标档位")
         return {"status": "skipped", "permission_code": target_privacy}
 
     logger.info(
-        f"[note_visibility] 账号{account_id} 笔记「{title[:15]}」: "
+        f"[note_visibility] 账号{account_id} 笔记「{locate_title[:15]}」: "
         f"{current!r} → 「{target_label}」"
     )
     _select_and_confirm(page, human, target_label)

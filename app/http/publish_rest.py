@@ -114,12 +114,20 @@ MANIFEST_ENTRIES = [
             "topics": "body,list[str]|None(默认[];去重后截断 ≤10,静默不报错)",
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
+            "collection_id": "body,str|None(加入合集,取自 GET /api/accounts/{id}/collections)",
+            "quoted_note_id": "body,str|None(引用本号的哪篇笔记)",
+            "activity_id": "body,str|None(关联活动,取自 GET /api/accounts/{id}/activities)",
         },
         "returns": "{job_id, status:'pending'}",
         "errors": "400=images 为空或超 18 张;403=无该账号 access",
         "notes": "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
-                 "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。",
+                 "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。"
+                 "三组件(collection_id / quoted_note_id / activity_id)在发布链路里于话题之后、"
+                 "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇),"
+                 "且本端点**不回传**组件是否设上——要确认得事后看笔记或调 "
+                 "POST /api/accounts/{id}/note-components 补设。"
+                 "⚠️ activity_id 会让平台把该活动的话题**追加**进正文(话题名可能与活动名不同)。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs/{job_id}",
@@ -187,6 +195,11 @@ class PublishNoteRequest(BaseModel):
     images: list
     topics: list[str] = []
     schedule_time: str | None = None
+    # 笔记三组件(全可选,字段名与 POST /api/accounts/{id}/note-components 一致):
+    # 在发布链路的 step6 之后、step7 之前设置,失败只告警不阻断发布。
+    collection_id: str | None = None
+    quoted_note_id: str | None = None
+    activity_id: str | None = None
 
 
 @router.post("/api/publish-jobs", status_code=202)
@@ -229,6 +242,9 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             schedule_time=scheduled_at,
             status="pending",
             created_by=operator.id,
+            collection_id=payload.collection_id,
+            quoted_note_id=payload.quoted_note_id,
+            activity_id=payload.activity_id,
         )
         session.add(job)
         await session.commit()

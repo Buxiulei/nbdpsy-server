@@ -37,7 +37,8 @@ MANIFEST_ENTRIES = [
         "params": {
             "account_id": "path,int(**发评论的账号**,不是被评论笔记的作者)",
             "publisher_user_id": "body,str(目标笔记发布者的小红书 user_id,进其主页用)",
-            "title": "body,str(目标笔记标题,精确匹配定位)",
+            "title": "body,str(目标笔记标题,note_id 给不出时的兜底定位依据)",
+            "note_id": "body,str|None(目标笔记平台 id,**定位优先用它**,比标题稳)",
             "text": f"body,str(评论文案,**必填**,1-{_MAX_TEXT_LEN} 字)",
         },
         "returns": '{comment_id, status:"queued"}',
@@ -50,7 +51,8 @@ MANIFEST_ENTRIES = [
                  "⚠️ 三条要点:"
                  "① **非幂等,失败不自动重跑**——评论是追加不是开关,重复调会发出**重复评论**;"
                  "看到 error/unknown 必须先去那篇笔记下核对评论发出去没有,**不要盲目重试**;"
-                 "② **靠标题精确匹配定位**,标题对不上就 error(评论没发出去);"
+                 "② **定位优先 note_id**(主页卡片链接里带笔记 id),没给 note_id 或主页上"
+                 "找不到它时回退按标题匹配;两种都对不上就 error(评论没发出去);"
                  "③ account_id 是发评论的号(需对它有授权),publisher_user_id 是被评论笔记的"
                  "作者,两者不要传反;作者不必是本系统的账号。"
                  "同号浏览器操作(发布/cookie 检测/导出/切可见性/互动)共享 per-account 锁串行。",
@@ -86,6 +88,10 @@ class NoteCommentRequest(BaseModel):
     text: str = Field(
         min_length=1, max_length=_MAX_TEXT_LEN, description="评论文案(必填)"
     )
+    note_id: str | None = Field(
+        default=None, max_length=64,
+        description="目标笔记平台 id(定位优先用它;台账 title 会过期,标题只作兜底)",
+    )
 
 
 @router.post("/api/accounts/{account_id}/note-comments", status_code=202)
@@ -106,7 +112,8 @@ async def start_note_comment_endpoint(
         if await session.get(XhsAccount, account_id) is None:
             raise NotFoundError(f"账号 {account_id} 不存在")
     comment_id = note_comment.start_comment(
-        account_id, payload.publisher_user_id, payload.title, payload.text
+        account_id, payload.publisher_user_id, payload.title, payload.text,
+        payload.note_id,
     )
     return {"comment_id": comment_id, "status": "queued"}
 

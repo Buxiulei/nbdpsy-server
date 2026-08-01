@@ -373,10 +373,13 @@ async def test_start_visibility_change_202_and_payload(tmp_path, monkeypatch):
 
 
 async def test_visibility_request_validation(tmp_path, monkeypatch):
-    """target_privacy 只接受 0/1:2 / "public" / true 一律 422;title 空也 422。
+    """target_privacy 只接受 0/1:2 / "public" / true 一律 422;title 省略/为空则放行。
 
     另外三档(仅互关好友/部分人可见/部分人不可见)接口参数完全未验证,必须在入口就拒,
     不能排队一两分钟后才在浏览器层失败。
+
+    title 2026-08-01 起**不再必填**:定位改成优先 note_id(浏览器层先拿 id 去平台列表里
+    翻译出当前标题),台账 title 只是兜底 —— 而台账 title 会过期,拿它当必填反而误导。
     """
     _api_role(monkeypatch)
     async with rest_client(tmp_path, monkeypatch) as c:
@@ -397,9 +400,17 @@ async def test_visibility_request_validation(tmp_path, monkeypatch):
             )
             assert r.status_code == 202, r.text
 
-        # 标题是唯一定位手段,空标题定位不了,入口就拒
+        # title 省略 / 为空都放行:定位主键是 note_id,标题只是兜底
+        for body in (
+            {"note_id": "vid", "target_privacy": 1},
+            {"note_id": "vid", "title": "", "target_privacy": 1},
+        ):
+            r = await c.post(url, json=body, headers=bearer(ADMIN_KEY))
+            assert r.status_code == 202, r.text
+
+        # note_id 仍是必填(没它既定位不了也回读不了)
         r = await c.post(
-            url, json={"note_id": "vid", "title": "", "target_privacy": 1},
+            url, json={"note_id": "", "title": "标题", "target_privacy": 1},
             headers=bearer(ADMIN_KEY),
         )
         assert r.status_code == 422

@@ -105,6 +105,12 @@ def make_publish_runner(
                     content = job.content
                     raw_images = json.loads(job.images_json or "[]")
                     topics = json.loads(job.topics_json or "[]")
+                    # 三组件(全 None = 不设置,跳过组件那一步)
+                    components = {
+                        "collection_id": job.collection_id,
+                        "quoted_note_id": job.quoted_note_id,
+                        "activity_id": job.activity_id,
+                    }
                     cookies = _decrypt_account_cookies(account)
 
                 # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
@@ -127,6 +133,7 @@ def make_publish_runner(
                         content,
                         image_paths,
                         topics,
+                        components,
                     )
 
                 # 2d. 落状态机(成功→published;失败→重试排期或 failed)
