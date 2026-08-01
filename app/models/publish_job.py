@@ -47,6 +47,10 @@ class PublishJob(Base):
     collection_id: Mapped[str | None] = mapped_column(default=None)
     quoted_note_id: Mapped[str | None] = mapped_column(default=None)
     activity_id: Mapped[str | None] = mapped_column(default=None)
+    # 这篇笔记推介哪位咨询师(姓名)。建 job 时据它推导 quoted_note_id
+    # (见 app/services/counselor_quote.py),推不出来就留空绝不猜;发布当场随
+    # generated_at / operator_id 一起带进 published_notes 台账,便于事后按咨询师归集。
+    related_counselor: Mapped[str | None] = mapped_column(default=None)
     # 创建该任务的 operator id
     created_by: Mapped[int | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

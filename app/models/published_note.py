@@ -75,6 +75,9 @@ class PublishedNote(Base):
     generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 生成用户:取 publish_jobs.created_by(语义是"谁的 apikey 提交了发布")
     operator_id: Mapped[int | None] = mapped_column(nullable=True)
+    # 这篇笔记推介哪位咨询师(姓名):取 publish_jobs.related_counselor,T0 当场带过来。
+    # 非本系统发布的 orphan 行与存量行为 NULL —— NULL 是**未知**,不代表"没推介谁"。
+    related_counselor: Mapped[str | None] = mapped_column(nullable=True)
 
     source_publish_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("publish_jobs.id"), nullable=True

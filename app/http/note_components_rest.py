@@ -26,7 +26,7 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.http.job_polling import base_view, load_job
 from app.models.xhs_account import XhsAccount
-from app.services import note_components
+from app.services import counselor_quote, note_components
 from app.services.quota import assert_operator_quota
 
 router = APIRouter()
@@ -82,12 +82,16 @@ MANIFEST_ENTRIES = [
             "account_id": "path,int",
             "note_id": "body,str(要编辑的笔记平台 id,**必填**,深链定位)",
             "collection_id": "body,str|None(加入哪个合集,取自 GET /collections)",
-            "quoted_note_id": "body,str|None(引用哪篇笔记,只能引用**本号自己**的笔记)",
+            "quoted_note_id": "body,str|None(引用哪篇笔记,只能引用**本号自己**的笔记;"
+                              "**优先级高于 related_counselor**)",
             "activity_id": "body,str|None(关联哪个活动,取自 GET /activities)",
+            "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
+                                  "是 quoted_note_id 的替代写法,由系统推导引用哪篇)",
         },
         "returns": '{job_id, status:"queued"}',
         "errors": "403=无该号授权;404=账号不存在;"
-                  "422=note_id 为空,或三个组件 id 一个都没给(那样这次编辑什么都不会改);"
+                  "422=note_id 为空,或四个字段一个都没给,或只给了 related_counselor 但"
+                  "推导不出任何公开推介笔记(以上三种这次编辑都什么都不会改);"
                   "429=运营者未完成任务配额已满",
         "notes": "异步契约:起后台浏览器深链进笔记更新页 → 设置组件 → 点发布 → **重进页面"
                  "逐项回读**(约 2-4 分钟);拿 job_id 后每 5-10s 轮询 "
@@ -102,7 +106,14 @@ MANIFEST_ENTRIES = [
                  "都不点),提交后若发现被改会自动改回并在结果里告警(permission_* 字段);"
                  "④ **部分生效是常态**——私密笔记的合集绑定会被平台静默丢弃(照返成功),"
                  "所以 done 只在全部回读确认后才给,别拿 202 或 'no error' 当成功凭据。"
-                 "同号浏览器操作共享 per-account 锁串行。",
+                 "**引用哪篇笔记可以不用自己算**:不传 quoted_note_id 时按四条规则自动推导"
+                 "(标题从台账现查):① 这篇标题形如「X咨询师-姓名，…」= 它本身就是咨询师推介"
+                 "笔记 → 引用「小助手联系方式」那篇(**这条最先判**,所以推介笔记不会引用自己);"
+                 "② 传了 related_counselor → 引用该咨询师的公开推介笔记;③ 标题里提到某位已知"
+                 "咨询师 → 同上;④ 都不满足 → 不引用。**只引用 permission_code=0 的公开笔记,"
+                 "推不出来一律留空绝不猜**;同一咨询师在两个号各有一篇时优先选**异号**那篇。"
+                 "⚠️ 由此:对一篇咨询师推介笔记只设 collection_id,也会顺带给它加上对小助手"
+                 "笔记的引用——这是业务规则要的,不想要就显式传 quoted_note_id。",
     },
     {
         "method": "GET", "path": "/api/note-components/{job_id}",
@@ -212,17 +223,33 @@ class NoteComponentsRequest(BaseModel):
     collection_id: str | None = Field(default=None, max_length=64)
     quoted_note_id: str | None = Field(default=None, max_length=64)
     activity_id: str | None = Field(default=None, max_length=64)
+    related_counselor: str | None = Field(
+        default=None, max_length=32,
+        description="这篇笔记推介哪位咨询师(姓名),作为 quoted_note_id 的替代;"
+                    "两者都给时以显式 quoted_note_id 为准",
+    )
 
     @model_validator(mode="after")
     def _require_one_component(self):
-        """一个组件都不给 → 422。
+        """一个组件都不给 → 422(``related_counselor`` 也算给了,它会推导出引用)。
 
         这次编辑什么都不会改,却要真提交一次**全量覆盖**的发布 —— 纯风险零收益,
         在入口就拦掉,别让它排队两分钟后才在浏览器层失败。
+
+        注意这里只做"意图上给没给",``related_counselor`` 推不出笔记的情况在端点里
+        推导完再拦一次(见 ``start_note_components_endpoint``)。
         """
-        if not any((self.collection_id, self.quoted_note_id, self.activity_id)):
+        if not any(
+            (
+                self.collection_id,
+                self.quoted_note_id,
+                self.activity_id,
+                self.related_counselor,
+            )
+        ):
             raise ValueError(
-                "collection_id / quoted_note_id / activity_id 至少要给一个"
+                "collection_id / quoted_note_id / activity_id / related_counselor "
+                "至少要给一个"
             )
         return self
 
@@ -239,12 +266,32 @@ async def start_note_components_endpoint(
         await assert_account_access(operator, account_id, session)
         if await session.get(XhsAccount, account_id) is None:
             raise NotFoundError(f"账号 {account_id} 不存在")
+        # 引用哪篇:显式 quoted_note_id 优先;没给才按 related_counselor + **台账里这篇的
+        # 标题**推导(规则见 app/services/counselor_quote.py),推不出来落 None 不引用。
+        quoted_note_id = payload.quoted_note_id or (
+            await counselor_quote.resolve_for_published_note(
+                session, account_id, payload.note_id, payload.related_counselor
+            )
+        )
+    # 推导完还是一个组件都没有 → 422。走到这里说明调用方只给了 related_counselor,而它
+    # 没能落到任何一篇公开笔记上(查不到就留空是硬纪律)。此时这次编辑什么都不会改,却要
+    # 真提交一次全量覆盖的发布,一样是纯风险零收益,和请求体校验那一关同样拦掉。
+    if not any((payload.collection_id, quoted_note_id, payload.activity_id)):
+        # 用 422 而不是裸 ValueError(→400):与请求体校验那一关同样的失败语义,
+        # 调用方不该因为"拦在哪一层"看到两种状态码。
+        raise HTTPException(
+            status_code=422,
+            detail=f"related_counselor={payload.related_counselor!r} 推导不出可引用的公开"
+                   f"推介笔记(台账里没有该咨询师的公开推介笔记),且没给其它组件 —— "
+                   f"这次编辑什么都不会改",
+        )
     job_id = note_components.start_components(
         account_id,
         payload.note_id,
         payload.collection_id,
-        payload.quoted_note_id,
+        quoted_note_id,
         payload.activity_id,
+        payload.related_counselor,
     )
     return {"job_id": job_id, "status": "queued"}
 

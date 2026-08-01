@@ -49,13 +49,20 @@ def start_components(
     collection_id: str | None,
     quoted_note_id: str | None,
     activity_id: str | None,
+    related_counselor: str | None = None,
 ) -> str:
-    """REST 触发一次三组件设置;登记 browser_jobs 台账,返回轮询 id。"""
+    """REST 触发一次三组件设置;登记 browser_jobs 台账,返回轮询 id。
+
+    ``quoted_note_id`` 到这里已经是**推导完的最终值**(REST 层按 counselor_quote 的规则
+    定下来);``related_counselor`` 只随 payload 存个由来,执行链路不读它 —— 这是次
+    非幂等的全量覆盖提交,事后查"当时为什么引了这篇"必须有据可查。
+    """
     payload = {
         "note_id": note_id,
         "collection_id": collection_id,
         "quoted_note_id": quoted_note_id,
         "activity_id": activity_id,
+        "related_counselor": related_counselor,
     }
     job_id = browser_jobs_repo.enqueue_from_request(
         "note_components", payload, account_id=account_id

@@ -417,14 +417,15 @@ def _add_published_job_sync(
     title: str = "标题",
     created_by: int | None = 7,
     created_at: datetime | None = None,
+    related_counselor: str | None = None,
 ) -> None:
     created = (created_at or datetime(2026, 7, 30, 8, 0, 0)).isoformat(sep=" ")
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "INSERT INTO publish_jobs (id, account_id, title, content, images_json,"
-            " topics_json, status, retries, created_by, created_at)"
-            " VALUES (?, ?, ?, '正文', '[]', '[]', 'published', 0, ?, ?)",
-            (job_id, account_id, title, created_by, created),
+            " topics_json, status, retries, created_by, created_at, related_counselor)"
+            " VALUES (?, ?, ?, '正文', '[]', '[]', 'published', 0, ?, ?, ?)",
+            (job_id, account_id, title, created_by, created, related_counselor),
         )
         conn.commit()
 
@@ -475,6 +476,22 @@ def test_t0_records_row_with_full_content_fields(ledger_db):
     assert row["note_id"] is None  # 必须是 NULL 不是空串(空串会撞联合唯一键)
     assert row["xsec_token"] is None and row["note_url"] is None
     assert row["platform_published_at"] is None and row["note_type"] is None
+
+
+def test_t0_carries_related_counselor_from_publish_job(ledger_db):
+    """T0 把 related_counselor 从发布任务带进台账(与 generated_at / operator_id 同批写)。"""
+    _add_published_job_sync(ledger_db, 78, 3, related_counselor="李宇")
+
+    assert svc.record_published_note(ledger_db, 78) is not None
+    assert _read_ledger_rows(ledger_db)[0]["related_counselor"] == "李宇"
+
+
+def test_t0_without_related_counselor_leaves_it_null(ledger_db):
+    """没填 related_counselor 的发布 → 台账留 NULL(NULL 是**未知**,不是"没推介谁")。"""
+    _add_published_job_sync(ledger_db, 79, 3)
+
+    assert svc.record_published_note(ledger_db, 79) is not None
+    assert _read_ledger_rows(ledger_db)[0]["related_counselor"] is None
 
 
 def test_t0_is_idempotent_per_publish_job(ledger_db):
