@@ -49,6 +49,7 @@ from app.models.content_archive import ContentArchive
 from app.models.publish_job import PublishJob
 from app.models.published_note import PublishedNote
 from app.services import browser_jobs_repo
+from app.services import note_purpose as note_purpose_module
 from app.services.cookie_check import load_account_cookies
 
 # 发布成功后延后多久跑 T1 同步(秒):笔记进创作中心列表有延迟,立刻拉大概率抓不到本篇。
@@ -84,8 +85,8 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
         with sqlite3.connect(db_path, timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             job = conn.execute(
-                "SELECT id, account_id, title, created_by, created_at, related_counselor"
-                " FROM publish_jobs WHERE id=?",
+                "SELECT id, account_id, title, created_by, created_at, related_counselor,"
+                " note_purpose FROM publish_jobs WHERE id=?",
                 (publish_job_id,),
             ).fetchone()
             if job is None:
@@ -103,13 +104,19 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
                 "SELECT id FROM content_archive WHERE source_publish_job_id=?",
                 (publish_job_id,),
             ).fetchone()
+            # 核心目的:调用方发布时声明了才写,并记 purpose_source='declared'
+            # ——人声明的比事后从正文推断的可信,agent 要能区分(设计 3.1)。没声明就两列
+            # 都留 NULL,交给回填链路去推断,**绝不在这里瞎猜一个**。
+            note_purpose = (job["note_purpose"] or "").strip() or None
+            purpose_source = note_purpose_module.SOURCE_DECLARED if note_purpose else None
             cur = conn.execute(
                 "INSERT INTO published_notes"
                 "(account_id,note_id,xsec_token,xsec_source,note_url,note_type,"
                 " platform_published_at,title,published_at,generated_at,operator_id,"
-                " related_counselor,source_publish_job_id,content_archive_id,sync_status,"
+                " related_counselor,note_purpose,purpose_source,"
+                " source_publish_job_id,content_archive_id,sync_status,"
                 " first_seen_at,last_synced_at,likes,collects,comments,shares,views)"
-                " VALUES (?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,'pending_id',"
+                " VALUES (?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,?,?,'pending_id',"
                 " ?,?,0,0,0,0,0)",
                 (
                     job["account_id"],
@@ -118,6 +125,8 @@ def record_published_note(db_path: str, publish_job_id: int) -> Optional[int]:
                     job["created_at"],
                     job["created_by"],
                     job["related_counselor"],
+                    note_purpose,
+                    purpose_source,
                     publish_job_id,
                     archive["id"] if archive is not None else None,
                     _fmt(now),
@@ -240,7 +249,11 @@ async def execute(account_id: int, payload: dict) -> dict:
         # 抓取成功才落库:用 get_session()(测试对 async_session monkeypatch 生效)。
         async with get_session() as session:
             stats = await sync_notes(session, account_id, notes, now)
-        return {"note_count": len(notes), **stats}
+        # 手工发布的笔记(orphan)本地连正文都没有:同步完登记一条核心目的回填任务,
+        # 由它按节流每轮补几篇(见 app/services/note_purpose.py 纪律 1)。**绝不抛错**
+        # ——登记失败不能把已经落好库的同步结果拖成 error。
+        backfill_id = await note_purpose_module.schedule_backfill_if_needed(account_id)
+        return {"note_count": len(notes), **stats, "purpose_backfill_id": backfill_id}
     except CreatorNoteListError as exc:
         logger.warning(f"笔记台账同步失败 account_id={account_id} reason={exc.reason}")
         return {"error": exc.reason}

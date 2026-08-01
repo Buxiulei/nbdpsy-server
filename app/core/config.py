@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     EGRESS_CHECK_INTERVAL: int = 21600
     SINGBOX_CONFIG_PATH: str = "/opt/hysteria-client/singbox-tun.json"
 
+    # ── 笔记核心目的回填(note_purpose)──
+    # **每轮回填最多开几次编辑页**。手工发布的存量笔记有几十上百篇,一次性全抓必被风控:
+    # 实测同一账号一小时内起 5 次会话,就会从"扫码验证"被打成"请求太频繁",两个账号因此
+    # 被弹墙(其中一个靠人工扫码才解开)。调大这个值等于直接加快踩墙速度,谨慎。
+    NOTE_PURPOSE_BACKFILL_LIMIT: int = 3
+
     # ── 草稿箱周清理(draft_clean_scheduler)──
     # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
     DRAFT_CLEAN_INTERVAL: int = 86400

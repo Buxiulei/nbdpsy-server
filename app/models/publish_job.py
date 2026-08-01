@@ -51,6 +51,10 @@ class PublishJob(Base):
     # (见 app/services/counselor_quote.py),推不出来就留空绝不猜;发布当场随
     # generated_at / operator_id 一起带进 published_notes 台账,便于事后按咨询师归集。
     related_counselor: Mapped[str | None] = mapped_column(default=None)
+    # 这篇笔记的核心目的(推介咨询师 / 概念解读 / …,推荐词表见 app/services/note_purpose.py)。
+    # 发布当场随 related_counselor / generated_at 一起带进 published_notes 台账,并在那边
+    # 记 purpose_source='declared' —— 调用方亲口声明的目的比事后从正文推断的可信。
+    note_purpose: Mapped[str | None] = mapped_column(default=None)
     # 创建该任务的 operator id
     created_by: Mapped[int | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
