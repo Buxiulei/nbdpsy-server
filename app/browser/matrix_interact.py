@@ -14,7 +14,8 @@
 - **主页路径现场定位**:库里没有真实笔记链接(``publish_jobs.note_url`` 存的是 creator
   发布成功页、``note_id`` 全为空),故走发布者主页 → 按标题匹配笔记卡 → 拟人点进详情
   (URL 自动带上 xsec_token,由当前会话生成,无需预存)。**匹配不到即放弃,绝不默认
-  取第一篇**——窗口内发布者可能发了多篇,取第一篇会点错笔记。
+  取第一篇**——窗口内发布者可能发了多篇,取第一篇会点错笔记。主页是懒加载的,首屏
+  找不到要**滚动加载**再找(见 ``_scroll_until_found``)。
 - **已赞/已藏只看 ``use[xlink:href]``**(#like/#liked、#collect/#collected)。旧仓
   ``already_liked = "like-active" in class`` 是错的:实测该 class 点赞前后常驻,
   照搬会 100% 误判为"已点赞"。
@@ -46,6 +47,14 @@ class MatrixInteractError(Exception):
 # 发布者主页 + 笔记卡片(主页路径的两个锚点)
 _PROFILE_URL = "https://www.xiaohongshu.com/user/profile/{user_id}"
 _NOTE_CARD = "section.note-item"
+
+# 主页懒加载翻找的两个闸(见 _scroll_until_found):
+# 轮数硬上限 —— 纯防死循环。实测单号笔记数(几十篇)远小于 30 轮能加载出的量;取到底
+# 也就多花约两分钟,且只发生在笔记真不在主页上的失败路径。
+_MAX_SCROLL_ROUNDS = 30
+# 连续这么多轮卡片数不再增长才认定"到底"。**单次无新增不算到底**:创作中心那边真号
+# 实测出现过滚动只挪了一点没触发加载、下一轮才加载的情况(见 creator_note_list)。
+_NO_GROWTH_ROUNDS = 3
 
 # 互动栏三按钮:优先 .engage-bar 内定位,失败退到裸 class(改版容错)
 _ENGAGE_READY = ".interactions.engage-bar, .engage-bar"
@@ -159,6 +168,99 @@ def _card_matches_note_id(card, note_id: str) -> bool:
     return False
 
 
+def _match_card(cards: List[Any], note_id: Optional[str], title: str):
+    """在已加载的卡片里找目标:**note_id 优先**,没有对应卡片时回退标题匹配;都不中返回 None。
+
+    ``note_id`` 优先(2026-08-01):主页卡片的链接 href 里带笔记 id,是稳定主键;而标题
+    会变(实测平台上「粤语咨询师-黄安麟…」在台账里记的是「心理咨询师-…」)。
+    """
+    hit = next((c for c in cards if _card_matches_note_id(c, note_id or "")), None)
+    if hit is not None:
+        logger.info(f"[matrix_interact] 按 note_id={note_id} 命中笔记卡")
+        return hit
+    for card in cards:
+        try:
+            text = card.inner_text()
+        except Exception:  # noqa: BLE001 — 单张卡读文本失败当不命中
+            continue
+        if _title_matches(text, title):
+            return card
+    return None
+
+
+def _hover_card_list(human: SyncHumanActions, cards: List[Any]) -> None:
+    """滚动前把鼠标移到笔记卡上,让滚轮事件落进真正的滚动容器;移不过去只告警。
+
+    ``page.mouse.wheel`` 把滚轮事件投在**鼠标当前位置**,而鼠标从未移动过时停在 (0,0)。
+    创作中心那边真号实测过:(0,0) 是不滚动的顶栏,滚轮全部空转,``scrollTop`` 三次滚动
+    后仍是 0(见 ``creator_note_list._hover_note_list``)。主页的滚动容器结构未必和创作
+    中心一样,但"**别假设 ``mouse.wheel`` 会滚到你想滚的地方**"这条教训通用,故一律先
+    悬停到卡片上——卡片本身必在滚动区里,不需要 ``evaluate`` 去找容器。
+    """
+    box = None
+    try:
+        box = cards[0].bounding_box() if cards else None
+    except Exception as exc:  # noqa: BLE001 — 定位失败只降级,不打断翻找
+        logger.warning(f"[matrix_interact] 读笔记卡矩形失败: {exc}")
+    if not box:
+        logger.warning(
+            "[matrix_interact] 取不到笔记卡矩形,鼠标无法移到列表上"
+            "——滚轮可能打在不滚动的区域上,翻找多半停在首屏"
+        )
+        return
+    # 只悬停不点击(卡片悬停不触发跳转)
+    human.hover(
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5),
+        reason="移到笔记卡上(滚轮落点)",
+    )
+
+
+def _scroll_until_found(
+    page,
+    human: SyncHumanActions,
+    cards: List[Any],
+    note_id: Optional[str],
+    title: str,
+):
+    """首屏没命中时滚动懒加载,**边滚边找,找到就停**;滚到底或到轮数上限仍没有返回 None。
+
+    ``cards`` 是首屏已扫过的那批,只用来定滚轮落点和记初始卡片数。
+
+    不一次滚到底再统一匹配:那会白白拉长会话、增加风控暴露。到底的判定要求**连续**
+    ``_NO_GROWTH_ROUNDS`` 轮卡片数都不增长——单次没新增不算到底(理由见常量处注释)。
+    """
+    _hover_card_list(human, cards)
+    loaded = len(cards)
+    stale_rounds = 0
+    for round_no in range(1, _MAX_SCROLL_ROUNDS + 1):
+        human.wait(0.8, 2.0, context="主页翻找笔记")
+        human.scroll("down")
+        cards = page.query_selector_all(_NOTE_CARD)
+        hit = _match_card(cards, note_id, title)
+        if hit is not None:
+            logger.info(
+                f"[matrix_interact] 第 {round_no} 轮滚动后命中笔记卡"
+                f"(已加载 {len(cards)} 张)"
+            )
+            return hit
+        if len(cards) > loaded:
+            loaded = len(cards)
+            stale_rounds = 0
+            continue
+        stale_rounds += 1
+        if stale_rounds >= _NO_GROWTH_ROUNDS:
+            logger.info(
+                f"[matrix_interact] 连续 {stale_rounds} 轮无新卡片(共 {loaded} 张),"
+                f"主页已到底"
+            )
+            return None
+    logger.warning(
+        f"[matrix_interact] 已达滚动上限 {_MAX_SCROLL_ROUNDS} 轮(共 {loaded} 张卡),"
+        f"主动停止翻找(防死循环)"
+    )
+    return None
+
+
 def _open_note_by_title(
     page,
     human: SyncHumanActions,
@@ -168,11 +270,12 @@ def _open_note_by_title(
 ) -> str:
     """拟人导航发布者主页 → **优先按 note_id**、否则按标题匹配笔记卡 → 点进详情;返回 URL。
 
-    ``note_id`` 优先(2026-08-01):主页卡片的链接 href 里带笔记 id,是稳定主键;而标题
-    会变(实测平台上「粤语咨询师-黄安麟…」在台账里记的是「心理咨询师-…」)。给了 note_id
-    但页面上没有对应卡片时**回退标题匹配**(可能是没滚到 / 卡片结构变了),不直接判失败。
+    主页是**懒加载**的,首屏只渲染约 10 张卡:发布后立刻互动时目标必排在最前面,首屏即中;
+    但历史笔记补量要找的老笔记排位靠后,不滚动就永远找不到(2026-08-01 补量实跑 5 篇失败
+    1 篇,笔记明明还在平台上,只是在该号 9 篇里排后面)。故**首屏找一次,没中才滚**——
+    首屏命中这条路天天在跑,必须一次都不滚、行为完全不变。
 
-    两种方式都匹配不到即抛 ``MatrixInteractError``(绝不退而求其次点第一篇)。
+    滚到底仍匹配不到即抛 ``MatrixInteractError``(绝不退而求其次点第一篇)。
     """
     url = _PROFILE_URL.format(user_id=publisher_user_id)
     human.navigate(url)
@@ -185,26 +288,17 @@ def _open_note_by_title(
     human.wait(1.2, 2.8, context="主页浏览")
 
     cards = page.query_selector_all(_NOTE_CARD)
-    hit = next((c for c in cards if _card_matches_note_id(c, note_id or "")), None)
-    if hit is not None:
-        logger.info(f"[matrix_interact] 按 note_id={note_id} 命中笔记卡")
-    else:
-        if note_id:
-            logger.warning(
-                f"[matrix_interact] 主页 {len(cards)} 张卡里没有 note_id={note_id} 的链接,"
-                f"回退按标题「{title}」匹配"
-            )
-        for card in cards:
-            try:
-                text = card.inner_text()
-            except Exception:
-                continue
-            if _title_matches(text, title):
-                hit = card
-                break
+    hit = _match_card(cards, note_id, title)
+    if hit is None:
+        logger.info(
+            f"[matrix_interact] 首屏 {len(cards)} 张卡未命中 note_id={note_id!r} /"
+            f" 标题「{title}」,滚动加载更多"
+        )
+        hit = _scroll_until_found(page, human, cards, note_id, title)
     if hit is None:
         raise MatrixInteractError(
             f"note_not_found: 发布者主页未找到 note_id={note_id!r} / 标题「{title}」的笔记卡"
+            f"(已滚动加载 {len(page.query_selector_all(_NOTE_CARD))} 张卡)"
         )
 
     human.scroll_to_element(hit)

@@ -31,18 +31,32 @@ from app.services import matrix_interact as svc
 # ---------------- 测试替身 ----------------
 
 
-class _FakeElement:
-    """假元素:只提供定位/读文本/取矩形这几件被测代码真用到的能力。"""
+class _FakeLink:
+    """假 <a>:只提供 get_attribute('href')(卡片的 note_id 就藏在这里)。"""
 
-    def __init__(self, text: str = "", box: dict | None = None):
+    def __init__(self, href: str):
+        self._href = href
+
+    def get_attribute(self, name: str):
+        return self._href if name == "href" else None
+
+
+class _FakeElement:
+    """假元素:只提供定位/读文本/取矩形/读链接这几件被测代码真用到的能力。"""
+
+    def __init__(self, text: str = "", box: dict | None = None, href: str | None = None):
         self._text = text
         self._box = box or {"x": 100.0, "y": 200.0, "width": 240.0, "height": 320.0}
+        self._href = href
 
     def inner_text(self) -> str:
         return self._text
 
     def bounding_box(self) -> dict:
         return self._box
+
+    def query_selector_all(self, _sel):
+        return [_FakeLink(self._href)] if self._href else []
 
 
 class _FakeLocator:
@@ -80,14 +94,38 @@ class _FakePage:
     def evaluate(self, js, arg=None):
         return self._evaluate(js, arg)
 
+    def load_more(self) -> None:
+        """滚动触发的懒加载(基类没有更多卡片,滚了也不变)。"""
+
+
+class _LazyProfilePage(_FakePage):
+    """懒加载假主页:每次滚动"渲染"出下一批卡片,query_selector_all 只看得见已渲染的。
+
+    ``batches`` 是**累计**列表(第 i 项 = 滚了 i 次之后主页上的全部卡片),与真实懒加载
+    一致 —— 卡片只增不减。
+    """
+
+    def __init__(self, batches):
+        self._batches = [list(b) for b in batches]
+        self._idx = 0
+        super().__init__(cards=self._batches[0])
+
+    def load_more(self) -> None:
+        if self._idx + 1 < len(self._batches):
+            self._idx += 1
+            self._cards = list(self._batches[self._idx])
+
 
 class _FakeHuman:
-    """假拟人层:记录动作,断言"该点的点了 / 不该点的一次没点"。"""
+    """假拟人层:记录动作,断言"该点的点了 / 不该点的一次没点 / 不该滚的一次没滚"。"""
 
-    def __init__(self):
+    def __init__(self, page=None):
         self.navigated = None
         self.clicks = []
         self.typed = []
+        self.hovers = []
+        self.scrolls = 0
+        self._page = page
 
     def navigate(self, url, **_kw):
         self.navigated = url
@@ -96,10 +134,15 @@ class _FakeHuman:
         pass
 
     def scroll(self, *_a, **_kw):
-        pass
+        self.scrolls += 1
+        if self._page is not None:
+            self._page.load_more()
 
     def scroll_to_element(self, _el):
         pass
+
+    def hover(self, target, **_kw):
+        self.hovers.append(target)
 
     def click(self, target, **_kw):
         self.clicks.append(target)
@@ -153,6 +196,154 @@ def test_open_note_by_title_gives_up_when_no_match():
 
     assert exc.value.reason.startswith("note_not_found")
     assert human.clicks == []  # 一次都没点
+
+
+# ---------------- 主页懒加载:滚动翻找 ----------------
+
+
+def test_first_screen_hit_never_scrolls():
+    """首屏就命中 → **一次都不滚、也不悬停**(发布后互动天天走这条路,不能被拖慢)。"""
+    target = "边界感是练出来的"
+    page = _LazyProfilePage([
+        [_FakeElement("别人的情绪不是你的责任"), _FakeElement(f"{target}\n1203")],
+        [_FakeElement("别人的情绪不是你的责任"), _FakeElement(f"{target}\n1203"),
+         _FakeElement("不该被加载出来的第三篇")],
+    ])
+    human = _FakeHuman(page)
+
+    browser_mi._open_note_by_title(page, human, "u123", target)
+
+    assert human.scrolls == 0
+    assert human.hovers == []
+    assert len(human.clicks) == 1
+
+
+def test_scrolls_until_target_loaded():
+    """首屏没有、滚动加载后出现 → 命中并点那张卡(补量找老笔记的主场景)。"""
+    target = "心理咨询师-徐瑞恒,陪你看清自我怀疑来处"
+    old_card = _FakeElement(f"{target}\n88")
+    page = _LazyProfilePage([
+        [_FakeElement("新笔记一"), _FakeElement("新笔记二")],
+        [_FakeElement("新笔记一"), _FakeElement("新笔记二"), _FakeElement("新笔记三")],
+        [_FakeElement("新笔记一"), _FakeElement("新笔记二"), _FakeElement("新笔记三"),
+         old_card],
+    ])
+    human = _FakeHuman(page)
+
+    browser_mi._open_note_by_title(page, human, "u123", target)
+
+    assert human.scrolls == 2
+    box = old_card.bounding_box()
+    assert human.clicks == [
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.35)
+    ]
+
+
+def test_hovers_note_card_before_scrolling():
+    """滚动前必须先把鼠标移到笔记卡上 —— mouse.wheel 投在鼠标当前位置,(0,0) 处会空转。"""
+    first = _FakeElement("无关笔记")
+    page = _LazyProfilePage([[first]])
+    human = _FakeHuman(page)
+
+    with pytest.raises(browser_mi.MatrixInteractError):
+        browser_mi._open_note_by_title(page, human, "u123", "找不到的标题在这里")
+
+    box = first.bounding_box()
+    assert human.hovers == [
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5)
+    ]
+
+
+def test_gives_up_after_reaching_bottom():
+    """滚到底(连续多轮无新卡)仍没有 → 抛 note_not_found,绝不退而求其次点第一篇。"""
+    page = _LazyProfilePage([
+        [_FakeElement("无关一")],
+        [_FakeElement("无关一"), _FakeElement("无关二")],
+    ])
+    human = _FakeHuman(page)
+
+    with pytest.raises(browser_mi.MatrixInteractError) as exc:
+        browser_mi._open_note_by_title(page, human, "u123", "目标笔记的标题在这里")
+
+    assert exc.value.reason.startswith("note_not_found")
+    assert human.clicks == []
+    # 1 轮加载出新卡 + 连续 _NO_GROWTH_ROUNDS 轮无新增才停;远没滚到轮数上限
+    assert human.scrolls == 1 + browser_mi._NO_GROWTH_ROUNDS
+    assert human.scrolls < browser_mi._MAX_SCROLL_ROUNDS
+
+
+def test_single_empty_scroll_is_not_bottom():
+    """单次滚动没加载出新卡**不算到底**:实测有"这次只挪一点、下一次才加载"的情况。"""
+    target = "藏在第二轮的老笔记标题"
+    page = _LazyProfilePage([
+        [_FakeElement("无关一")],
+        [_FakeElement("无关一")],                       # 第 1 轮:滚了但没新卡
+        [_FakeElement("无关一"), _FakeElement(target)],  # 第 2 轮:才真的加载出来
+    ])
+    human = _FakeHuman(page)
+
+    browser_mi._open_note_by_title(page, human, "u123", target)
+
+    assert human.scrolls == 2
+    assert len(human.clicks) == 1
+
+
+def test_scroll_rounds_are_capped():
+    """卡片一直在增长但永远没有目标 → 到轮数上限即停,不死循环。"""
+
+    class _EndlessProfilePage(_FakePage):
+        """每滚一次就多一张无关卡片的假主页(模拟无限流)。"""
+
+        def __init__(self):
+            super().__init__(cards=[_FakeElement("无关笔记 0")])
+
+        def load_more(self) -> None:
+            self._cards = self._cards + [_FakeElement(f"无关笔记 {len(self._cards)}")]
+
+    page = _EndlessProfilePage()
+    human = _FakeHuman(page)
+
+    with pytest.raises(browser_mi.MatrixInteractError):
+        browser_mi._open_note_by_title(page, human, "u123", "永远不会出现的标题")
+
+    assert human.scrolls == browser_mi._MAX_SCROLL_ROUNDS
+
+
+# ---------------- note_id 优先 / 标题回退(既有行为不变)----------------
+
+
+def test_note_id_wins_over_title_match():
+    """note_id 命中优先于标题命中(台账 title 会过期,链接里的 id 才是稳定主键)。"""
+    note_id = "6a6b503e000000000600534a"
+    title_card = _FakeElement("心理咨询师-徐瑞恒,陪你看清自我怀疑来处\n12")
+    id_card = _FakeElement("平台上已改名的同一篇", href=f"/explore/{note_id}?xsec=1")
+    page = _FakePage(cards=[title_card, id_card])
+    human = _FakeHuman()
+
+    browser_mi._open_note_by_title(
+        page, human, "u123", "心理咨询师-徐瑞恒,陪你看清自我怀疑来处", note_id=note_id
+    )
+
+    box = id_card.bounding_box()
+    assert human.clicks == [
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.35)
+    ]
+    assert human.scrolls == 0
+
+
+def test_falls_back_to_title_when_note_id_absent():
+    """给了 note_id 但页面上没这张卡 → 回退标题匹配,不直接判失败。"""
+    target = "边界感是练出来的"
+    cards = [_FakeElement("别的笔记"), _FakeElement(f"{target}\n1203")]
+    page = _FakePage(cards=cards)
+    human = _FakeHuman()
+
+    browser_mi._open_note_by_title(page, human, "u123", target, note_id="ffffffff")
+
+    box = cards[1].bounding_box()
+    assert human.clicks == [
+        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.35)
+    ]
 
 
 # ---------------- 已赞 / 已藏跳过分支 ----------------
