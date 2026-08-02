@@ -17,6 +17,7 @@ patch 纪律:打在**被测模块的命名空间**(``svc.SyncClient`` / ``svc.in
 ``svc.load_account_cookies``),不是源模块。
 """
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -536,6 +537,138 @@ async def test_locate_failure_records_error_rows(wired_db, no_browser, monkeypat
         rows = (await s.execute(select(NoteInteraction))).scalars().all()
     assert {r.status for r in rows} == {"error"}
     assert len(rows) == 2
+
+
+_FORENSICS = {
+    "url": "https://www.xiaohongshu.com/explore/n0?xsec_token=T",
+    "title": "边界感是练出来的 - 小红书",
+    "body_head": "正文头部",
+    "engage_bar": False,
+    "wrappers": [],
+    "like": {"present": False},
+    "collect": {"present": False},
+}
+
+
+async def test_ledger_detail_carries_forensics(wired_db, no_browser):
+    """失败动作的 detail 带上失败当场的现场取证,**成功/跳过的 detail 一个字不变**。
+
+    这张表是排查时最先被翻的地方;只写一句「收藏_button_not_found」等于什么都没说 ——
+    到底是被踢到验证页、还是互动栏改版、还是按钮被盖住,分不出来就只能靠复现去猜。
+    """
+    _calls, _sleeps, script = no_browser
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    script["n0"] = {
+        "note_url": "u",
+        "actions": {
+            "like": {"status": "skipped", "reason": "已点赞"},
+            "collect": {
+                "status": "error",
+                "reason": "收藏_button_not_found",
+                "forensics": dict(_FORENSICS),
+            },
+        },
+    }
+
+    await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+
+    async with db_module.async_session() as s:
+        rows = {
+            r.action: r for r in (await s.execute(select(NoteInteraction))).scalars().all()
+        }
+    # 没取证的行照旧:成功路径的台账形状零变化
+    assert rows["like"].detail == "已点赞"
+    detail = rows["collect"].detail
+    assert detail.startswith("收藏_button_not_found | forensics=")
+    assert json.loads(detail.split("forensics=", 1)[1]) == _FORENSICS
+
+
+async def test_ledger_detail_forensics_is_capped(wired_db, no_browser):
+    """取证再大也不能把台账行撑爆:detail 里那段 JSON 有硬上限。"""
+    _calls, _sleeps, script = no_browser
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    script["n0"] = {
+        "note_url": "u",
+        "actions": {
+            "like": {"status": "done"},
+            "collect": {"status": "error", "reason": "r",
+                        "forensics": {"body_head": "长" * 9000}},
+        },
+    }
+
+    await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+
+    async with db_module.async_session() as s:
+        rows = {
+            r.action: r for r in (await s.execute(select(NoteInteraction))).scalars().all()
+        }
+    dumped = rows["collect"].detail.split("forensics=", 1)[1]
+    assert len(dumped) == svc._DETAIL_FORENSICS_MAX
+
+
+async def test_job_result_notes_carry_forensics(wired_db, no_browser):
+    """整篇失败(点赞收藏均败)的现场随任务结果落 ``browser_jobs.result``。"""
+    _calls, _sleeps, script = no_browser
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    script["n0"] = {
+        "note_url": "u",
+        "error": "点赞与收藏均失败",
+        "forensics": dict(_FORENSICS),
+        "actions": {
+            "like": {"status": "error", "reason": "点不动", "forensics": dict(_FORENSICS)},
+            "collect": {"status": "error", "reason": "点不动", "forensics": dict(_FORENSICS)},
+        },
+    }
+
+    result = await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+
+    assert result["notes"][0]["error"] == "点赞与收藏均失败"
+    assert result["notes"][0]["forensics"] == _FORENSICS
+
+
+async def test_partial_failure_forensics_reaches_job_result(wired_db, no_browser):
+    """赞成了、藏没成 → 整篇不算失败,但藏那份现场也要能在任务结果里看到。
+
+    ``notes`` 只摊平动作**状态**不带动作详情,不在这儿捞一把,单动作失败的现场就只落进
+    ``note_interactions``,看任务结果的人根本看不到。
+    """
+    _calls, _sleeps, script = no_browser
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    script["n0"] = {
+        "note_url": "u",
+        "actions": {
+            "like": {"status": "done"},
+            "collect": {"status": "error", "reason": "点不动",
+                        "forensics": dict(_FORENSICS)},
+        },
+    }
+
+    result = await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+
+    assert result["notes"][0]["error"] is None
+    assert result["notes"][0]["forensics"] == _FORENSICS
+
+
+async def test_successful_note_has_no_forensics(wired_db, no_browser):
+    """全成功的篇目不带任何取证内容(成功路径零开销一路到任务结果)。"""
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+
+    result = await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+
+    assert result["notes"][0]["forensics"] is None
+    async with db_module.async_session() as s:
+        rows = (await s.execute(select(NoteInteraction))).scalars().all()
+    assert all(r.detail is None for r in rows)
 
 
 async def test_repeat_round_updates_same_ledger_row(wired_db, no_browser):

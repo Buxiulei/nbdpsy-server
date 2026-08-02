@@ -640,6 +640,329 @@ def test_comment_on_note_failure_carries_error_and_url(monkeypatch):
     assert "commented" not in result
 
 
+# ---------------- 失败当场留取证(forensics) ----------------
+#
+# 背景:排查「收藏按钮找不到」时绕了三大圈、20+ 次真号访问都没复现,根因是失败当场没留
+# 任何现场证据;补量一轮 5 篇失败 1 篇时错误信息也只有「点赞与收藏均失败」一句。这批用例
+# 锁的就是"失败当场把页面状态抓下来、成功路径一点都不多花、取证自己炸了也不能牵连主流程"。
+
+
+_RAW_FORENSICS = {
+    "url": "https://www.xiaohongshu.com/explore/n1?xsec_token=T",
+    "title": "边界感是练出来的 - 小红书",
+    "body": "正文很长很长",
+    "engage_bar": True,
+    "wrappers": ["like-wrapper", "collect-wrapper", "chat-wrapper"],
+    "like": {
+        "present": True,
+        "icon_href": "#like",
+        "rect": {"x": 10, "y": 20, "w": 30, "h": 40},
+        "display": "flex",
+        "visibility": "visible",
+        "pointer_events": "auto",
+    },
+    "collect": {"present": False},
+    "counts": {"engage_bar": 1, "like": 1, "collect": 1},
+}
+
+
+class _ForensicsPage(_FakePage):
+    """假页面:图标 href 按脚本逐次给出,取证 evaluate 单独记账(可注入抛异常)。
+
+    ``evaluated`` 记下每次 evaluate 用的是哪段 JS —— "成功路径一次都没抓取证"这条断言
+    只能靠它来证。
+    """
+
+    def __init__(self, icon_hrefs=(None,), raw=None, boom=False,
+                 selector=".engage-bar .like-wrapper"):
+        self._hrefs = list(icon_hrefs)
+        self._raw = _RAW_FORENSICS if raw is None else raw
+        self._boom = boom
+        self.evaluated: list[str] = []
+        super().__init__(elements={selector: _FakeElement()})
+
+    def evaluate(self, js, arg=None):
+        self.evaluated.append(js)
+        if js is browser_mi._FORENSICS_JS:
+            if self._boom:
+                raise RuntimeError("Execution context was destroyed")
+            return dict(self._raw) if isinstance(self._raw, dict) else self._raw
+        if js is browser_mi._READ_ICON_HREF_JS:
+            return self._hrefs.pop(0) if len(self._hrefs) > 1 else self._hrefs[0]
+        raise AssertionError(f"未预期的 evaluate: {js[:40]!r}")
+
+    def forensics_calls(self) -> int:
+        return sum(1 for js in self.evaluated if js is browser_mi._FORENSICS_JS)
+
+
+def _like(page) -> dict:
+    return browser_mi._icon_action(
+        page, _FakeHuman(), "点赞", browser_mi._LIKE_SELECTORS, "#like", "#liked"
+    )
+
+
+def test_done_path_costs_nothing_extra():
+    """点赞成功 → 结果里没有 forensics 键,且**一次取证都没抓**(成功路径零开销)。"""
+    page = _ForensicsPage(icon_hrefs=["#like", "#liked"])
+
+    result = _like(page)
+
+    assert result["status"] == "done"
+    assert "forensics" not in result
+    assert page.forensics_calls() == 0
+
+
+def test_skipped_path_costs_nothing_extra():
+    """已赞(skipped)同样零开销:平台状态本就到位,没有"现场"可查。"""
+    page = _ForensicsPage(icon_hrefs=["#liked"])
+
+    result = _like(page)
+
+    assert result["status"] == "skipped"
+    assert "forensics" not in result
+    assert page.forensics_calls() == 0
+
+
+def test_icon_failure_carries_full_forensics():
+    """图标读不出来判 error → 随结果带一份现场,排查要问的几件事都能答上。"""
+    page = _ForensicsPage(icon_hrefs=[None])
+
+    result = _like(page)
+
+    assert result["status"] == "error" and "unreadable" in result["reason"]
+    got = result["forensics"]
+    # 当时在哪个页 / 页面是什么内容
+    assert got["url"] == _RAW_FORENSICS["url"]
+    assert got["title"] == _RAW_FORENSICS["title"]
+    assert got["body_head"] == "正文很长很长"
+    # 互动栏在不在 / 栏里有哪些 wrapper(赞藏评分享齐不齐)
+    assert got["engage_bar"] is True
+    assert got["wrappers"] == ["like-wrapper", "collect-wrapper", "chat-wrapper"]
+    # 两个按钮各自的图标 href、矩形、计算样式
+    assert got["like"]["icon_href"] == "#like"
+    assert got["like"]["rect"] == {"x": 10, "y": 20, "w": 30, "h": 40}
+    assert got["like"]["display"] == "flex"
+    assert got["like"]["visibility"] == "visible"
+    assert got["like"]["pointer_events"] == "auto"
+    assert got["collect"] == {"present": False}
+    # 同名元素整页各有几个 —— 判"点到的是不是另一个同名元素"全靠它,不能在裁剪时丢掉
+    assert got["counts"] == {"engage_bar": 1, "like": 1, "collect": 1}
+    assert page.forensics_calls() == 1
+
+
+def test_duplicate_element_counts_survive_shrinking():
+    """整页出现重复互动栏时,``counts`` 必须原样落到取证里。
+
+    这是"点了但图标不翻、且赞与藏成对失败"最像的一种解释:上一篇的详情浮层没销毁 /
+    网格卡片自带点赞图标 → 选择器命中的不是被看到的那个按钮。裁剪逻辑要是把 ``counts``
+    顺手丢了,这条怀疑就永远查不实也证不伪。
+    """
+    raw = dict(_RAW_FORENSICS, counts={"engage_bar": 2, "like": 13, "collect": 2})
+    page = _ForensicsPage(icon_hrefs=[None], raw=raw)
+
+    got = _like(page)["forensics"]
+
+    assert got["counts"] == {"engage_bar": 2, "like": 13, "collect": 2}
+
+
+def test_button_not_found_carries_forensics():
+    """按钮压根不在页面上(正是当初查不动的那个症状)也要留现场。"""
+    page = _ForensicsPage(selector="别的选择器")
+
+    result = _like(page)
+
+    assert result["reason"] == "点赞_button_not_found"
+    assert result["forensics"]["url"] == _RAW_FORENSICS["url"]
+
+
+def test_forensics_truncates_body_and_wrappers():
+    """正文只留头部、wrapper 列表与单条 class 都截断 —— 别把整页塞进库。"""
+    page = _ForensicsPage(
+        icon_hrefs=[None],
+        raw={
+            **_RAW_FORENSICS,
+            "body": "长" * 5000,
+            "wrappers": [f"w{i}-wrapper-" + "x" * 300 for i in range(40)],
+        },
+    )
+
+    got = _like(page)["forensics"]
+
+    assert len(got["body_head"]) == browser_mi._MAX_BODY
+    assert len(got["wrappers"]) == browser_mi._MAX_WRAPPERS
+    assert all(len(w) <= browser_mi._MAX_CLASS for w in got["wrappers"])
+
+
+def test_forensics_normalizes_whitespace():
+    """正文里的大段换行/空白归一成单空格:对排查没用,只会白占长度。"""
+    page = _ForensicsPage(
+        icon_hrefs=[None], raw={**_RAW_FORENSICS, "body": "第一行\n\n\n   第二行\t尾"}
+    )
+
+    assert _like(page)["forensics"]["body_head"] == "第一行 第二行 尾"
+
+
+def test_forensics_exception_is_swallowed():
+    """取证自己抛异常 → 被吞掉降级成一句原因,失败结果照常返回(绝不升级成任务崩溃)。"""
+    page = _ForensicsPage(icon_hrefs=[None], boom=True)
+
+    result = _like(page)
+
+    assert result["status"] == "error" and "unreadable" in result["reason"]
+    assert result["forensics"]["error"].startswith("取证失败: RuntimeError")
+    # evaluate 挂了也还留得下 URL —— 被踢到验证页/登录页靠它一眼就能定性
+    assert result["forensics"]["url"] == page.url
+
+
+def test_forensics_tolerates_unexpected_evaluate_return():
+    """evaluate 返回的不是对象(页面改版 / 注入被拦)也只降级,不炸。"""
+    page = _ForensicsPage(icon_hrefs=[None], raw="不是对象")
+
+    result = _like(page)
+
+    assert result["status"] == "error"
+    assert "取证失败" in result["forensics"]["error"]
+
+
+def test_forensics_survives_unreadable_page_url():
+    """连 page.url 都读不到(页没了)也只记一句,不影响失败结果本身。"""
+    class _NoUrlPage(_ForensicsPage):
+        @property
+        def url(self):
+            raise RuntimeError("Target page closed")
+
+        @url.setter
+        def url(self, _value):
+            pass
+
+    page = _NoUrlPage(icon_hrefs=[None], boom=True)
+
+    result = _like(page)
+
+    assert result["status"] == "error"
+    assert "取证失败" in result["forensics"]["url_error"]
+
+
+def test_aggregate_failure_reuses_action_forensics(monkeypatch):
+    """两动作全败的汇总 error 也带现场,且**复用动作级那份**,不在同一页重抓第三次。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+    page = _ForensicsPage(icon_hrefs=[None], selector=".like-wrapper")
+    page._elements[".collect-wrapper"] = _FakeElement()
+
+    result = browser_mi.interact_with_note(
+        page, account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert result["error"] == "点赞与收藏均失败"
+    assert result["forensics"] is result["actions"]["like"]["forensics"]
+    # 两个动作各在自己失败那一刻抓一份,汇总层不再抓 → 恰好 2 次
+    assert page.forensics_calls() == 2
+
+
+def test_action_exception_also_leaves_forensics(monkeypatch):
+    """动作抛异常被兜成 error 时同样留现场 —— 抛异常时最需要知道页面当时什么样。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("页面炸了")
+
+    monkeypatch.setattr(browser_mi, "_icon_action", _boom)
+    page = _ForensicsPage()
+
+    result = browser_mi.interact_with_note(
+        page, account_id=9, publisher_user_id="u1", title="标题"
+    )
+
+    assert result["actions"]["like"]["forensics"]["url"] == _RAW_FORENSICS["url"]
+    assert result["forensics"] is result["actions"]["like"]["forensics"]
+
+
+def test_comment_failure_carries_forensics():
+    """评论入口找不到 → 失败结果带现场(评论链路与点赞收藏同款待遇)。"""
+    page = _ForensicsPage(selector="别的选择器")
+
+    result = browser_mi._do_comment(page, _FakeHuman(), "写得真好")
+
+    assert result["reason"] == "comment_entry_not_found"
+    assert result["forensics"]["url"] == _RAW_FORENSICS["url"]
+
+
+def test_comment_empty_text_does_not_collect_forensics():
+    """空文案是**入参错误**,在碰页面之前就判掉了 —— 现场与失败原因无关,不抓。"""
+    page = _ForensicsPage()
+
+    result = browser_mi._do_comment(page, _FakeHuman(), "  ")
+
+    assert "comment_text_empty" in result["reason"]
+    assert "forensics" not in result
+    assert page.forensics_calls() == 0
+
+
+def test_comment_on_note_hands_forensics_to_caller(monkeypatch):
+    """comment_on_note 把动作级取证随 error 一起交出去(note_comment.execute 原样透传)。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+    monkeypatch.setattr(
+        browser_mi, "_do_comment",
+        lambda *a, **k: {"status": "error", "reason": "comment_unverified: 没复核到",
+                         "forensics": {"url": "https://x/captcha"}},
+    )
+
+    result = browser_mi.comment_on_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题",
+        comment_text="写得真好",
+    )
+
+    assert result["forensics"] == {"url": "https://x/captcha"}
+
+
+def test_comment_on_note_success_has_no_forensics(monkeypatch):
+    """评论成功不带 forensics 键(与点赞收藏同口径:成功路径零开销)。"""
+    monkeypatch.setattr(browser_mi, "_open_note_by_title",
+                        lambda *a, **k: "https://www.xiaohongshu.com/explore/x")
+    monkeypatch.setattr(browser_mi, "_browse_note", lambda *a, **k: None)
+    monkeypatch.setattr(browser_mi, "SyncHumanActions", lambda page: _FakeHuman())
+    monkeypatch.setattr(browser_mi, "_do_comment", lambda *a, **k: {"status": "done"})
+
+    result = browser_mi.comment_on_note(
+        _FakePage(), account_id=9, publisher_user_id="u1", title="标题",
+        comment_text="写得真好",
+    )
+
+    assert "forensics" not in result
+
+
+async def test_note_comment_execute_passes_forensics_through(monkeypatch):
+    """服务层不加工:``comment_on_note`` 给什么就往 browser_jobs.result 里落什么。"""
+    from app.services import note_comment
+
+    failed = {
+        "note_url": "https://www.xiaohongshu.com/explore/x",
+        "error": "comment_entry_not_found",
+        "forensics": {"url": "https://x/captcha", "engage_bar": False},
+    }
+
+    async def _cookies(_account_id):
+        return [{"name": "a", "value": "b"}]
+
+    monkeypatch.setattr(note_comment, "load_account_cookies", _cookies)
+    monkeypatch.setattr(note_comment, "_comment_sync", lambda *a, **k: failed)
+
+    result = await note_comment.execute(
+        7, {"publisher_user_id": "u1", "title": "标题", "text": "写得真好"}
+    )
+
+    assert result["forensics"] == {"url": "https://x/captcha", "engage_bar": False}
+
+
 # ---------------- 矩阵选号 + 登记(schedule_matrix_interact) ----------------
 
 

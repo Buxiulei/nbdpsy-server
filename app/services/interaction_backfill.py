@@ -39,6 +39,7 @@
 """
 
 import asyncio
+import json
 import random
 import time
 from datetime import datetime, timedelta
@@ -490,6 +491,23 @@ def _empty_result() -> dict:
     return {"picked": 0, "handled": 0, "liked": 0, "collected": 0, "failed": 0, "notes": []}
 
 
+def _entry_forensics(entry: dict) -> Optional[dict]:
+    """这一篇要随任务结果带出的失败现场:整篇失败用汇总那份,单动作失败取第一份。
+
+    ``_summarize`` 只把动作 **状态** 摊平进 ``notes``,不带动作详情;取证要是不在这里
+    捞一把,单个动作失败(比如赞成了、藏没成)那份现场就只落进 ``note_interactions``,
+    看 ``browser_jobs.result`` 的人根本看不到。整篇失败时顶层那份本就复用自动作级,
+    不会出现同一页抓两遍。
+    """
+    if entry.get("forensics"):
+        return entry["forensics"]
+    for action in ACTIONS:
+        got = ((entry.get("actions") or {}).get(action) or {}).get("forensics")
+        if got:
+            return got
+    return None
+
+
 def _summarize(targets: list[dict], outcome: dict) -> dict:
     """把逐篇结果汇总成对外计数(done 与 skipped 都算"到位",两者平台状态相同)。"""
     results = outcome.get("results") or []
@@ -513,6 +531,7 @@ def _summarize(targets: list[dict], outcome: dict) -> dict:
                 "like": (r.get("actions") or {}).get("like", {}).get("status"),
                 "collect": (r.get("actions") or {}).get("collect", {}).get("status"),
                 "error": r.get("error"),
+                "forensics": _entry_forensics(r),
             }
             for r in results
         ],
@@ -586,6 +605,8 @@ def _interact_one(page, account_id: int, target: dict) -> tuple[dict, Optional[d
         "note_row_id": target.get("note_row_id"),
         "actions": {},
         "error": None,
+        # 失败现场取证(``interact_with_note`` 在动作失败当场抓的),原样透传不加工
+        "forensics": None,
     }
     profile_url = (
         f"https://www.xiaohongshu.com/user/profile/{target['publisher_user_id']}"
@@ -600,6 +621,7 @@ def _interact_one(page, account_id: int, target: dict) -> tuple[dict, Optional[d
         )
         entry["actions"] = outcome.get("actions") or {}
         entry["error"] = outcome.get("error")
+        entry["forensics"] = outcome.get("forensics")
     except MatrixInteractError as exc:
         # 定位类失败(笔记没找到 / 详情没打开):这一页确实开过了,记 error 走冷却重试
         entry["error"] = exc.reason
@@ -643,8 +665,31 @@ def _wall_if_any(page, target_url: str) -> Optional[dict]:
 # ---------------- 记账与风控写回 ----------------
 
 
+# 台账 detail 里那段取证 JSON 的长度上限(字符)。取证各字段在 ``matrix_interact.
+# _shrink_forensics`` 里已逐个截断过,正常一份 600~900 字符,这个上限只是兜底 —— 真被
+# 截断的话 JSON 会不完整,但 detail 本来就是给人看的排查字符串,不完整也比整行撑爆强。
+_DETAIL_FORENSICS_MAX = 1200
+
+
+def _detail_with_forensics(reason: Optional[str], forensics: Optional[dict]) -> Optional[str]:
+    """把失败原因与现场取证拼成台账 ``detail`` 单列字符串(**不新增表、不新增列**)。
+
+    没有取证就原样返回 reason —— done / skipped 行的 detail 保持和以前一模一样。
+    """
+    if not forensics:
+        return reason
+    try:
+        dumped = json.dumps(forensics, ensure_ascii=False, sort_keys=True)
+    except Exception as exc:  # noqa: BLE001 — 序列化失败也不能拖累记账
+        dumped = f"(取证序列化失败: {exc})"
+    return f"{reason or ''} | forensics={dumped[:_DETAIL_FORENSICS_MAX]}"
+
+
 async def _record_outcome(actor_account_id: int, results: list[dict]) -> None:
     """把这一轮逐篇逐动作的结果写进 ``note_interactions``(按唯一键 upsert)。
+
+    失败动作的 ``detail`` 里**带上失败当场的现场取证**(``_detail_with_forensics``):
+    这张表是排查时最先被翻的地方,只写一句「like_button_not_found」等于什么都没说。
 
     定位失败(整篇没打开)记成两个动作都 error:页确实开过了,当日配额与冷却都该算上。
     **记账失败只告警**:台账是效率优化不是正确性依据,为它把已经做完的互动判成失败
@@ -679,7 +724,9 @@ async def _record_outcome(actor_account_id: int, results: list[dict]) -> None:
                         detail = result.get("error") or "note_not_opened"
                     else:
                         status = outcome.get("status") or "error"
-                        detail = outcome.get("reason")
+                        detail = _detail_with_forensics(
+                            outcome.get("reason"), outcome.get("forensics")
+                        )
                     row = existing.get((note_id, action))
                     if row is None:
                         session.add(
