@@ -8,3 +8,4 @@ __pycache__/
 
 # 本地环境变量(含 API 密钥/SECRET_KEY,绝不入库;样例见 .env.example)
 .env
+.gitnexus
