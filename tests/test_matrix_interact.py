@@ -85,14 +85,23 @@ class _FakePage:
     def locator(self, _sel):
         return _FakeLocator(self._locator_ok)
 
-    def query_selector_all(self, _sel):
+    def query_selector_all(self, sel):
+        # 互动按钮类选择器返回登记的那个元素;其余(笔记卡)仍返回卡片列表。
+        # _icon_action 改成按下标取元素后,这里必须能按选择器答得上来。
+        if sel in self._elements:
+            return [self._elements[sel]]
         return self._cards
 
     def query_selector(self, sel):
         return self._elements.get(sel)
 
     def evaluate(self, js, arg=None):
-        return self._evaluate(js, arg)
+        got = self._evaluate(js, arg)
+        # 用例只关心"图标读出来是什么",不该知道内部把"挑元素"和"读图标"拆成了两段 JS。
+        # 故这里做适配:用例给一个 href 字符串,就当成"整页只有一份、可点、图标是它"。
+        if js is browser_mi._PICK_HITTABLE_JS and not isinstance(got, dict):
+            return {"total": 1, "index": 0, "href": got, "skipped": []}
+        return got
 
     def load_more(self) -> None:
         """滚动触发的懒加载(基类没有更多卡片,滚了也不变)。"""
@@ -681,18 +690,134 @@ class _ForensicsPage(_FakePage):
         self.evaluated: list[str] = []
         super().__init__(elements={selector: _FakeElement()})
 
+    def _next_href(self):
+        return self._hrefs.pop(0) if len(self._hrefs) > 1 else self._hrefs[0]
+
     def evaluate(self, js, arg=None):
         self.evaluated.append(js)
         if js is browser_mi._FORENSICS_JS:
             if self._boom:
                 raise RuntimeError("Execution context was destroyed")
             return dict(self._raw) if isinstance(self._raw, dict) else self._raw
-        if js is browser_mi._READ_ICON_HREF_JS:
-            return self._hrefs.pop(0) if len(self._hrefs) > 1 else self._hrefs[0]
+        if js is browser_mi._PICK_HITTABLE_JS:
+            # 默认单份、可命中:多份/被盖住的场景由 _AmbiguousPage 覆盖
+            return {"total": 1, "index": 0, "href": self._next_href(), "skipped": []}
+        if js is browser_mi._READ_ICON_HREF_AT_JS:
+            return self._next_href()
         raise AssertionError(f"未预期的 evaluate: {js[:40]!r}")
 
     def forensics_calls(self) -> int:
         return sum(1 for js in self.evaluated if js is browser_mi._FORENSICS_JS)
+
+
+class _AmbiguousPage(_FakePage):
+    """整页有多份同名互动按钮的假页面(真号取证:engage_bar=2 / like=18)。
+
+    ``hittable`` 指哪一个是没被盖住的;``-1`` 表示一个都点不到。``clicked_index``
+    记下真正被点的是第几个 —— "点的和读的是不是同一份"这条断言只能靠它来证。
+    """
+
+    def __init__(self, total=2, hittable=1, hrefs=None):
+        self._total = total
+        self._hittable = hittable
+        # 每一份的图标状态各自独立:残留浮层那份可能停在旧状态
+        self._hrefs = list(hrefs) if hrefs else ["#liked"] * total
+        self._hrefs[hittable] = "#like" if 0 <= hittable < total else "#like"
+        self.clicked_index = None
+        self.elements = [_FakeElement() for _ in range(total)]
+        super().__init__(elements={".engage-bar .like-wrapper": self.elements[0]})
+
+    def query_selector_all(self, sel):
+        if sel == ".engage-bar .like-wrapper":
+            return self.elements
+        return []
+
+    def evaluate(self, js, arg=None):
+        if js is browser_mi._PICK_HITTABLE_JS:
+            if self._hittable < 0:
+                return {"total": self._total, "index": -1, "href": None,
+                        "skipped": [[i, "covered"] for i in range(self._total)]}
+            return {"total": self._total, "index": self._hittable,
+                    "href": self._hrefs[self._hittable],
+                    "skipped": [[i, "covered"] for i in range(self._hittable)]}
+        if js is browser_mi._READ_ICON_HREF_AT_JS:
+            _sel, index = arg
+            # 点过的那一份才翻转;没点的保持原状
+            if self.clicked_index == index:
+                return "#liked"
+            return self._hrefs[index]
+        if js is browser_mi._FORENSICS_JS:
+            return {"url": "u", "title": "t", "body": "", "engage_bar": True,
+                    "wrappers": [], "like": {"present": True},
+                    "collect": {"present": True},
+                    "counts": {"engage_bar": 2, "like": self._total, "collect": 1}}
+        raise AssertionError(f"未预期的 evaluate: {js[:40]!r}")
+
+
+class _RecordingHuman(_FakeHuman):
+    def __init__(self, page):
+        super().__init__()
+        self._page = page
+
+    def click(self, target, **kw):
+        super().click(target, **kw)
+        if target in getattr(self._page, "elements", []):
+            self._page.clicked_index = self._page.elements.index(target)
+
+
+def _like_on(page) -> dict:
+    return browser_mi._icon_action(
+        page, _RecordingHuman(page), "点赞", browser_mi._LIKE_SELECTORS,
+        "#like", "#liked",
+    )
+
+
+# ---------------- 同名元素歧义:_not_effective 的真正成因 ----------------
+#
+# 2026-08-02 真号取证:counts={"engage_bar":2,"like":18} —— 笔记详情是浮层,整页同时
+# 存在多份同名按钮,身后信息流每张卡片也自带一个。此前"读状态"和"点击"都用
+# document.querySelector,拿的是**文档序第一个**,而屏幕上显示的是另一份。
+# 于是点了没反应、图标不翻,**且赞与藏成对失败**(同一份浮层上的两个按钮一起错)。
+# 偏偏两个按钮都报 visible / pointer_events:auto、坐标也正常,单看属性根本看不出问题。
+
+
+def test_clicks_the_hittable_one_not_the_first():
+    """多份同名按钮时,点的必须是**能点到**的那一份,不是文档序第一个。"""
+    page = _AmbiguousPage(total=3, hittable=2)
+
+    result = _like_on(page)
+
+    assert result["status"] == "done"
+    assert page.clicked_index == 2, "点了被盖住的那一份(正是线上失败的样子)"
+
+
+def test_reads_state_from_the_same_element_it_clicks():
+    """读状态与点击必须锁同一份:残留浮层那份是 #liked,可点的那份是 #like。
+
+    读错那份的后果是判 skipped「已点赞」,真正显示的笔记其实一次都没被点到 ——
+    静默漏互动,比报错更难发现。
+    """
+    page = _AmbiguousPage(total=2, hittable=1, hrefs=["#liked", "#like"])
+
+    result = _like_on(page)
+
+    assert result["status"] == "done", "读了第一份的 #liked 就会误判成已点赞"
+    assert page.clicked_index == 1
+
+
+def test_refuses_to_click_when_nothing_is_hittable():
+    """同名元素全被盖住 → 一次都不点并判 error(不知道会点到谁就不点)。"""
+    page = _AmbiguousPage(total=4, hittable=-1)
+    human = _RecordingHuman(page)
+
+    result = browser_mi._icon_action(
+        page, human, "点赞", browser_mi._LIKE_SELECTORS, "#like", "#liked"
+    )
+
+    assert result["status"] == "error"
+    assert "no_hittable_button" in result["reason"]
+    assert human.clicks == []
+    assert page.clicked_index is None
 
 
 def _like(page) -> dict:

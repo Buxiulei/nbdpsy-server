@@ -75,12 +75,56 @@ _COMMENT_ENTRY_SELECTORS = [
 _TEXTAREA = "#content-textarea"
 _SUBMIT = "button.btn.submit"
 
-# 读互动按钮内 <use> 的图标 href(只读取证):#like 未赞 / #liked 已赞,收藏同构。
-_READ_ICON_HREF_JS = r"""
+# 从同名元素里挑出**真正点得到**的那一个,并顺带读它的图标 href(只读)。
+#
+# 为什么不能再用 `document.querySelector(sel)`(2026-08-02 取证结论):它返回**文档序
+# 第一个**,而笔记详情是浮层——整页同时存在多份同名元素。真号取证抓到
+# `counts={"engage_bar":2,"like":18}`:两个互动栏、18 个 like-wrapper(身后信息流每张
+# 卡片自带一个)。于是"读状态"和"点击"都落在残留浮层那一份上,而屏幕上显示的是另一份。
+# 表现就是**点了但图标不翻、且赞与藏成对失败**,偏偏两个按钮都报 visible /
+# pointer_events:auto,坐标也正常——光看单个元素的属性根本看不出问题。
+#
+# 判据用 `elementFromPoint` 复核"这个元素自身中心点命中的是不是它自己":被别的层盖住
+# 的那份必然命中盖在上面的东西。与本模块 `_TEXTAREA_READY_JS` 判输入框可交互、
+# 以及 step7 复核发布按钮是同一手法。
+#
+# **挑不出可命中的就返回 index=-1**,由调用方判 error —— 宁可不点,也不在"不知道会点到
+# 谁"的情况下瞎点(点错那份的后果是静默失败,点对了但状态读错的后果是取消已有互动)。
+_PICK_HITTABLE_JS = r"""
 (sel) => {
-    const el = document.querySelector(sel + ' use');
+    const els = [...document.querySelectorAll(sel)];
+    const out = {total: els.length, index: -1, href: null, skipped: []};
+    for (let i = 0; i < els.length; i++) {
+        const el = els[i];
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) { out.skipped.push([i, 'zero_rect']); continue; }
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) {
+            out.skipped.push([i, 'offscreen']); continue;
+        }
+        const hit = document.elementFromPoint(cx, cy);
+        if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) {
+            out.skipped.push([i, 'covered']); continue;
+        }
+        const use = el.querySelector('use');
+        out.index = i;
+        out.href = use
+            ? (use.getAttribute('xlink:href') || use.getAttribute('href') || null)
+            : null;
+        return out;
+    }
+    return out;
+}
+"""
+
+# 按下标读图标 href(只读):复核必须读点击时那一个,见 ``_read_icon_href_at``。
+_READ_ICON_HREF_AT_JS = r"""
+([sel, index]) => {
+    const el = document.querySelectorAll(sel)[index];
     if (!el) return null;
-    return el.getAttribute('xlink:href') || el.getAttribute('href') || null;
+    const use = el.querySelector('use');
+    if (!use) return null;
+    return use.getAttribute('xlink:href') || use.getAttribute('href') || null;
 }
 """
 
@@ -282,6 +326,15 @@ def _title_matches(card_text: Optional[str], title: str) -> bool:
         if len(trimmed) >= 8 and target.startswith(trimmed):
             return True
     return False
+
+
+def _read_icon_href_at(page, sel: str, index: int) -> Optional[str]:
+    """读第 ``index`` 个同名元素内 ``<use>`` 的图标 href(只读)。
+
+    复核必须读**点击时那一个**:整页有多份同名按钮,退回 ``querySelector`` 就会读到
+    另一份,于是"点对了却复核失败"或"点错了却复核成功"—— 两种误判都出现过。
+    """
+    return page.evaluate(_READ_ICON_HREF_AT_JS, [sel, index])
 
 
 def _resolve_selector(page, candidates: List[str]) -> Optional[str]:
@@ -504,29 +557,52 @@ def _icon_action_steps(
     on_href: str,
     verify_timeout_s: float,
 ) -> Dict[str, Any]:
-    """点赞/收藏动作本体:读图标 → 已激活则跳过 → 拟人点击 → 复核图标真的变了。
+    """点赞/收藏动作本体:挑出真正点得到的那个按钮 → 读图标 → 已激活则跳过 →
+    拟人点击 → 复核图标真的变了。
 
     返回 ``{"status": "done"|"skipped"|"error", "reason"?}``(取证由 ``_icon_action`` 补)。
+
+    **读、点、复核三步必须锁定同一个元素**:整页有多份同名按钮(笔记详情是浮层,
+    身后信息流每张卡片也带一个),取"文档序第一个"会读残留浮层那份、点残留浮层那份,
+    而屏幕上显示的是另一份 —— 这正是 `_not_effective` 的成因(见 `_PICK_HITTABLE_JS`)。
     """
     sel = _resolve_selector(page, selectors)
     if sel is None:
         return {"status": "error", "reason": f"{name}_button_not_found"}
-    href = page.evaluate(_READ_ICON_HREF_JS, sel)
+
+    picked = page.evaluate(_PICK_HITTABLE_JS, sel)
+    index = (picked or {}).get("index", -1)
+    if index is None or index < 0:
+        # 同名元素全被盖住/全在屏外:不知道点下去会命中谁,一次都不点
+        return {
+            "status": "error",
+            "reason": f"{name}_no_hittable_button: {(picked or {}).get('total')} 个同名元素"
+                      f"没一个能点到 {(picked or {}).get('skipped')}",
+        }
+    if (picked or {}).get("total", 1) > 1:
+        # 页面同时存在多份时留一句:它是判断"是不是又撞上浮层残留"的第一手线索
+        logger.info(
+            f"[matrix_interact] {name}: 整页 {picked['total']} 个同名元素,"
+            f"选中第 {index + 1} 个(其余 {picked.get('skipped')})"
+        )
+
+    href = picked.get("href")
     if href and href.endswith(on_href):
         return {"status": "skipped", "reason": f"已{name}"}
     if not href or not href.endswith(off_href):
         # 图标读不出来就不点:宁可不动,也不在状态未知时盲点(盲点可能取消已有互动)
         return {"status": "error", "reason": f"{name}_icon_unreadable: {href!r}"}
 
-    element = page.query_selector(sel)
-    if element is None:
+    elements = page.query_selector_all(sel)
+    if index >= len(elements):
         return {"status": "error", "reason": f"{name}_button_detached"}
-    human.click(element, reason=f"{name}按钮")
+    human.click(elements[index], reason=f"{name}按钮")
 
     deadline = time.monotonic() + verify_timeout_s
     while time.monotonic() < deadline:
         time.sleep(0.5)
-        now_href = page.evaluate(_READ_ICON_HREF_JS, sel)
+        # 复核读**同一个下标**:换回 querySelector 就又回到读错那份的老路了
+        now_href = _read_icon_href_at(page, sel, index)
         if now_href and now_href.endswith(on_href):
             logger.info(f"[matrix_interact] ✓ {name}生效: {href} → {now_href}")
             return {"status": "done"}
