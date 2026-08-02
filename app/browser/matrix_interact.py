@@ -92,7 +92,8 @@ _SUBMIT_STATE_JS = r"""
 }
 """
 
-# 评论是否提交成功(只读取证):输入框已清空 + 文案出现在页面(评论列表)。
+# 评论是否提交成功(只读取证):listed = 文案出现在页面(评论列表)= 判据;
+# cleared = 输入框是否已清空 = 附加信息,不参与判定(理由见 _do_comment 复核段注释)。
 _COMMENT_POSTED_JS = r"""
 (snippet) => {
     const ta = document.querySelector('#content-textarea');
@@ -276,7 +277,8 @@ def _icon_action(
 def _do_comment(page, human: SyncHumanActions, text: str) -> Dict[str, Any]:
     """评论:激活入口 → 等输入区可交互 → 逐字输入 → 等发送键可用 → 发送 → 复核。
 
-    返回 ``{"status": "done"|"error", "reason"?}``。文案由调用方传入且**必填**——评论
+    返回 ``{"status": "done"|"error", "reason"?, "cleared"?}``;``cleared`` 是复核时
+    输入框是否已清空,**仅供排查**不参与成败判定。文案由调用方传入且**必填**——评论
     自 2026-07-31 起是独立能力(``comment_on_note`` / REST ``note-comments``),不再是
     矩阵互动里那个"可以不传就跳过"的可选动作,故空文案是**入参错误**记 error。
     (历史上这里返回过 ``not_requested``,那是为了让"没要求评论"不被当成失败证据;
@@ -329,22 +331,34 @@ def _do_comment(page, human: SyncHumanActions, text: str) -> Dict[str, Any]:
         return {"status": "error", "reason": "comment_submit_detached"}
     human.click(submit, reason="发送评论")
 
-    # 复核:输入框清空 + 文案出现在页面(评论列表)
+    # 复核:文案出现在评论列表(listed)即算发出,cleared 只作附加信息随结果带出。
+    #
+    # 为什么 cleared 不能当判据:它是**前端表现**——输入框残留空白字符、placeholder
+    # 被读成内容、或清空比列表渲染慢一拍而我们读得太早,都会让 cleared=False。而
+    # listed=True 意味着评论已经渲染进列表,是**服务端已接收**的铁证。曾把两者做成
+    # "与",导致 7 条真发出去的评论被记 error(台账失真,且一旦有重试会重复发)。
+    #
+    # 为什么 listed 不能松:它防的是"点了发送但根本没发出去"——只看点击动作就判成功
+    # 会把发送失败一律记成 done,这是当初设复核的原始初衷,必须保留。
     snippet = (text or "").strip()[:12]
     posted = {}
     deadline = time.monotonic() + 12.0
     while time.monotonic() < deadline:
         time.sleep(0.6)
         posted = page.evaluate(_COMMENT_POSTED_JS, snippet)
-        if posted.get("cleared") and posted.get("listed"):
-            logger.info(f"[matrix_interact] ✓ 评论已发出: {snippet!r}")
-            return {"status": "done"}
+        if posted.get("listed"):
+            logger.info(
+                f"[matrix_interact] ✓ 评论已发出: {snippet!r}"
+                f"(cleared={posted.get('cleared')})"
+            )
+            return {"status": "done", "cleared": bool(posted.get("cleared"))}
     return {
         "status": "error",
         "reason": (
-            f"comment_unverified: 发送后未复核到评论"
+            f"comment_unverified: 发送后评论未出现在列表"
             f"(cleared={posted.get('cleared')}, listed={posted.get('listed')})"
         ),
+        "cleared": bool(posted.get("cleared")),
     }
 
 

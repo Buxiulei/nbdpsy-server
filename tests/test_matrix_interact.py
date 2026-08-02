@@ -344,6 +344,70 @@ def test_comment_empty_text_is_error_not_skip(text):
     assert human.clicks == [] and human.typed == []
 
 
+class _FakeClock:
+    """假时钟:sleep 不真睡只推进虚拟时间,让 _do_comment 的轮询超时分支秒级跑完。"""
+
+    def __init__(self):
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _comment_page(posted: dict) -> _FakePage:
+    """造一个"评论链路全程顺畅"的假页面,只有最后的复核结果由 posted 决定。"""
+    elements = {
+        browser_mi._COMMENT_ENTRY_SELECTORS[0]: _FakeElement("评论"),
+        browser_mi._TEXTAREA: _FakeElement(),
+        browser_mi._SUBMIT: _FakeElement(),
+    }
+
+    def _evaluate(js, arg=None):
+        if js is browser_mi._TEXTAREA_READY_JS:
+            return {"ready": True, "reason": "ok"}
+        if js is browser_mi._SUBMIT_STATE_JS:
+            return {"found": True, "gray": False}
+        if js is browser_mi._COMMENT_POSTED_JS:
+            return dict(posted)
+        raise AssertionError(f"未预期的 evaluate: {js[:40]!r}")
+
+    return _FakePage(elements=elements, evaluate=_evaluate)
+
+
+@pytest.mark.parametrize("cleared", [False, True])
+def test_comment_listed_is_done_regardless_of_cleared(monkeypatch, cleared):
+    """listed=True 即 done —— cleared 是前端表现(残留空白/清空延迟)不能当判据。
+
+    cleared=False 那条是本次修复的核心用例:7 条真发出去的评论曾因此被记 error。
+    """
+    monkeypatch.setattr(browser_mi, "time", _FakeClock())
+    page = _comment_page({"cleared": cleared, "listed": True})
+    human = _FakeHuman()
+
+    result = browser_mi._do_comment(page, human, "写得真好")
+
+    assert result["status"] == "done"
+    assert "reason" not in result
+    # cleared 只作附加信息随结果带出,供日后排查前端清空行为
+    assert result["cleared"] is cleared
+    assert human.typed == [(page.query_selector(browser_mi._TEXTAREA), "写得真好")]
+
+
+def test_comment_not_listed_is_error(monkeypatch):
+    """listed=False → error(不能松:这条防的是"点了发送但根本没发出去")。"""
+    monkeypatch.setattr(browser_mi, "time", _FakeClock())
+    page = _comment_page({"cleared": True, "listed": False})
+
+    result = browser_mi._do_comment(page, _FakeHuman(), "写得真好")
+
+    assert result["status"] == "error"
+    assert "comment_unverified" in result["reason"]
+    assert result["cleared"] is True
+
+
 def test_comment_on_note_success(monkeypatch):
     """评论发出并复核 → {note_url, commented:True},无 error 键(台账落 done)。"""
     monkeypatch.setattr(browser_mi, "_open_note_by_title",
