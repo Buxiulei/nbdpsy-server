@@ -328,6 +328,80 @@ def _title_matches(card_text: Optional[str], title: str) -> bool:
     return False
 
 
+class InteractionResponses:
+    """被动收点赞/收藏接口的响应(``page.on("response")``),**一个请求都不构造**。
+
+    为什么非要它:取证只看得见 DOM,而 DOM 分不出两件完全不同的事 ——
+    **点击压根没送出去** 和 **送出去了、服务端拒了**。两者在页面上长得一模一样:
+    图标不翻。2026-08-02 排查 `_not_effective` 卡在这里:元素唯一、可见、
+    `pointer_events:auto`、通过了 `elementFromPoint` 复核、点了,图标就是不动。
+    到这一步 DOM 侧的线索已经出尽,只有接口返回能定性。
+
+    与 ``ComponentResponses`` / ``_PostedCollector`` 同款纪律:响应体必须在回调里**当场读**
+    (导航之后就取不到了);任何解析异常只吞掉,绝不让监听器抛异常打断页面事件派发。
+
+    **不写死具体路径**:小红书这几个接口路径改过不止一次,写死等于哪天悄悄失效还没人知道。
+    改用"URL 里同时像笔记接口、又带 like/collect 字样"这种宽匹配,宁可多收几条无关的
+    ——取证多一条只是多几十字节,少一条就是又一轮白排查。
+    """
+
+    _HINTS = ("like", "dislike", "collect", "uncollect")
+
+    def __init__(self) -> None:
+        self.hits: List[Dict[str, Any]] = []
+        self._page = None
+
+    def handle(self, response) -> None:
+        try:
+            url = response.url or ""
+        except Exception:  # noqa: BLE001 — 响应对象已失效,读 url 都会炸
+            return
+        low = url.lower()
+        if "/note/" not in low and "/sns/" not in low:
+            return
+        if not any(h in low for h in self._HINTS):
+            return
+        hit: Dict[str, Any] = {"url": url[:200]}
+        try:
+            hit["status"] = response.status
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                # 只留定性用的三个字段:成没成、错误码、错误话术。整个 body 没必要落库。
+                hit["success"] = body.get("success")
+                hit["code"] = body.get("code")
+                hit["msg"] = str(body.get("msg") or "")[:120]
+        except Exception:  # noqa: BLE001 — 读不到 body 就只留 url + status
+            hit["body_unreadable"] = True
+        self.hits.append(hit)
+
+    def attach(self, page) -> None:
+        if self._page is page:
+            return
+        self.detach()
+        try:
+            page.on("response", self.handle)
+            self._page = page
+        except Exception:  # noqa: BLE001 — 挂不上监听不该阻断互动本身
+            logger.warning("[matrix_interact] 互动接口监听挂载失败(忽略,只是少一份取证)")
+
+    def detach(self) -> None:
+        """摘监听:page 会被后续任务复用,留着会继续吃响应体。"""
+        if self._page is None:
+            return
+        try:
+            self._page.remove_listener("response", self.handle)
+        except Exception:  # noqa: BLE001
+            logger.warning("[matrix_interact] 摘除互动接口监听失败(忽略)")
+        self._page = None
+
+    def since(self, seen: int) -> List[Dict[str, Any]]:
+        """第 ``seen`` 条之后新收到的(基线由调用方在动作**之前**取)。"""
+        return self.hits[seen:]
+
+
 def _read_icon_href_at(page, sel: str, index: int) -> Optional[str]:
     """读第 ``index`` 个同名元素内 ``<use>`` 的图标 href(只读)。
 
@@ -707,6 +781,35 @@ def _do_comment_steps(page, human: SyncHumanActions, text: str) -> Dict[str, Any
     }
 
 
+def _run_actions(page, human, account_id: int, steps, actions: Dict[str, Any], api) -> None:
+    """逐个跑动作,失败的把**这次动作期间**收到的接口响应并进取证。
+
+    接口响应按动作切片(每个动作前取一次基线),否则收藏失败时会把点赞那次的响应也算进来,
+    看起来像"明明有成功返回却判失败",反而把人带偏。
+    """
+    for i, (key, step) in enumerate(steps):
+        if i:
+            human.wait(1.5, 4.0, context="互动间隔")
+        seen = len(api.hits)  # 基线必须在动作**之前**取
+        try:
+            outcome = step()
+        except Exception as exc:  # 单个动作异常不阻断其余动作
+            logger.warning(f"[matrix_interact] 账号{account_id} {key} 动作异常: {exc}")
+            # 异常路径同样留现场:抛异常时最需要知道页面当时是什么样(取证自带降级)
+            outcome = _with_forensics(
+                page, {"status": "error", "reason": f"{key}_exception: {exc}"}
+            )
+        if outcome.get("status") == "error" and isinstance(outcome.get("forensics"), dict):
+            # api_calls 为空**本身就是结论**:说明点击根本没发出请求,而不是服务端拒了。
+            # 所以哪怕没收到也要如实写上这个键,别因为"空的"就省掉。
+            outcome["forensics"]["api_calls"] = api.since(seen)
+        actions[key] = outcome
+        logger.info(
+            f"[matrix_interact] 账号{account_id} {key}: {outcome['status']}"
+            f" {outcome.get('reason', '')}"
+        )
+
+
 def interact_with_note(
     page,
     account_id: int,
@@ -737,6 +840,11 @@ def interact_with_note(
     note_url = _open_note_by_title(page, human, publisher_user_id, title, note_id)
     _browse_note(human)
 
+    # 挂接口监听:只在失败时把它收到的东西写进取证,成功路径不看它一眼。
+    # 必须在动作**之前**挂好——响应只能在回调里当场读,事后补挂什么都拿不到。
+    api = InteractionResponses()
+    api.attach(page)
+
     actions: Dict[str, Dict[str, Any]] = {}
     steps = (
         ("like", lambda: _icon_action(
@@ -744,21 +852,10 @@ def interact_with_note(
         ("collect", lambda: _icon_action(
             page, human, "收藏", _COLLECT_SELECTORS, "#collect", "#collected")),
     )
-    for i, (key, step) in enumerate(steps):
-        if i:
-            human.wait(1.5, 4.0, context="互动间隔")
-        try:
-            actions[key] = step()
-        except Exception as exc:  # 单个动作异常不阻断其余动作
-            logger.warning(f"[matrix_interact] 账号{account_id} {key} 动作异常: {exc}")
-            # 异常路径同样留现场:抛异常时最需要知道页面当时是什么样(取证自带降级)
-            actions[key] = _with_forensics(
-                page, {"status": "error", "reason": f"{key}_exception: {exc}"}
-            )
-        logger.info(
-            f"[matrix_interact] 账号{account_id} {key}: {actions[key]['status']}"
-            f" {actions[key].get('reason', '')}"
-        )
+    try:
+        _run_actions(page, human, account_id, steps, actions, api)
+    finally:
+        api.detach()  # page 会被后续任务复用,监听留着会一直吃响应体
 
     result: Dict[str, Any] = {"note_url": note_url, "actions": actions}
     # 成败判定:两个动作都不是 done/skipped 才算整体失败。

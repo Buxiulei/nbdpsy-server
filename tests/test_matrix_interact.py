@@ -1307,3 +1307,83 @@ def test_account_worker_resolves_matrix_interact_execute():
     from app import account_worker
 
     assert account_worker._resolve_execute("matrix_interact") is not None
+
+
+# ---------------- 互动接口响应取证:分清"没发出去"和"服务端拒了" ----------------
+#
+# 取证只看得见 DOM,而 DOM 分不出两件完全不同的事:点击压根没送出去 / 送出去了服务端拒了
+# —— 页面上长得一模一样,都是图标不翻。2026-08-02 排查 _not_effective 就卡死在这:
+# 元素唯一、可见、pointer_events:auto、过了 elementFromPoint 复核、点了,图标就是不动。
+# DOM 侧线索出尽,只有接口返回能定性。
+
+
+class _Resp:
+    def __init__(self, url, status=200, body=None, boom=False):
+        self.url = url
+        self.status = status
+        self._body = body
+        self._boom = boom
+
+    def json(self):
+        if self._boom:
+            raise RuntimeError("body 已失效")
+        return self._body
+
+
+def test_collector_keeps_only_like_collect_calls():
+    """只收点赞/收藏相关的,别的接口一律不进取证(免得糊一堆无关噪音)。"""
+    api = browser_mi.InteractionResponses()
+
+    api.handle(_Resp("https://edith.xiaohongshu.com/api/sns/web/v1/note/like",
+                     body={"success": True, "code": 0}))
+    api.handle(_Resp("https://edith.xiaohongshu.com/api/sns/web/v1/note/collect",
+                     body={"success": False, "code": 300012, "msg": "操作过于频繁"}))
+    api.handle(_Resp("https://www.xiaohongshu.com/api/sns/web/v1/feed"))  # 无关
+    api.handle(_Resp("https://www.xiaohongshu.com/static/app.js"))        # 无关
+
+    assert len(api.hits) == 2
+    assert api.hits[0]["success"] is True
+    # 服务端拒绝的形态:HTTP 200 但 success=false + 错误码 —— 这正是要抓的那一种
+    assert api.hits[1]["success"] is False
+    assert api.hits[1]["code"] == 300012
+    assert "频繁" in api.hits[1]["msg"]
+
+
+def test_collector_survives_unreadable_body():
+    """响应体读不出来只标记一下,**绝不抛异常** —— 监听器抛错会打断页面事件派发。"""
+    api = browser_mi.InteractionResponses()
+
+    api.handle(_Resp("https://x/api/sns/web/v1/note/like", boom=True))
+
+    assert api.hits[0]["body_unreadable"] is True
+    assert api.hits[0]["status"] == 200
+
+
+def test_since_slices_per_action():
+    """按动作切片:收藏失败时不该把点赞那次的响应算进来(否则像'有成功返回却判失败')。"""
+    api = browser_mi.InteractionResponses()
+    api.handle(_Resp("https://x/api/sns/web/v1/note/like", body={"success": True}))
+    seen = len(api.hits)
+    api.handle(_Resp("https://x/api/sns/web/v1/note/collect", body={"success": False}))
+
+    only_collect = api.since(seen)
+
+    assert len(only_collect) == 1
+    assert "collect" in only_collect[0]["url"]
+
+
+def test_failed_action_carries_api_calls_even_when_empty():
+    """失败时 api_calls 必须在,**空列表本身就是结论**:点击根本没发出请求。"""
+    page = _ForensicsPage(icon_hrefs=[None])
+    actions = {}
+    api = browser_mi.InteractionResponses()
+
+    browser_mi._run_actions(
+        page, _FakeHuman(), 1,
+        (("like", lambda: browser_mi._icon_action(
+            page, _FakeHuman(), "点赞", browser_mi._LIKE_SELECTORS, "#like", "#liked")),),
+        actions, api,
+    )
+
+    assert actions["like"]["status"] == "error"
+    assert actions["like"]["forensics"]["api_calls"] == []
