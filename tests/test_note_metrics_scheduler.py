@@ -11,7 +11,7 @@ browser_jobs_repo.enqueue 走 db_module.async_session,monkeypatch 指到同一 t
 - 失败退避:第 1 次 error 后未满 1h 跳过、满 1h 补采;第 2 次 error 后未满 2h 跳过;
 - 当日 3 次用尽 → 跳过。
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -22,10 +22,38 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import app.core.db as db_module
+import app.services.note_metrics_scheduler as scheduler_module
 from app.models.browser_job import BrowserJob
 from app.models.note_metric import NoteMetricDaily
 from app.models.xhs_account import XhsAccount
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
+
+# 全模块统一的时间基准:收集时定格在「今天(UTC)正午」,回拨几小时永远落在同一 UTC 日内。
+# 必须冻结的原因:调度器按 UTC 日历日筛「今日台账」(scan_once 的 day_start /
+# snapshot_date 同口径),而退避用例要回拨 130/200 分钟造「历史失败行」。若沿用真实
+# utcnow,UTC 00:00 起的几小时内回拨会甩到前一天、被「今日」窗口过滤掉,于是调度器
+# 少数一次失败、退避档位算错 —— 代码一行没动,测试却随时钟变红(实测 UTC 01:59 红、
+# 前一晚 23:42 全绿)。定格在正午后,任何时刻跑结果都一致。
+_NOW = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+_NOW_NAIVE = _NOW.replace(tzinfo=None)  # 与 created_at(naive UTC)可比
+
+
+class _FrozenDatetime(datetime):
+    """替换被测模块命名空间里的 datetime:now/utcnow 返回固定基准,构造与其余行为不变。"""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _NOW.astimezone(tz) if tz is not None else _NOW_NAIVE
+
+    @classmethod
+    def utcnow(cls):
+        return _NOW_NAIVE
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """冻结被测模块的时间源。patch 打在消费方命名空间(scheduler_module.datetime),不是 datetime 源模块。"""
+    monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
 
 
 @pytest.fixture
@@ -62,7 +90,7 @@ async def _add_export_job(factory, acc_id, status, minutes_ago=0, job_id=None) -
             id=job_id or f"j-{acc_id}-{status}-{minutes_ago}",
             kind="note_export", account_id=acc_id, operator_id=3,
             payload="{}", status=status,
-            created_at=datetime.utcnow() - timedelta(minutes=minutes_ago),
+            created_at=_NOW_NAIVE - timedelta(minutes=minutes_ago),
         ))
         await s.commit()
 
@@ -93,8 +121,7 @@ async def test_scan_skips_snapshot_done_and_inflight(smk):
     snap_id = await _add_account(smk, "已快照", "valid")
     done_id = await _add_account(smk, "已成功", "valid")
     flight_id = await _add_account(smk, "在途", "valid")
-    from datetime import timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = _NOW.strftime("%Y-%m-%d")
     async with smk() as s:
         s.add(NoteMetricDaily(
             account_id=snap_id, title="t", publish_time="p", snapshot_date=today,
@@ -121,7 +148,7 @@ async def test_retry_backoff_geometric(smk):
     # 把这次失败改成 70 分钟前 → 满 1h,补采(第 2 次)
     async with smk() as s:
         j = await s.get(BrowserJob, "e1")
-        j.created_at = datetime.utcnow() - timedelta(minutes=70)
+        j.created_at = _NOW_NAIVE - timedelta(minutes=70)
         await s.commit()
     assert await sched.scan_once() == 1
 
@@ -132,19 +159,20 @@ async def test_retry_backoff_geometric(smk):
             select(BrowserJob).where(BrowserJob.kind == "note_export",
                                      BrowserJob.account_id == acc)
         )).scalars().all())
-        # 先算 min/max 再 mutate(改 created_at 会影响 key,先改再算会二者选中同一对象)
-        second = max(jobs, key=lambda j: j.created_at)  # 刚 enqueue 的第 2 次
-        first = min(jobs, key=lambda j: j.created_at)   # e1
+        # 按 id 认人:刚 enqueue 那条的 created_at 由模型默认值(真实 utcnow)写入,
+        # 与冻结基准不同源,不能靠先后顺序区分。
+        second = next(j for j in jobs if j.id != "e1")
+        first = next(j for j in jobs if j.id == "e1")
         second.status = "error"
-        second.created_at = datetime.utcnow() - timedelta(minutes=90)
-        first.created_at = datetime.utcnow() - timedelta(minutes=200)
+        second.created_at = _NOW_NAIVE - timedelta(minutes=90)
+        first.created_at = _NOW_NAIVE - timedelta(minutes=200)
         await s.commit()
     assert await sched.scan_once() == 0
 
     # 第 2 次挪到 130 分钟前 → 满 2h,补采(第 3 次)
     async with smk() as s:
         j = await s.get(BrowserJob, second.id)
-        j.created_at = datetime.utcnow() - timedelta(minutes=130)
+        j.created_at = _NOW_NAIVE - timedelta(minutes=130)
         await s.commit()
     assert await sched.scan_once() == 1
 
@@ -152,14 +180,10 @@ async def test_retry_backoff_geometric(smk):
 async def test_daily_attempts_capped_at_three(smk):
     """当日已 3 次(全 error 且退避早已过)→ 次数用尽,不再补采。"""
     acc = await _add_account(smk, "耗尽号", "valid")
-    # ⚠️ 偏移必须小到「无论几点跑都还在今天(UTC)」:原写 600/500/400 分钟前,凌晨跑时
-    # 这些落到昨天被今日窗口过滤掉 → 次数不足 3 → 测试变红(实测 UTC 04:25 红)。
-    # 次数上限在 scan_once 里先于退避判定,故记录多久以前无关紧要,只要属于今天。
-    now = datetime.utcnow()
-    day_start = datetime(now.year, now.month, now.day)
+    # 6h/5h/4h 前三连败:最近一次也远超 2h 退避,只剩「当日次数用尽」这一条能挡住补采。
+    # 基准已冻结在正午,回拨 6h 仍在同一 UTC 日内,不会被今日窗口筛掉。
     for i in range(3):
-        ago = min(i + 1, max(0, int((now - day_start).total_seconds() // 60) - 1))
-        await _add_export_job(smk, acc, "error", minutes_ago=ago, job_id=f"x{i}")
+        await _add_export_job(smk, acc, "error", minutes_ago=360 - i * 60, job_id=f"x{i}")
 
     sched = NoteMetricsScheduler(smk, interval=999)
     assert await sched.scan_once() == 0
