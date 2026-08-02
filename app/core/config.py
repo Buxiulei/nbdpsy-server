@@ -73,6 +73,9 @@ class Settings(BaseSettings):
 
     # 调试截图开关
     DEBUG_SCREENSHOTS_ENABLED: bool = False
+    # 调试截图保留天数(0=不清理)。截图目录只增不减,2026-08-02 实测已 1633 个 / 469MB;
+    # 磁盘满了会把发布、补量、同步一起拖垮。清理在每次发布前顺手做,不另起调度器。
+    DEBUG_SCREENSHOT_RETENTION_DAYS: int = 14
 
     # ── 选择器自愈(SelfHealLocator)。默认关闭,配 LLM_API_KEY 且开 ENABLED 才生效。 ──
     SELFHEAL_ENABLED: bool = False

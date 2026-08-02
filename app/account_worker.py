@@ -281,6 +281,8 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
         return sync_client.publish_once(
             account_id, cookies, job["title"], job["content"], image_paths, topics,
             components,
+            # 截图打上 job 标记,失败现场才能按 job 取回(GET /api/publish-jobs/{id}/artifacts)
+            job_tag=str(job["id"]),
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

@@ -585,8 +585,12 @@ class SyncClient:
         image_paths: List[str],
         topics: Optional[List[str]] = None,
         components: Optional[Dict[str, Any]] = None,
+        job_tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """走 step1-6 录入内容 + 三组件(可选)+ step7 真发布。
+
+        ``job_tag``:发布任务 id,只用来给失败现场截图打标,让运营能按 job 取回
+        (见 ``XHSPublishAtomicTasks._take_screenshot``);不传则行为与上线前一致。
 
         step1 会打开新窗口并把内部 page 引用切到创作中心;这里发布结束后把
         ``self.page`` 同步到 atomic 的最终 page,供 stop() 正确收尾。
@@ -600,7 +604,7 @@ class SyncClient:
         服务器浏览器本地,用户手机/其它设备看不到,毫无交付价值;且拟人化链路多轮真发
         验证后该保险已无必要。)
         """
-        atomic = XHSPublishAtomicTasks(self.page)
+        atomic = XHSPublishAtomicTasks(self.page, job_tag=job_tag)
         # 三组件要用到编辑器加载时页面自己发的活动列表响应,故监听必须在 step1 之后、
         # 编辑器加载之前就挂上(响应过期了就读不回来了)。不设组件时一个监听都不挂。
         responses = None
@@ -753,6 +757,7 @@ def publish_once(
     image_paths: List[str],
     topics: Optional[List[str]] = None,
     components: Optional[Dict[str, Any]] = None,
+    job_tag: Optional[str] = None,
 ) -> PublishResult:
     """一次性:建 client → start → 录入内容 → 三组件(可选)→ step7 真发布 → stop。
 
@@ -765,7 +770,9 @@ def publish_once(
         if not start.get("success"):
             return PublishResult(success=False, error=start.get("error"))
 
-        result = client.publish_note(title, content, image_paths, topics, components)
+        result = client.publish_note(
+            title, content, image_paths, topics, components, job_tag=job_tag
+        )
         return PublishResult(
             success=bool(result.get("success")),
             note_id=result.get("note_id", "") or "",

@@ -93,6 +93,38 @@ def dedupe_topics(tags: Optional[List[str]]) -> List[str]:
     return dedup[:XHS_MAX_TOPICS]
 
 
+def _prune_old_screenshots(root: str, keep_days: int) -> int:
+    """删掉超期的调试截图,返回删了几个;**绝不抛异常**。
+
+    为什么需要:截图目录只增不减 —— 2026-08-02 实测已经 1633 个文件 / 469MB。
+    这不是"以后再说"的问题:磁盘满了会把发布、补量、同步一起拖垮。
+
+    **故意不新起一个调度器**:发布本来就低频,每次发布前顺手扫一次目录足够了,
+    比多养一个后台任务简单得多(且截图只在发布路径产生,清理跟着它走天然对齐)。
+
+    ``keep_days <= 0`` 视为不清理(留给需要长期取证的排查期)。
+    清理失败只告警:它是卫生工作,绝不能让一次删不掉的文件把发布搞崩。
+    """
+    if keep_days <= 0:
+        return 0
+    try:
+        cutoff = time.time() - keep_days * 86400
+        removed = 0
+        for path in Path(root).glob("*.png"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue  # 单个文件删不掉就跳过,不影响其余
+        if removed:
+            logger.info(f"[atomic_tasks] 清理超期调试截图 {removed} 个(保留 {keep_days} 天)")
+        return removed
+    except Exception as exc:  # noqa: BLE001 — 卫生工作绝不阻断发布
+        logger.warning(f"[atomic_tasks] 清理调试截图异常(忽略): {exc}")
+        return 0
+
+
 class XHSPublishAtomicTasks:
     """小红书发布笔记的原子任务集合(sync Playwright)。
 
@@ -100,7 +132,8 @@ class XHSPublishAtomicTasks:
     随机延迟等拟人化行为,避免被小红书反自动化检测。
     """
 
-    def __init__(self, page: Page, enable_debug: Optional[bool] = None, screenshot_dir: Optional[str] = None):
+    def __init__(self, page: Page, enable_debug: Optional[bool] = None,
+                 screenshot_dir: Optional[str] = None, job_tag: Optional[str] = None):
         """初始化原子任务执行器。
 
         Args:
@@ -108,6 +141,8 @@ class XHSPublishAtomicTasks:
             enable_debug: 是否截图。None 跟随全局总开关 DEBUG_SCREENSHOTS_ENABLED;
                 即使显式 True 也被全局开关 AND 压制(防绕过撑满磁盘)。
             screenshot_dir: 截图目录;None → DATA_DIR/debug_screenshots
+            job_tag: 发布任务 id。给了就写进截图文件名,让失败现场能按 job 取回
+                (见 ``_take_screenshot``);不给则文件名与本参数上线前逐字节一致。
         """
         from app.core.config import settings
         self.page = page
@@ -115,6 +150,12 @@ class XHSPublishAtomicTasks:
         self.enable_debug = global_on if enable_debug is None else (enable_debug and global_on)
         self.screenshot_dir = screenshot_dir or str(Path(settings.DATA_DIR) / "debug_screenshots")
         self.current_step = 0
+        # 只收 [0-9A-Za-z_-]:文件名要用它,放行别的字符等于把路径拼接权交给调用方
+        self.job_tag = re.sub(r"[^0-9A-Za-z_-]", "", str(job_tag)) if job_tag else ""
+        if self.enable_debug:
+            _prune_old_screenshots(
+                self.screenshot_dir, settings.DEBUG_SCREENSHOT_RETENTION_DAYS
+            )
 
         # 拟人化操作层(所有页面交互必须经过此层)
         from app.browser.sync_human_actions import SyncHumanActions
@@ -126,12 +167,22 @@ class XHSPublishAtomicTasks:
         self._locator = SelfHealLocator()
 
     def _take_screenshot(self, name: str) -> str:
-        """保存截图(仅在调试模式下),返回路径或空串。"""
+        """保存截图(仅在调试模式下),返回路径或空串。
+
+        文件名带 ``job{id}_`` 前缀(有 job_tag 时):截图一直在存,但此前**没有任何东西
+        把它和某次发布关联起来**,于是运营拿不到失败现场,只能对着一句「发布超时(30秒)」
+        换变量试错。带上前缀后按前缀 glob 就能取回该次发布的全部现场,
+        **不需要为此加数据库列**。
+        """
         if not self.enable_debug:
             return ""
         os.makedirs(self.screenshot_dir, exist_ok=True)
         timestamp = int(time.time())
-        screenshot_path = f"{self.screenshot_dir}/publish_{self.current_step:02d}_{name}_{timestamp}.png"
+        prefix = f"job{self.job_tag}_" if self.job_tag else ""
+        screenshot_path = (
+            f"{self.screenshot_dir}/{prefix}publish_"
+            f"{self.current_step:02d}_{name}_{timestamp}.png"
+        )
         try:
             self.page.screenshot(path=screenshot_path)
             logger.info(f"📸 截图已保存: {screenshot_path}")

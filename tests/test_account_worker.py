@@ -124,10 +124,15 @@ def _patch_publish_once(monkeypatch, result_or_exc, calls=None):
     """monkeypatch 拟人层入口:记录调用并返回固定结果 / 抛异常。"""
 
     def fake_publish_once(
-        account_id, cookies, title, content, image_paths, topics, components=None
+        account_id, cookies, title, content, image_paths, topics, components=None,
+        job_tag=None,
     ):
+        # job_tag 是发布任务 id,只用于给失败现场截图打标(见 publish_artifacts_rest);
+        # 记进 calls 让"确实按 job 打了标"这条能被断言,而不是悄悄没传。
         if calls is not None:
-            calls.append((account_id, cookies, title, content, image_paths, topics))
+            calls.append(
+                (account_id, cookies, title, content, image_paths, topics, job_tag)
+            )
         if isinstance(result_or_exc, Exception):
             raise result_or_exc
         return result_or_exc
@@ -178,8 +183,11 @@ def test_publish_success_terminal(wdb, monkeypatch):
     assert job.started_at is not None
     assert job.retries == 0
     # 发布参数由 job 正确拆出(账号无 cookie → 空列表)
-    acc_id, cookies, title, content, image_paths, topics = calls[0]
+    acc_id, cookies, title, content, image_paths, topics, job_tag = calls[0]
     assert (acc_id, cookies, title, content) == (account_id, [], "标题", "正文")
+    # job_tag 必须是这条任务的 id:截图靠它打前缀,不传就等于失败现场又取不回来了
+    # (GET /api/publish-jobs/{id}/artifacts 会永远返回空,而且是**静默**的)
+    assert job_tag == str(job_id)
 
 
 def test_publish_failure_schedules_retry(wdb, monkeypatch):
@@ -608,7 +616,7 @@ def test_publish_materializes_images_before_publish(wdb, monkeypatch):
     aw.run_publish_job(db_path, account_id, job_id)
 
     assert captured["materialize"][0] == ["https://cdn/a.png"]
-    _, _, _, _, image_paths, topics = calls[0]
+    _, _, _, _, image_paths, topics, _ = calls[0]
     # 交给浏览器的是去水印后的产物,不是物料化的原图
     assert image_paths == ["/local/a.png.shot.jpg"]
     assert topics == ["#心理"]
@@ -643,7 +651,7 @@ def test_publish_dewatermarks_every_image_in_page_order(wdb, monkeypatch):
 
     # 逐张过闸,且按页序
     assert dw_calls == ["/local/img_00.png", "/local/img_01.png", "/local/img_02.png"]
-    _, _, _, _, image_paths, _ = calls[0]
+    _, _, _, _, image_paths, _, _ = calls[0]
     assert image_paths == [
         "/local/img_00.png.shot.jpg",
         "/local/img_01.png.shot.jpg",

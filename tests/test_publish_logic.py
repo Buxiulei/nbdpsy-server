@@ -186,8 +186,9 @@ def test_publish_note_propagates_step2_need_manual_login(monkeypatch):
     from app.browser import sync_client as sc
 
     class _FakeAtomic:
-        def __init__(self, page):
+        def __init__(self, page, job_tag=None):
             self.page = page
+            self.job_tag = job_tag  # 只用于给截图打标,不参与发布逻辑
 
         def step1_open_publish_page(self):
             return {"success": True, "url": "https://creator.xiaohongshu.com/publish"}
