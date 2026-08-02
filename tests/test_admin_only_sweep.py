@@ -35,6 +35,7 @@ _ADMIN_ONLY_BODIES: dict[tuple[str, str], dict | None] = {
         "note": "扫描用,不应写入",
     },
     ("DELETE", "/api/content-archive/{archive_id}"): None,
+    ("POST", "/api/interaction-backfills"): {"scope": "all"},
 }
 
 

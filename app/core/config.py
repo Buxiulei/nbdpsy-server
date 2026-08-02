@@ -170,6 +170,15 @@ class Settings(BaseSettings):
     # 被弹墙(其中一个靠人工扫码才解开)。调大这个值等于直接加快踩墙速度,谨慎。
     NOTE_PURPOSE_BACKFILL_LIMIT: int = 3
 
+    # ── 历史笔记互动补量(interaction_backfill)──
+    # **两道篇数闸,谁都不能省**。补量是"对老笔记的集中互动",是平台眼里最典型的补量特征,
+    # 风险高于"新笔记发布后互动";而全矩阵补一遍是 139 篇 × 6 个号 ≈ 834 次互动。
+    # 日上限:每个互动方账号每天最多互动几篇(全量补完 ≈ 6 天,这是**刻意的**);
+    # 单轮上限:一次任务最多做几篇,超出的留给下一轮。
+    # 调大任何一个都等于加快踩风控墙的速度,**风险由业务侧承担**。
+    NOTE_INTERACTION_DAILY_LIMIT: int = 20
+    NOTE_INTERACTION_ROUND_LIMIT: int = 5
+
     # ── 草稿箱周清理(draft_clean_scheduler)──
     # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
     DRAFT_CLEAN_INTERVAL: int = 86400

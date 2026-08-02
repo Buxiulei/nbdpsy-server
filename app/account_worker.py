@@ -365,6 +365,12 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_comment
 
         return lambda account_id, payload: note_comment.execute(account_id, payload)
+    if kind == "interaction_backfill":
+        from app.services import interaction_backfill
+
+        return lambda account_id, payload: interaction_backfill.execute(
+            account_id, payload
+        )
     if kind == "note_visibility":
         from app.services import note_visibility
 

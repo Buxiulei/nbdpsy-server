@@ -7,6 +7,7 @@
 from app.models.browser_job import BrowserJob
 from app.models.content_archive import ContentArchive
 from app.models.note_deletion import NoteDeletion
+from app.models.note_interaction import NoteInteraction
 from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.psych_glossary import PsychGlossary
@@ -27,6 +28,7 @@ __all__ = [
     "ContentArchive",
     "PublishedNote",
     "NoteDeletion",
+    "NoteInteraction",
     "RiskEvent",
     "NoteMetric",
     "NoteMetricDaily",

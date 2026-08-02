@@ -151,7 +151,8 @@ MANIFEST_ENTRIES = [
         "summary": "轮询台账同步结果",
         "admin_only": False, "params": {"sync_id": "path,str"},
         "returns": "{status, note_count?, refreshed?, linked?, linked_by_title?, orphan?, "
-                   "ambiguous?, pending_remaining?, missing?, purpose_backfill_id?, reason?}",
+                   "ambiguous?, pending_remaining?, missing?, purpose_backfill_id?, "
+                   "interaction_job_ids?, reason?}",
         "errors": "403=无该号授权;404=sync_id 不存在",
         "notes": "status 四态:queued(待派发)/running(同步中)/done(附计数)/error(附 reason,"
                  "如账号无可用 cookie、浏览器起不来;不代表下次必失败,可直接重发)。"
@@ -162,7 +163,11 @@ MANIFEST_ENTRIES = [
                  "留着下次);pending_remaining=还剩几条没补上 id;missing=台账有但这次列表里没见到"
                  "(可能被删/被限流,行保留)。本 kind 幂等,僵死会自动重跑,故**不会**出现 unknown。"
                  "purpose_backfill_id=同步顺带登记的核心目的回填任务 id(该号已有在途回填任务、"
-                 "或没有可回填的笔记时为 null),可拿它去 GET /api/note-purpose-backfills/{id} 轮询。",
+                 "或没有可回填的笔记时为 null),可拿它去 GET /api/note-purpose-backfills/{id} 轮询。"
+                 "interaction_job_ids=**发现了手工新增笔记(orphan>0)时**顺带登记的互动补量任务 id 列表"
+                 "(矩阵内其余账号各一条,已有在途任务/今日到量/没得可补的号不登记),可拿它们去 "
+                 "GET /api/interaction-backfills/{job_id} 轮询;这些任务只做点赞 + 收藏,**不评论**"
+                 "(评论只在本系统发布时触发)。",
     },
     {
         "method": "POST", "path": "/api/accounts/{account_id}/note-purpose-backfills",
