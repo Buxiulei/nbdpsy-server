@@ -1060,3 +1060,56 @@ def test_account_worker_resolves_note_ledger_execute():
     from app import account_worker
 
     assert account_worker._resolve_execute("note_ledger_sync") is not None
+
+
+# ---------------- 平台报 0 篇但台账有行:判失败不落库(2026-08-02 运营上报) ----------------
+#
+# 现象:账号8 从某刻起稳定 note_count:0 + missing:9,任务却报 done。同一时刻 --ledger 能
+# 列出 9 篇、cookie 检测拿得到 total_notes=10 —— 平台这次说 0 篇,与上次说 9 篇、与它自己
+# 的 total_notes 全对不上。
+#
+# 实际代价:台账因此把 9 篇全标 missing、last_synced_at 停在坏掉那一刻,于是已下架的违规
+# 笔记一直被当成公开笔记,补量每个号每天各白开一次浏览器去找它(140 个名额里烧掉 7 个)。
+#
+# 这组用例锁的是:**分不清"平台清空了"和"这次没抓到"时,一律不当真**。
+
+
+async def _count_rows(db, account_id: int) -> int:
+    return len((await db.execute(
+        select(PublishedNote).where(PublishedNote.account_id == account_id)
+    )).scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_empty_list_with_existing_ledger_is_refused(db):
+    """平台返回 0 篇、台账却有行 → 判失败,**一行都不动**。"""
+    db.add(PublishedNote(
+        account_id=8, note_id="n-1", title="在线的笔记",
+        published_at=datetime(2026, 7, 1), sync_status="orphan",
+    ))
+    await db.commit()
+
+    reason = await svc._empty_but_ledger_has_rows(db, 8, [])
+
+    assert reason is not None
+    assert "posted_list_empty_but_ledger_has_1" in reason
+    assert await _count_rows(db, 8) == 1  # 没被标 missing、更没被删
+
+
+@pytest.mark.asyncio
+async def test_empty_list_on_fresh_account_is_fine(db):
+    """新号台账本来就空,平台返回 0 篇是**真的**没笔记 —— 不能误伤。"""
+    assert await svc._empty_but_ledger_has_rows(db, 99, []) is None
+
+
+@pytest.mark.asyncio
+async def test_non_empty_list_always_passes(db):
+    """抓到笔记就正常走同步,哪怕台账里比这次多(少的那些仍只记 missing 不删)。"""
+    for i in range(3):
+        db.add(PublishedNote(
+            account_id=8, note_id=f"n-{i}", title=f"第{i}篇",
+            published_at=datetime(2026, 7, 1), sync_status="orphan",
+        ))
+    await db.commit()
+
+    assert await svc._empty_but_ledger_has_rows(db, 8, [{"id": "n-0"}]) is None

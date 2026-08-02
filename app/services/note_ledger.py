@@ -33,7 +33,7 @@ from typing import Any, Optional
 from urllib.parse import urlencode
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.browser.account_locks import account_locks
 from app.browser.browser_gate import browser_slot
@@ -248,6 +248,9 @@ async def execute(account_id: int, payload: dict) -> dict:
                 notes = await asyncio.to_thread(_fetch_sync, account_id, cookies)
         # 抓取成功才落库:用 get_session()(测试对 async_session monkeypatch 生效)。
         async with get_session() as session:
+            suspicious = await _empty_but_ledger_has_rows(session, account_id, notes)
+            if suspicious is not None:
+                return {"error": suspicious}
             stats = await sync_notes(session, account_id, notes, now)
         # 手工发布的笔记(orphan)本地连正文都没有:同步完登记一条核心目的回填任务,
         # 由它按节流每轮补几篇(见 app/services/note_purpose.py 纪律 1)。**绝不抛错**
@@ -272,6 +275,44 @@ async def execute(account_id: int, payload: dict) -> dict:
     except Exception as exc:  # 兜底:异常也要给终态结果,别让台账悬挂
         logger.exception(f"笔记台账同步任务异常 account_id={account_id}")
         return {"error": f"笔记台账同步任务异常:{exc}"}
+
+
+async def _empty_but_ledger_has_rows(session, account_id: int, notes: list) -> Optional[str]:
+    """平台报 0 篇、台账却有行 → 返回失败原因(判 error 不落库);正常返回 ``None``。
+
+    为什么必须挡这一下(2026-08-02 运营上报):账号8 从某一刻起稳定
+    ``note_count:0`` + ``missing:9``,任务却报 ``done``。同一时刻 ``--ledger`` 能列出
+    9 篇、cookie 检测拿得到 ``total_notes=10`` —— **平台这次说 0 篇,与上一次说 9 篇、
+    与它自己的 total_notes 全都对不上**,这种自相矛盾只能当抓取不可信,不能当真。
+
+    ``fetch_posted_notes`` 已经区分过"完全没收到响应"(抛错)和"响应说 0 篇"(返回 []),
+    所以走到这里的空集是**接口真的回了空**。但接口回空不等于笔记没了:账号被限流、
+    笔记在审核中、creator 域会话半登录,都会回空。**分不清就不许当成"平台清空了"。**
+
+    代价是实打实的:台账因此把 9 篇全标 ``missing`` 且 ``last_synced_at`` 停在坏掉那一刻,
+    于是下架的违规笔记一直被当成公开笔记,补量每个号每天各白开一次浏览器去找它。
+
+    **只挡"空集 + 台账有行"这一种**:新号本来就没笔记,首次同步返回空是正常的,
+    那时台账也没有行,不会误伤。
+    """
+    if notes:
+        return None
+    existing = (
+        await session.execute(
+            select(func.count())
+            .select_from(PublishedNote)
+            .where(PublishedNote.account_id == account_id)
+        )
+    ).scalar() or 0
+    if not existing:
+        return None  # 台账本来就是空的:该号确实没笔记,空集是真的
+    reason = (
+        f"posted_list_empty_but_ledger_has_{existing}: 平台笔记列表返回 0 篇,"
+        f"但台账里有 {existing} 条 —— 抓取结果不可信,本次不落库"
+        f"(不把'这次没见到'当成'笔记已删除')"
+    )
+    logger.warning(f"[note_ledger] 账号{account_id} {reason}")
+    return reason
 
 
 def _fetch_sync(account_id: int, cookies: list[dict]) -> list[dict]:
