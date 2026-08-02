@@ -48,7 +48,7 @@ from app.core.db import get_session
 from app.models.content_archive import ContentArchive
 from app.models.publish_job import PublishJob
 from app.models.published_note import PublishedNote
-from app.services import browser_jobs_repo
+from app.services import browser_jobs_repo, interaction_backfill
 from app.services import note_purpose as note_purpose_module
 from app.services.cookie_check import load_account_cookies
 
@@ -253,7 +253,19 @@ async def execute(account_id: int, payload: dict) -> dict:
         # 由它按节流每轮补几篇(见 app/services/note_purpose.py 纪律 1)。**绝不抛错**
         # ——登记失败不能把已经落好库的同步结果拖成 error。
         backfill_id = await note_purpose_module.schedule_backfill_if_needed(account_id)
-        return {"note_count": len(notes), **stats, "purpose_backfill_id": backfill_id}
+        # 这次真的发现了手工新增的笔记(新建了 orphan 行)才登记互动补量:让矩阵内其余
+        # 账号去点赞收藏(**不含评论** —— 评论只在本系统发布时触发)。同样**绝不抛错**。
+        interaction_job_ids = (
+            await interaction_backfill.schedule_after_sync(account_id)
+            if stats.get("orphan")
+            else []
+        )
+        return {
+            "note_count": len(notes),
+            **stats,
+            "purpose_backfill_id": backfill_id,
+            "interaction_job_ids": interaction_job_ids,
+        }
     except CreatorNoteListError as exc:
         logger.warning(f"笔记台账同步失败 account_id={account_id} reason={exc.reason}")
         return {"error": exc.reason}

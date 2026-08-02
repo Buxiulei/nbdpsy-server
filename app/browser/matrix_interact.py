@@ -353,6 +353,7 @@ def interact_with_note(
     account_id: int,
     publisher_user_id: str,
     title: str,
+    note_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """对发布者某篇笔记执行点赞 + 收藏(动作粒度汇总,互不阻断)。
 
@@ -362,7 +363,9 @@ def interact_with_note(
         page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
         account_id: 互动方账号 id(日志用)。
         publisher_user_id: 发布者的小红书 user_id(主页路径定位用)。
-        title: 目标笔记标题(标题匹配,匹配不到即放弃)。
+        title: 目标笔记标题(``note_id`` 给不出时的兜底匹配依据,匹配不到即放弃)。
+        note_id: 目标笔记的平台 id,**定位优先用它**(与 ``comment_on_note`` 同款:
+            主页卡片链接里带 id,比标题稳 —— 台账 title 会过期)。
 
     Returns:
         ``{"note_url": str, "actions": {"like"/"collect": {...}}}``;两个动作**全部**
@@ -372,7 +375,7 @@ def interact_with_note(
         MatrixInteractError: 笔记定位/打开失败(此时一个动作都没做)。
     """
     human = SyncHumanActions(page)
-    note_url = _open_note_by_title(page, human, publisher_user_id, title)
+    note_url = _open_note_by_title(page, human, publisher_user_id, title, note_id)
     _browse_note(human)
 
     actions: Dict[str, Dict[str, Any]] = {}
