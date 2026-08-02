@@ -178,6 +178,11 @@ class Settings(BaseSettings):
     # 调大任何一个都等于加快踩风控墙的速度,**风险由业务侧承担**。
     NOTE_INTERACTION_DAILY_LIMIT: int = 20
     NOTE_INTERACTION_ROUND_LIMIT: int = 5
+    # 自动续跑扫描间隔(秒,0=关闭):没有它,存量补量只有靠人每天手动触发才跑得完。
+    # **它不放宽任何闸**——每轮只是问一次 plan_round"还有得补吗",日上限/单轮上限/
+    # 冷却/在途去重全在原处判。调小只会更频繁地问,答案照样受上面两道闸约束;
+    # 真正决定"多久补完"的是日上限,不是这个值。
+    INTERACTION_BACKFILL_INTERVAL: int = 1800
 
     # ── 草稿箱周清理(draft_clean_scheduler)──
     # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
