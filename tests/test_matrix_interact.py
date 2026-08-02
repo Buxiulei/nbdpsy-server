@@ -1099,6 +1099,34 @@ async def test_execute_converges_locate_failure(monkeypatch):
     assert result == {"error": "note_not_found: 没找到"}
 
 
+async def test_execute_passes_forensics_through(monkeypatch):
+    """发布后互动这条路的服务层不加工:取证原样落 ``browser_jobs.result``。
+
+    这层直接 return 浏览器动作的返回值,取证"顺带就过去了"—— 正因为是顺带的,更要有
+    用例钉住:哪天这里改成挑字段重组结果,现场证据会**悄无声息**地丢掉。
+    """
+    async def fake_load(_account_id):
+        return [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
+
+    failed = {
+        "note_url": "https://www.xiaohongshu.com/explore/x",
+        "actions": {
+            "like": {"status": "error", "reason": "点不动",
+                     "forensics": {"url": "https://x/captcha", "engage_bar": False}},
+            "collect": {"status": "error", "reason": "点不动"},
+        },
+        "error": "点赞与收藏均失败",
+        "forensics": {"url": "https://x/captcha", "engage_bar": False},
+    }
+    monkeypatch.setattr(svc, "load_account_cookies", fake_load)
+    monkeypatch.setattr(svc, "_interact_sync", lambda *a, **k: failed)
+
+    result = await svc.execute(2, {"publisher_user_id": "u1", "title": "标题"})
+
+    assert result["forensics"] == {"url": "https://x/captcha", "engage_bar": False}
+    assert result["actions"]["like"]["forensics"]["engage_bar"] is False
+
+
 # ---------------- 台账纪律:延时排期 + 非幂等 ----------------
 
 
