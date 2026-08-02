@@ -1491,10 +1491,19 @@ class XHSPublishAtomicTasks:
 
                 diag = self.page.evaluate(r"""() => {
                     const txtEq = (b) => (b.textContent || '').trim() === '发布';
+                    // disabled 三处都读:原生 .disabled 属性、class 里的 disabled、
+                    // 以及 aria-disabled —— 小红书这套组件库三种写法都出现过,
+                    // 只看其中一种会漏(实测「确认引用」是 class 带 disabled)。
+                    const isDisabled = (el) => !!(
+                        el.disabled ||
+                        /(^|\s)disabled(\s|$)/.test(el.getAttribute('class') || '') ||
+                        el.getAttribute('aria-disabled') === 'true'
+                    );
                     const rectOf = (el) => { const r = el.getBoundingClientRect();
                         return {cls: el.className, x: Math.round(r.x), y: Math.round(r.y),
                                 w: Math.round(r.width), h: Math.round(r.height),
-                                vis: r.width > 0 && r.height > 0}; };
+                                vis: r.width > 0 && r.height > 0,
+                                disabled: isDisabled(el)}; };
                     const host = document.querySelector('xhs-publish-btn');
                     const res = { hostFound: !!host };
                     res.globalPublishBtns = [...document.querySelectorAll('button')]
@@ -1524,16 +1533,35 @@ class XHSPublishAtomicTasks:
                 logger.info(f"[发布按钮综合诊断] {json.dumps(diag, ensure_ascii=False)[:1800]}")
 
                 # 按优先级挑一个真实坐标做鼠标点击(对 light/open-shadow 都有效)
+                #
+                # **禁用的按钮一律不点**(2026-08-02 真号事故):全页兜底原本只看"有没有
+                # 尺寸"就点。当「选择笔记」弹窗因为引用失败而**留在页面上**时,弹窗里那个
+                # disabled 的「确认引用」也是 .d-button.bg-red,尺寸正常,于是被当成发布
+                # 按钮点掉——点禁用按钮什么都不会发生,而真正的发布按钮还被弹窗盖着,
+                # 最后只报一句「发布超时(30秒)」。好好生活号连续三次全栽在这。
+                # 点一个禁用按钮**永远不可能**发布成功,所以这不是"优先级低一点"而是排除。
                 target = None
-                if diag.get('lightBtn') and diag['lightBtn'].get('vis'):
+                if diag.get('lightBtn') and diag['lightBtn'].get('vis') \
+                        and not diag['lightBtn'].get('disabled'):
                     target = diag['lightBtn']; click_strategy = "light DOM 按钮"
-                elif diag.get('shadowBtn') and diag['shadowBtn'].get('vis'):
+                elif diag.get('shadowBtn') and diag['shadowBtn'].get('vis') \
+                        and not diag['shadowBtn'].get('disabled'):
                     target = diag['shadowBtn']; click_strategy = "open shadow 按钮"
                 else:
+                    skipped_disabled = []
                     for cand in (diag.get('globalRedBtns') or []) + (diag.get('globalPublishBtns') or []):
+                        if cand.get('vis') and cand.get('disabled'):
+                            skipped_disabled.append(cand.get('cls', '')[:40])
+                            continue
                         if cand.get('vis'):
                             target = cand; click_strategy = f"全页候选({cand.get('cls','')[:30]})"
                             break
+                    if skipped_disabled:
+                        # 这条日志就是"页面上有别的浮层没收干净"的直接线索,别删
+                        logger.warning(
+                            f"⚠ 已跳过 {len(skipped_disabled)} 个禁用的红色按钮(多半是没关掉的"
+                            f"弹窗留下的): {skipped_disabled}"
+                        )
 
                 if target:
                     cx = target['x'] + target['w'] / 2

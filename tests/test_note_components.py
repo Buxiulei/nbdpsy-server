@@ -205,6 +205,9 @@ class Editor:
         self.quote_text = f"引用了 {self._selected_quote}"
         self.modal_open = False
 
+    def _cancel_quote(self):
+        self.modal_open = False
+
     _selected_quote = None
 
     def _select_quote(self, title):
@@ -244,10 +247,17 @@ class Editor:
                 _El(f"{t} 封面", on_click=(lambda x=t: self._select_quote(x)))
                 for t in self.quote_card_titles
             ]
+        if sel == bnc._QUOTE_MODAL:
+            # 弹窗本体:_close_quote_modal 靠它判断"还开着吗"
+            return [_El("选择笔记")] if self.modal_open else []
         if sel in (f"{bnc._QUOTE_MODAL} button", ".d-modal button", "button"):
             if not self.modal_open:
                 return []
-            return [_El("确认引用", on_click=self._confirm_quote)]
+            # 真弹窗里「确认引用」旁边就是「取消」——收尾只能点它(Escape 关不掉)
+            return [
+                _El("确认引用", on_click=self._confirm_quote),
+                _El("取消", on_click=self._cancel_quote),
+            ]
         if sel == bnc._ACTIVITY_CARD:
             cards = []
             for a in self.activities:
@@ -589,6 +599,57 @@ def test_quote_note_not_in_candidates(monkeypatch, wired):
 
     assert "quoted_note_not_in_candidates" in result["failed"][0]["reason"]
     assert "确认引用" not in wired[0].texts
+
+
+# ---------------- 引用弹窗必须收尾(2026-08-02 发布连续超时事故) ----------------
+#
+# 事故经过:引用目标不在候选里 → 组件判 error 记「不阻断发布」→ **但弹窗留在页面上**。
+# 弹窗是覆盖层,发布按钮点不到;而 step7 的全页兜底把弹窗里那个 disabled 的「确认引用」
+# 当成发布按钮点了,什么都没发生,最后只报一句「发布超时(30秒),未检测到成功标志」。
+# 好好生活号 job 132/133/134 连续三次全栽在这,运营换图片体积/换活动/压字数试了三轮,
+# **没有一个变量与真正的原因有关**。
+#
+# 所以这组用例锁的是:**不管从哪条路径退出,弹窗都必须关掉**。
+
+
+@pytest.mark.parametrize(
+    "case,notes,card_titles,quoted_id",
+    [
+        # 目标不在候选里(正是线上那次)
+        ("not_in_candidates", (("n-a", "第一篇"),), None, "n-missing"),
+        # 卡片顺序与接口对不上,拒绝盲选
+        ("title_mismatch", (("n-a", "第一篇"), ("n-quote", "徐瑞恒")),
+         ["完全不同的甲", "完全不同的乙"], "n-quote"),
+    ],
+)
+def test_quote_modal_closed_on_every_failure_path(
+    monkeypatch, wired, case, notes, card_titles, quoted_id
+):
+    """引用失败后弹窗必须已关闭 —— 否则它会盖住发布按钮,让整篇笔记发不出去。"""
+    editor = Editor(notes=notes, quote_card_titles=card_titles)
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id=quoted_id)
+
+    assert result["failed"], f"{case} 本应判失败"
+    assert editor.modal_open is False, f"{case}: 引用弹窗没关,发布按钮会被它盖住"
+    assert "取消" in wired[0].texts, f"{case}: 没点「取消」收尾"
+
+
+def test_quote_success_does_not_click_cancel(monkeypatch, wired):
+    """成功路径上「确认引用」自己会关弹窗 —— 收尾是幂等的,**不能再点「取消」**。
+
+    点了会怎样:取消掉刚设好的引用,组件白设。所以收尾必须先看弹窗还开不开着。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-quote", "心理咨询师-徐瑞恒")))
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done"
+    assert "心理咨询师-徐瑞恒" in editor.quote_text  # 引用还在,没被取消掉
+    assert "取消" not in wired[0].texts
+    assert editor.modal_open is False
 
 
 # ---------------- 合集:id 映射 + 弹层条目 ----------------

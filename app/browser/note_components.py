@@ -70,6 +70,8 @@ _QUOTE_CONTAINER = ".quote-note-container"
 _QUOTE_MODAL = ".d-modal.select-note-modal"
 _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card"
 _QUOTE_CONFIRM_TEXT = "确认引用"
+# 关弹窗只能点它:Escape 关不掉这条产品线的弹窗(实测),见 _close_quote_modal
+_QUOTE_CANCEL_TEXT = "取消"
 _ACTIVITY_CARD = ".activity-card"
 _ACTIVITY_NAME = ".activity-name"
 _ACTIVITY_ACTION = ".activity-action"
@@ -598,6 +600,15 @@ def _set_quote(
     故用弹窗打开时页面自己发的 ``posted?tab=1`` 响应做**有序映射**:响应第 i 条对应
     第 i 张卡。这个"同序"假设没有实测背书,所以**必须**再用标题交叉校验一次
     ——对不上就报错,绝不引用一篇不确定是不是它的笔记。
+
+    **弹窗一旦打开就必须收尾**(2026-08-02 真号事故):本函数开弹窗之后有六条失败早返回
+    路径,此前没有一条关掉它。而弹窗是**覆盖层**——开着的时候发布按钮根本点不到,
+    偏偏 ``step7`` 的兜底会在全页找红色按钮,正好把弹窗里那个 disabled 的「确认引用」
+    当成发布按钮点掉,于是"点了但什么都没发生",最后报「发布超时(30秒)」。
+    好好生活号 job 132/133/134 连续三次全栽在这,而运营侧看到的只有一句超时,
+    换图片体积/换活动/压正文字数试了三轮全是徒劳——**没有一个变量与真正的原因有关**。
+
+    故收尾放在 ``finally`` 里:无论从哪条路径返回、还是中途抛异常,弹窗都关掉。
     """
     container = page.query_selector(_QUOTE_CONTAINER)
     if container is None:
@@ -605,6 +616,50 @@ def _set_quote(
 
     seen = responses.count(_POSTED_API_MARK)  # 基线必须在点击**之前**取
     human.click(container, reason="打开引用笔记弹窗")
+    try:
+        return _set_quote_in_modal(page, human, responses, quoted_note_id, seen)
+    finally:
+        # 成功路径上「确认引用」自己会关掉弹窗,这里是幂等收尾:还开着才点「取消」
+        _close_quote_modal(page, human)
+
+
+def _close_quote_modal(page, human: SyncHumanActions) -> None:
+    """把「选择笔记」弹窗关掉;**已经关了就什么都不做**,且**绝不抛异常**。
+
+    绝不抛的理由:收尾失败不该把一个"组件没设上"升级成"发布崩溃"——组件本就是
+    不阻断发布的。但收尾**做没做成要留在日志里**,因为没关掉就等于发布必然超时。
+
+    只点「取消」:**Escape 关不掉这条产品线的弹窗**(笔记管理页那批弹窗实测按了仍开着,
+    见 note_ledger 排查记录),别再试键盘。
+    """
+    try:
+        modal = page.query_selector(_QUOTE_MODAL)
+        if modal is None or not modal.is_visible():
+            return
+        cancel = _find_button_by_text(page, _QUOTE_CANCEL_TEXT)
+        if cancel is None:
+            logger.warning(
+                f"[note_components] 引用弹窗还开着却找不到「{_QUOTE_CANCEL_TEXT}」,"
+                "发布按钮会被它盖住"
+            )
+            return
+        human.click(cancel, reason="关掉引用笔记弹窗")
+        human.wait(0.3, 0.8, context="等弹窗收起")
+        left = page.query_selector(_QUOTE_MODAL)
+        if left is not None and left.is_visible():
+            logger.warning("[note_components] 点了「取消」引用弹窗仍未关闭,发布按钮可能被盖住")
+    except Exception as exc:  # noqa: BLE001 — 收尾绝不上抛
+        logger.warning(f"[note_components] 关引用弹窗异常(不阻断发布): {exc}")
+
+
+def _set_quote_in_modal(
+    page,
+    human: SyncHumanActions,
+    responses: ComponentResponses,
+    quoted_note_id: str,
+    seen: int,
+) -> Dict[str, Any]:
+    """引用弹窗内的本体流程(弹窗的开与关都由 ``_set_quote`` 负责)。"""
     body = _wait_body(page, responses, _POSTED_API_MARK, _MODAL_TIMEOUT_S, seen)
     notes = ((body or {}).get("data") or {}).get("notes")
     if not isinstance(notes, list) or not notes:
