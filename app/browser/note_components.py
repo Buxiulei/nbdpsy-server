@@ -72,6 +72,17 @@ _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .
 _QUOTE_CONFIRM_TEXT = "确认引用"
 # 关弹窗只能点它:Escape 关不掉这条产品线的弹窗(实测),见 _close_quote_modal
 _QUOTE_CANCEL_TEXT = "取消"
+# 「他人笔记」tab(2026-08-02 真号只读观察实测):
+# - 切 tab 是**纯前端**,零网络请求;
+# - 输入框 placeholder 写「请粘贴笔记链接 http://...」,但**直接填 note_id 就能检索到**
+#   —— 不需要 xsec_token、不需要拼完整 URL(token 是账号绑定且短效的,拼了反而更脆);
+# - 检索前候选区是空的,检索后才渲染候选卡。
+_QUOTE_TAB_OTHER_TEXT = "他人笔记"
+_QUOTE_LINK_INPUT = ".d-modal.select-note-modal input.d-text"
+# 他人笔记检索接口(真号实测):GET .../creator/search/others/note?note_link=<note_id>
+# 响应 data 里带 note_id / display_title / author_nick_name —— **有它就能精确校验**
+# "检索到的确实是目标那篇",不必退化成"只有一张卡就认了"。
+_OTHERS_SEARCH_API_MARK = "creator/search/others/note"
 _ACTIVITY_CARD = ".activity-card"
 _ACTIVITY_NAME = ".activity-name"
 _ACTIVITY_ACTION = ".activity-action"
@@ -149,6 +160,7 @@ class ComponentResponses:
         _COLLECTION_API_MARK,
         _POSTED_API_MARK,
         _UPDATE_API_MARK,
+        _OTHERS_SEARCH_API_MARK,
     )
 
     def __init__(self) -> None:
@@ -617,10 +629,104 @@ def _set_quote(
     seen = responses.count(_POSTED_API_MARK)  # 基线必须在点击**之前**取
     human.click(container, reason="打开引用笔记弹窗")
     try:
-        return _set_quote_in_modal(page, human, responses, quoted_note_id, seen)
+        result = _set_quote_in_modal(page, human, responses, quoted_note_id, seen)
+        if result.get("status") == "done":
+            return result
+        # **只对"这篇不是本账号的"这一种降级**:目标不在「我的笔记」候选里,多半就是
+        # 跨账号引用(业务上真实存在——咨询师推介笔记要引用主号那篇小助手联系方式)。
+        # 其余失败(卡片顺序与接口对不上、确认后没生效)都是"状态不确定",这时候换条路
+        # 再试等于拿不确定去赌,正是本模块一直拒绝做的事。
+        if "quoted_note_not_in_candidates" not in (result.get("reason") or ""):
+            return result
+        logger.info(
+            f"[note_components] 引用目标不在本账号笔记里,改走「{_QUOTE_TAB_OTHER_TEXT}」: "
+            f"{quoted_note_id}"
+        )
+        other = _set_quote_via_other_tab(page, human, responses, quoted_note_id)
+        # 两条路都没成时,把两个原因都带上——只报后一个会让人以为"本账号里也没有"这件事
+        # 没发生过,排查时又要重走一遍。
+        if other.get("status") != "done":
+            other["reason"] = f"{other.get('reason')}(先前:{result.get('reason')})"
+        return other
     finally:
         # 成功路径上「确认引用」自己会关掉弹窗,这里是幂等收尾:还开着才点「取消」
         _close_quote_modal(page, human)
+
+
+def _set_quote_via_other_tab(
+    page, human: SyncHumanActions, responses: ComponentResponses, quoted_note_id: str
+) -> Dict[str, Any]:
+    """跨账号引用:切「他人笔记」→ 填 note_id → 等唯一候选 → 选中 → 确认引用 → 回读。
+
+    2026-08-02 真号只读观察确定的流程(不是猜的):切 tab 零网络请求;输入框虽写着
+    「请粘贴笔记链接」,填 **note_id** 就能检索出来;检索后才渲染候选卡。
+
+    **只接受恰好一张候选**:0 张说明这个 id 检索不到(笔记被删/私密/id 写错),
+    多张说明这个 id 不足以唯一确定一篇——两种都拒绝,**绝不点第一张凑数**
+    (与「我的笔记」那条路"对不上就报错"同一条纪律)。
+
+    回读判据用**基线对比**而不是"包含标题":跨账号引用的典型目标(主号那篇小助手联系
+    方式)是**空标题**笔记,拿标题去比对必然失败。故设置前先记引用区原文,确认后必须
+    变了才算数——比"没报错就算成功"强,也是空标题下唯一站得住的判据。
+    """
+    tab = _find_button_by_text(page, _QUOTE_TAB_OTHER_TEXT)
+    if tab is None:
+        return {"status": "error",
+                "reason": f"quote_other_tab_not_found: 弹窗里没有「{_QUOTE_TAB_OTHER_TEXT}」"}
+    human.click(tab, reason=f"切到{_QUOTE_TAB_OTHER_TEXT}")
+    human.wait(0.6, 1.2, context="等 tab 切换")
+
+    box = page.query_selector(_QUOTE_LINK_INPUT)
+    if box is None:
+        return {"status": "error", "reason": "quote_other_input_not_found: 没找到笔记链接输入框"}
+    before = read_quote_text(page)  # 基线必须在设置**之前**取
+    seen = responses.count(_OTHERS_SEARCH_API_MARK)  # 基线在输入**之前**取
+    human.type_text(box, str(quoted_note_id))
+    human.wait(1.2, 2.0, context="等检索结果")
+
+    # **按接口响应精确校验**,而不是"只有一张卡就认了":逐字输入过程中页面会对中间态
+    # (note_link=68d508 这种半截 id)也发一次检索,所以不能只看"有没有结果",
+    # 必须确认最后拿到的那条 note_id 就是要引用的那篇。
+    body = _wait_body(page, responses, _OTHERS_SEARCH_API_MARK, _MODAL_TIMEOUT_S, seen)
+    got_id = str(((body or {}).get("data") or {}).get("note_id") or "").strip()
+    if got_id != str(quoted_note_id):
+        return {
+            "status": "error",
+            "reason": f"quote_other_id_mismatch: 检索接口返回的是 note_id={got_id!r},"
+                      f"不是要引用的 {quoted_note_id!r},拒绝引用一篇不确定是不是它的笔记",
+        }
+
+    cards = _wait_quote_cards(page)
+    if len(cards) != 1:
+        return {
+            "status": "error",
+            "reason": f"quote_other_not_unique: 按 note_id 检索到 {len(cards)} 张候选卡"
+                      f"(要求恰好 1 张,绝不猜)",
+        }
+    human.click(cards[0], reason="选中被引用的他人笔记")
+    human.wait(0.5, 1.0, context="等选中态生效")
+
+    confirm = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
+    if confirm is None:
+        return {"status": "error", "reason": "quote_confirm_not_found: 弹窗里没有「确认引用」"}
+    human.click(confirm, reason="确认引用")
+    human.wait(0.8, 1.5, context="等引用生效")
+
+    after = read_quote_text(page)
+    if not after or after == before:
+        return {
+            "status": "error",
+            "reason": f"quote_not_applied: 确认后引用区仍是 {after[:40]!r}(设置前 {before[:40]!r})",
+            "observed": after,
+        }
+    return {
+        "status": "done",
+        "quoted_note_id": str(quoted_note_id),
+        "via": "other_notes_tab",
+        "observed": after,
+        # 提交后重进页面回读要用它做基线(空标题笔记没法按标题比对,见 _verify_after_submit)
+        "quote_text_before": before,
+    }
 
 
 def _close_quote_modal(page, human: SyncHumanActions) -> None:
@@ -1145,11 +1251,25 @@ def _verify_after_submit(
                 f"(私密笔记的合集绑定会被服务端静默丢弃,见设计 2.6)"
             )
     if quoted_note_id:
-        title = (outcomes.get("quote") or {}).get("title") or ""
+        outcome = outcomes.get("quote") or {}
+        title = outcome.get("title") or ""
         quoted = read_quote_text(page)
-        verified["quote"] = bool(title and title in quoted)
+        if title:
+            verified["quote"] = title in quoted
+        else:
+            # 跨账号引用(走「他人笔记」)拿不到标题:目标典型就是主号那篇**空标题**的
+            # 小助手联系方式笔记,拿标题去比对必然失败。退而用"引用区跟设置前不一样了"
+            # 作判据 —— 比"没报错就算成功"强,也是空标题下唯一站得住的口径。
+            # 候选卡文案不能拿来当 title:卡上是「笔记封面 作者 ♡5」这类 UI 文字,
+            # 与引用区的显示文案根本不是一回事,用它比对必然假阴性。
+            before = outcome.get("quote_text_before") or ""
+            verified["quote"] = bool(quoted) and quoted != before
         if not verified["quote"]:
-            logger.error(f"[note_components] 引用回读未生效:期望「{title}」,实读 {quoted[:40]!r}")
+            logger.error(
+                f"[note_components] 引用回读未生效:期望"
+                f"{('包含「%s」' % title) if title else '引用区非空且已变化'},"
+                f"实读 {quoted[:40]!r}"
+            )
     if activity_id:
         name = (outcomes.get("activity") or {}).get("name") or ""
         if not name:

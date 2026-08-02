@@ -31,9 +31,11 @@ from app.services import note_components as svc
 class _El:
     """假元素:只提供被测代码真用到的能力(读文本/读 value/取矩形/子查询/被点)。"""
 
-    def __init__(self, text="", *, on_click=None, value="", children=None, href=None):
+    def __init__(self, text="", *, on_click=None, value="", children=None, href=None,
+                 on_type=None):
         self._text = text
         self.on_click = on_click
+        self.on_type = on_type   # 被 type_text 输入时的副作用(他人笔记检索框用)
         self._value = value
         self._children = children or {}
         self._href = href
@@ -66,6 +68,7 @@ class _Human:
 
     def __init__(self, _page=None):
         self.clicks = []
+        self.typed = []
 
     def wait(self, *_a, **_kw):
         pass
@@ -87,6 +90,11 @@ class _Human:
         self.clicks.append((reason, text))
         if hasattr(target, "on_click") and target.on_click:
             target.on_click()
+
+    def type_text(self, target, text, **_kw):
+        self.typed.append(text)
+        if hasattr(target, "on_type") and target.on_type:
+            target.on_type(text)
 
     @property
     def texts(self):
@@ -117,6 +125,7 @@ class Editor:
         permission_before_submit=None,
         permission_after_submit=None,
         quote_card_titles=None,
+        other_notes=(),
     ):
         self.permission = permission
         self.collection = collection
@@ -135,6 +144,11 @@ class Editor:
         self.quote_text = "引用笔记"
         self.popover_open = False
         self.modal_open = False
+        # 「他人笔记」tab:{note_id: 卡片文案};切过去后要检索才出候选(真号实测)
+        self.other_notes = dict(other_notes)
+        self.other_tab = False
+        self.other_query = ""
+
         self.drop_collection_on_submit = drop_collection_on_submit
         self.silent_activity_clicks = silent_activity_clicks
         self.permission_before_submit = permission_before_submit
@@ -208,6 +222,22 @@ class Editor:
     def _cancel_quote(self):
         self.modal_open = False
 
+    def _set_other_query(self, text):
+        self.other_query = text
+        # 真号实测:输入即触发 GET creator/search/others/note?note_link=<输入>,
+        # 响应 data 带 note_id / display_title。逐字输入时中间态也会发,这里如实回放。
+        hit = self.other_notes.get(text)
+        self.page.emit(
+            f"https://creator.xiaohongshu.com/api/galaxy/v2/creator/search/others/note?note_link={text}",
+            {"data": {"note_id": text, "display_title": ""} if hit else None},
+        )
+
+    def _switch_other(self):
+        self.other_tab = True   # 真号实测:切 tab 是纯前端,零网络请求
+
+    def _switch_mine(self):
+        self.other_tab = False
+
     _selected_quote = None
 
     def _select_quote(self, title):
@@ -243,10 +273,18 @@ class Editor:
         if sel == bnc._QUOTE_NOTE_CARD:
             if not self.modal_open:
                 return []
+            if self.other_tab:
+                # 他人笔记:检索前空,检索后按 note_id 命中才出卡
+                hit = self.other_notes.get(self.other_query)
+                return [_El(hit, on_click=(lambda x=hit: self._select_quote(x)))] if hit else []
             return [
                 _El(f"{t} 封面", on_click=(lambda x=t: self._select_quote(x)))
                 for t in self.quote_card_titles
             ]
+        if sel == bnc._QUOTE_LINK_INPUT:
+            if not (self.modal_open and self.other_tab):
+                return []
+            return [_El("", on_type=self._set_other_query)]
         if sel == bnc._QUOTE_MODAL:
             # 弹窗本体:_close_quote_modal 靠它判断"还开着吗"
             return [_El("选择笔记")] if self.modal_open else []
@@ -255,6 +293,8 @@ class Editor:
                 return []
             # 真弹窗里「确认引用」旁边就是「取消」——收尾只能点它(Escape 关不掉)
             return [
+                _El("我的笔记", on_click=self._switch_mine),
+                _El("他人笔记", on_click=self._switch_other),
                 _El("确认引用", on_click=self._confirm_quote),
                 _El("取消", on_click=self._cancel_quote),
             ]
@@ -903,3 +943,94 @@ def test_comment_card_matching_prefers_note_id():
     assert mi._card_matches_note_id(card, "6a4ce556")
     assert not mi._card_matches_note_id(card, "6a4ce557")
     assert not mi._card_matches_note_id(card, "")
+
+
+# ---------------- 跨账号引用:走「他人笔记」tab ----------------
+#
+# 业务上真实存在:每个账号背后是不同的运营、各有 KPI,所以咨询师推介笔记**只能引用自己
+# 账号的**;唯一的例外是"小助手联系方式"那篇——它是二维码有违规风险,集中放在主号,
+# 于是别的号引用它必然是**跨账号**的。
+#
+# 2026-08-02 真号只读观察确定(不是猜的):切「他人笔记」是纯前端零请求;输入框写着
+# 「请粘贴笔记链接 http://...」,但**直接填 note_id 就能检索到**(不需要 xsec_token,
+# 那玩意儿是账号绑定且短效的,拼完整 URL 反而更脆);检索前候选区空,检索后才出卡。
+
+
+_QR_NOTE = "68d50838000000000e00c3b6"   # 主号那篇小助手联系方式(**空标题**)
+
+
+def test_falls_back_to_other_tab_when_not_own_note(monkeypatch, wired):
+    """目标不在本账号笔记里 → 自动切「他人笔记」按 note_id 检索并引用成功。"""
+    editor = Editor(
+        notes=(("n-a", "第一篇"),),                      # 本账号候选里没有目标
+        other_notes=((_QR_NOTE, "小助手联系方式 封面"),),  # 他人笔记里有
+    )
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE)
+
+    assert result["status"] == "done"
+    quote = result["components"]["quote"]
+    assert quote["status"] == "done" and quote["via"] == "other_notes_tab"
+    assert "小助手联系方式" in editor.quote_text
+    assert "他人笔记" in wired[0].texts        # 确实切过 tab
+    assert _QR_NOTE in wired[0].typed          # 确实按 note_id 检索
+
+
+def test_other_tab_refuses_when_search_misses(monkeypatch, wired):
+    """检索不到那篇 → 报错,**绝不点第一张凑数**。
+
+    判据走**接口返回的 note_id**,不是"页面上有几张卡":逐字输入时页面会对中间态
+    (note_link=68d508 这种半截 id)也发一次检索,只看"有没有结果"会认错。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=())
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE)
+
+    reason = result["failed"][0]["reason"]
+    assert "quote_other_id_mismatch" in reason
+    # 两条路的原因都要带上,否则排查时以为"本账号里也没有"这件事没发生过
+    assert "quoted_note_not_in_candidates" in reason
+    assert "确认引用" not in wired[0].texts
+
+
+def test_no_fallback_on_uncertain_failures(monkeypatch, wired):
+    """卡片顺序与接口对不上属于"状态不确定" → **不降级**,不拿不确定去赌另一条路。"""
+    editor = Editor(
+        notes=(("n-a", "第一篇"), ("n-quote", "徐瑞恒")),
+        quote_card_titles=["完全不同的甲", "完全不同的乙"],
+        other_notes=(("n-quote", "不该被用到"),),
+    )
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert "quote_card_title_mismatch" in result["failed"][0]["reason"]
+    assert "他人笔记" not in wired[0].texts   # 一次都没切过去
+
+
+def test_other_tab_still_closes_modal_on_failure(monkeypatch, wired):
+    """走他人笔记失败时,弹窗同样必须关掉 —— 否则又会盖住发布按钮(见上面那组用例)。"""
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=())
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    _run(editor, quoted_note_id=_QR_NOTE)
+
+    assert editor.modal_open is False
+    assert "取消" in wired[0].texts
+
+
+def test_other_tab_rejects_wrong_note_from_search(monkeypatch, wired):
+    """检索接口返回的是**另一篇**的 note_id → 拒绝引用。
+
+    这是逐字输入的真实副作用:输到一半时页面就会拿半截 id 去查,可能查出别的笔记。
+    只要最终响应的 note_id 与目标不符,就一篇都不引用。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=(("别的笔记id", "别的笔记 封面"),))
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE)
+
+    assert "quote_other_id_mismatch" in result["failed"][0]["reason"]
+    assert "确认引用" not in wired[0].texts
