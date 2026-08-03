@@ -1,0 +1,1342 @@
+{
+  "scene": "quote_modal",
+  "captured_at": "2026-08-03T03:11:17.887028+00:00",
+  "account_id": 6,
+  "source_note_id": "6a6fedb5000000002402fb39",
+  "url": "https://creator.xiaohongshu.com/publish/update?id=6a6fedb5000000002402fb39&noteType=normal",
+  "dom": {
+    ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card": [
+      {
+        "text": "引用的笔记是我们小助手的联系方式 NBDpsy-亲密关系 6",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 427,
+          "y": 188,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-徐瑞恒，陪你理解成长与创伤 NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 579,
+          "y": 188,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "看人脸色：一个嗯字让你想了一晚上 NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 732,
+          "y": 188,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "情绪闪回：一句批评就缓不过来 NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 884,
+          "y": 188,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-李明聪，陪你理清断不掉的关系 NBDpsy-亲密关系 3",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1037,
+          "y": 188,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "粤语咨询师-黄安麟，陪你摆脱恋爱脑的循环 NBDpsy-亲密关系 6",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 427,
+          "y": 386,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-彭旱雨，陪你化解原生家庭心结 NBDpsy-亲密关系 6",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 579,
+          "y": 386,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-胡琬琰，陪你转化羞愧与创伤 NBDpsy-亲密关系 11",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 732,
+          "y": 386,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-刘琼，陪你走出原生家庭阴影 NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 884,
+          "y": 386,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-李冠阳，陪你走出情绪内耗 NBDpsy-亲密关系 6",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1037,
+          "y": 386,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-李宇，陪你整合创伤与秩序 NBDpsy-亲密关系 5",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 427,
+          "y": 584,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "心理咨询师-于施文，陪你理顺亲密与家庭 NBDpsy-亲密关系 6",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 579,
+          "y": 584,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "第一次心理咨询，不知道说什么怎么办 NBDpsy-亲密关系 3",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 732,
+          "y": 584,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "出轨后要不要做伴侣咨询？先问四句 NBDpsy-亲密关系 3",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 884,
+          "y": 584,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "追逃循环里，为什么好好说话也没用 NBDpsy-亲密关系 3",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1037,
+          "y": 584,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "出轨后还想留下来，是我没骨气吗 NBDpsy-亲密关系 2",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 427,
+          "y": 782,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "出轨后忍不住反复翻记录，正常吗 NBDpsy-亲密关系 11",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 579,
+          "y": 782,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "越追他越躲：亲密关系里的追逃循环 NBDpsy-亲密关系 4",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 732,
+          "y": 782,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "亲密不等于失去自己 NBDpsy-亲密关系 2",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 884,
+          "y": 782,
+          "width": 136,
+          "height": 182
+        }
+      },
+      {
+        "text": "想找人聊聊，又怕选错咨询师？ NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1037,
+          "y": 782,
+          "width": 136,
+          "height": 182
+        }
+      }
+    ],
+    ".d-modal.select-note-modal button": [
+      {
+        "text": "我的笔记",
+        "attrs": {
+          "data-v-a42a9788": "",
+          "class": "select-note-modal__tab select-note-modal__tab--active"
+        },
+        "visible": true,
+        "rect": {
+          "x": 423,
+          "y": 136,
+          "width": 88,
+          "height": 32
+        }
+      },
+      {
+        "text": "他人笔记",
+        "attrs": {
+          "data-v-a42a9788": "",
+          "class": "select-note-modal__tab"
+        },
+        "visible": true,
+        "rect": {
+          "x": 515,
+          "y": 136,
+          "width": 88,
+          "height": 32
+        }
+      },
+      {
+        "text": "取消",
+        "attrs": {
+          "data-v-7369c04b": "",
+          "data-v-a42a9788": "",
+          "type": "button",
+          "class": "d-button d-button-default d-button-with-content --color-static bold --color-bg-fill --color-text-paragraph custom-button cancel-width"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1001,
+          "y": 632,
+          "width": 68,
+          "height": 36
+        }
+      },
+      {
+        "text": "确认引用",
+        "attrs": {
+          "data-v-7369c04b": "",
+          "data-v-a42a9788": "",
+          "type": "button",
+          "class": "d-button d-button-default disabled d-button-with-content --color-static bold --color-bg-fill --color-text-disabled custom-button bg-red disabled confirm-width",
+          "disabled": ""
+        },
+        "visible": true,
+        "rect": {
+          "x": 1081,
+          "y": 632,
+          "width": 96,
+          "height": 36
+        }
+      }
+    ],
+    ".quote-note-container": [
+      {
+        "text": "引用笔记",
+        "attrs": {
+          "data-v-043a3324": "",
+          "data-v-1ad5614c": "",
+          "data-v-74e5df5a-s": "",
+          "data-v-7a28df78-s": "",
+          "class": "quote-note-container",
+          "data-impression": "{\"event\":{\"type\":\"Event\",\"value\":{\"action\":{\"type\":\"NormalizedAction\",\"value\":\"impression\"},\"pointId\":105036}},\"page\":{\"type\":\"Page\",\"value\":{\"pageInstance\":{\"type\":\"PageInstance\",\"value\":\"creator_service_platform\"}}}}",
+          "behavior": "[object Object]",
+          "data-eaglet-imp": "true"
+        },
+        "visible": true,
+        "rect": {
+          "x": 442,
+          "y": 407,
+          "width": 308,
+          "height": 44
+        }
+      }
+    ]
+  },
+  "api": [
+    {
+      "url": "https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=1&page=0",
+      "status": 200,
+      "body": {
+        "success": true,
+        "msg": "成功",
+        "data": {
+          "notes": [
+            {
+              "type": "normal",
+              "permission_code": 0,
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "xsec_token": "SCRUBBED",
+              "goods_info": {
+                "goods_name": []
+              },
+              "visible_time": 1785552000,
+              "view_count": 9,
+              "comments_count": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/1040g008323af5s2p02205q22ia06sf9n1lum5c8?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "collected_count": 5,
+              "sticky": true,
+              "pk_cover_status": 0,
+              "ref_tip": 0,
+              "display_title": "引用的笔记是我们小助手的联系方式",
+              "time": "2026-08-01 10:39",
+              "likes": 6,
+              "shared_count": 1,
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "id": "6a6d5c530000000028006c0f"
+            },
+            {
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "visible_time": 1785212864,
+              "schedule_post_time": 0,
+              "display_title": "心理咨询师-徐瑞恒，陪你理解成长与创伤",
+              "time": "2026-07-28 12:26",
+              "view_count": 63,
+              "collected_count": 3,
+              "permission_msg": "",
+              "pk_cover_status": 0,
+              "type": "normal",
+              "likes": 7,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235dv3fimu005qf1k09d32466tmfvsg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235dv3fimu0g5qf1k09d3246ltl0808?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235dv3fimu105qf1k09d3246sa59g5o?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235dv3fimu1g5qf1k09d3246ggnhrbg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235dv3fimu205qf1k09d3246ucpjqlg?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "sticky": true,
+              "permission_code": 0,
+              "goods_info": {
+                "goods_name": []
+              },
+              "id": "6a682f900000000001031ddc",
+              "shared_count": 1,
+              "comments_count": 0,
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "ref_tip": 0
+            },
+            {
+              "ref_tip": 0,
+              "schedule_post_time": 0,
+              "display_title": "恋爱脑12条，他出差我就慌，你中几条",
+              "type": "normal",
+              "comments_count": 7,
+              "collected_count": 6,
+              "sticky": false,
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "likes": 6,
+              "shared_count": 0,
+              "permission_code": 0,
+              "xsec_token": "SCRUBBED",
+              "cocreate": false,
+              "pk_cover_status": 0,
+              "id": "6a6fedb5000000002402fb39",
+              "time": "2026-08-03 09:24",
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o323cvud9pmu505qf1k09d3246vi0dtn8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o323cvud9pmu5g5qf1k09d3246g2q6shg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o323cvud9pmu605qf1k09d324623v3s70?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o323cvud9pmu6g5qf1k09d3246p7ommeg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o323cvud9pmu705qf1k09d32463mu2588?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "view_count": 8,
+              "permission_msg": "",
+              "tab_status": 1,
+              "visible_time": 1785720294
+            },
+            {
+              "display_title": "看人脸色：一个嗯字让你想了一晚上",
+              "type": "normal",
+              "shared_count": 0,
+              "sticky": false,
+              "permission_code": 0,
+              "permission_msg": "",
+              "xsec_token": "SCRUBBED",
+              "cocreate": false,
+              "time": "2026-08-02 09:02",
+              "view_count": 26,
+              "xsec_source": "pc_creatormng",
+              "pk_cover_status": 0,
+              "id": "6a6e971d00000000050303c2",
+              "comments_count": 6,
+              "collected_count": 6,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323bm473cms005qf1k09d32463lgbvro?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323bm473cms0g5qf1k09d324683jqljg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323bm473cms105qf1k09d3246i87klj0?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "ref_tip": 0,
+              "likes": 7,
+              "goods_info": {
+                "goods_name": []
+              },
+              "visible_time": 1785632586
+            },
+            {
+              "comments_count": 0,
+              "collected_count": 7,
+              "permission_code": 0,
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "cocreate": false,
+              "time": "2026-08-01 00:02",
+              "type": "normal",
+              "view_count": 41,
+              "permission_msg": "",
+              "pk_cover_status": 0,
+              "id": "6a6cc7200000000022030e93",
+              "shared_count": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03239tfp856u005qf1k09d3246qaj84t8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03239tfp856u0g5qf1k09d3246lr6bue0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03239tfp856u105qf1k09d3246o12jmu8?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "sticky": false,
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "ref_tip": 0,
+              "display_title": "情绪闪回：一句批评就缓不过来",
+              "visible_time": 1785513809,
+              "likes": 7
+            },
+            {
+              "sticky": false,
+              "schedule_post_time": 0,
+              "ref_tip": 0,
+              "permission_msg": "",
+              "tab_status": 1,
+              "cocreate": false,
+              "pk_cover_status": 0,
+              "id": "6a6b4d3d00000000080108a7",
+              "display_title": "心理咨询师-李明聪，陪你理清断不掉的关系",
+              "type": "normal",
+              "likes": 3,
+              "view_count": 28,
+              "shared_count": 0,
+              "comments_count": 2,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn2305qf1k09d324611allq8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn23g5qf1k09d3246itr05n8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn2405qf1k09d32469upsjjo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn24g5qf1k09d3246n85s1sg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn2505qf1k09d3246o7if9ug?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3238fapjqn25g5qf1k09d3246cn25i0g?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "time": "2026-07-30 21:10",
+              "permission_code": 0,
+              "xsec_token": "SCRUBBED",
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "visible_time": 1785417068,
+              "collected_count": 1
+            },
+            {
+              "view_count": 53,
+              "permission_code": 0,
+              "xsec_token": "SCRUBBED",
+              "visible_time": 1785323323,
+              "display_title": "粤语咨询师-黄安麟，陪你摆脱恋爱脑的循环",
+              "type": "normal",
+              "likes": 6,
+              "comments_count": 0,
+              "collected_count": 2,
+              "time": "2026-07-29 19:07",
+              "shared_count": 0,
+              "sticky": false,
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "goods_info": {
+                "goods_name": []
+              },
+              "ref_tip": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k032372klge6u005qf1k09d3246lm7866g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k032372klge6u0g5qf1k09d3246ro02q20?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k032372klge6u105qf1k09d32464p6pb3g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k032372klge6u1g5qf1k09d32465js645g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k032372klge6u205qf1k09d3246q4becoo?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "pk_cover_status": 0,
+              "id": "6a69df0a000000000301eff0"
+            },
+            {
+              "likes": 6,
+              "view_count": 72,
+              "permission_code": 0,
+              "permission_msg": "",
+              "type": "normal",
+              "comments_count": 0,
+              "collected_count": 1,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235k94ui6s505qf1k09d3246reqpnv8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235k94ui6s5g5qf1k09d32463s7qhpo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235k94ui6s605qf1k09d32467bkk88g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235k94ui6s6g5qf1k09d32466kk40l0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235k94ui6s705qf1k09d324673a7efg?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "sticky": false,
+              "schedule_post_time": 0,
+              "visible_time": 1785226115,
+              "time": "2026-07-28 16:07",
+              "shared_count": 1,
+              "cocreate": false,
+              "pk_cover_status": 0,
+              "ref_tip": 0,
+              "display_title": "心理咨询师-彭旱雨，陪你化解原生家庭心结",
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "id": "6a6863510000000001001f09"
+            },
+            {
+              "display_title": "心理咨询师-胡琬琰，陪你转化羞愧与创伤",
+              "type": "normal",
+              "shared_count": 5,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235ift7c72005qf1k09d3246jkmthh8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235ift7c720g5qf1k09d32467d40ja8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235ift7c72105qf1k09d3246fra518g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235ift7c721g5qf1k09d3246v2jr99o?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235ift7c72205qf1k09d3246q2u4ge0?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "time": "2026-07-28 15:05",
+              "comments_count": 0,
+              "collected_count": 3,
+              "sticky": false,
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "id": "6a68549d00000000010039ac",
+              "likes": 11,
+              "permission_code": 0,
+              "cocreate": false,
+              "visible_time": 1785222350,
+              "view_count": 132,
+              "permission_msg": "",
+              "xsec_token": "SCRUBBED",
+              "pk_cover_status": 0,
+              "ref_tip": 0
+            },
+            {
+              "visible_time": 1785219309,
+              "ref_tip": 2,
+              "time": "2026-07-28 14:14",
+              "comments_count": 0,
+              "tab_status": 1,
+              "id": "6a6848bd0000000001002c0c",
+              "type": "normal",
+              "collected_count": 1,
+              "xsec_token": "SCRUBBED",
+              "cocreate": false,
+              "likes": 7,
+              "view_count": 15,
+              "shared_count": 2,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235h1e84n4005qf1k09d3246g3bf7no?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235h1e84n40g5qf1k09d3246orphk7g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235h1e84n4105qf1k09d324629h5pd8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235h1e84n41g5qf1k09d3246jb2ri00?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235h1e84n4205qf1k09d3246200r1i0?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "sticky": false,
+              "permission_code": 0,
+              "xsec_source": "pc_creatormng",
+              "goods_info": {
+                "goods_name": []
+              },
+              "display_title": "心理咨询师-刘琼，陪你走出原生家庭阴影",
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "pk_cover_status": 0
+            },
+            {
+              "permission_msg": "",
+              "goods_info": {
+                "goods_name": []
+              },
+              "cocreate": false,
+              "comments_count": 0,
+              "sticky": false,
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "ref_tip": 2,
+              "id": "6a683d2e000000000402bb17",
+              "display_title": "心理咨询师-李冠阳，陪你走出情绪内耗",
+              "time": "2026-07-28 13:25",
+              "likes": 6,
+              "schedule_post_time": 0,
+              "view_count": 14,
+              "shared_count": 1,
+              "collected_count": 2,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235fk6glms505qf1k09d3246cnd5e38?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235fk6glms5g5qf1k09d32467r5mggg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235fk6glms605qf1k09d3246v44dato?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235fk6glms6g5qf1k09d32463bf97l0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235fk6glms705qf1k09d3246btsuks0?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_code": 0,
+              "xsec_source": "pc_creatormng",
+              "pk_cover_status": 0,
+              "visible_time": 1785216350,
+              "type": "normal"
+            }
+          ],
+          "tags": [
+            {
+              "id": "special.note_time_desc",
+              "name": "所有笔记",
+              "notes_count": 21,
+              "checked": true
+            }
+          ],
+          "page": 1
+        },
+        "code": 0
+      }
+    },
+    {
+      "url": "https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=1&page=1",
+      "status": 200,
+      "body": {
+        "data": {
+          "notes": [
+            {
+              "view_count": 11,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235crg8j74005qf1k09d3246ugi00no?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235crg8j740g5qf1k09d3246pak9feo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235crg8j74105qf1k09d3246vqq8ng0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235crg8j741g5qf1k09d3246jkef75g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03235crg8j74205qf1k09d324604g97ng?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "ref_tip": 2,
+              "display_title": "心理咨询师-李宇，陪你整合创伤与秩序",
+              "type": "normal",
+              "shared_count": 1,
+              "sticky": false,
+              "permission_code": 1,
+              "permission_msg": "仅自己可见",
+              "schedule_post_time": 0,
+              "xsec_token": "SCRUBBED",
+              "id": "6a68266f0000000005038404",
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "pk_cover_status": 0,
+              "comments_count": 0,
+              "collected_count": 0,
+              "goods_info": {
+                "goods_name": []
+              },
+              "visible_time": 1785210526,
+              "time": "2026-07-28 11:47",
+              "likes": 5
+            },
+            {
+              "id": "6a6819ce000000000101e679",
+              "time": "2026-07-28 10:54",
+              "type": "normal",
+              "view_count": 91,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235ba86e6u2g5qf1k09d324608prsb0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235ba86e6u305qf1k09d3246e2gavbg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235ba86e6u3g5qf1k09d3246bstla2g?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235ba86e6u405qf1k09d3246o3398r8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3235ba86e6u4g5qf1k09d3246ujks3ug?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "schedule_post_time": 0,
+              "display_title": "心理咨询师-于施文，陪你理顺亲密与家庭",
+              "sticky": false,
+              "permission_msg": "",
+              "xsec_source": "pc_creatormng",
+              "pk_cover_status": 0,
+              "comments_count": 1,
+              "collected_count": 3,
+              "permission_code": 0,
+              "cocreate": false,
+              "visible_time": 1785207296,
+              "ref_tip": 0,
+              "likes": 6,
+              "shared_count": 2,
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "goods_info": {
+                "goods_name": []
+              }
+            },
+            {
+              "view_count": 14,
+              "cocreate": false,
+              "id": "6a678120000000000100d6b0",
+              "time": "2026-07-28 00:02",
+              "type": "normal",
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4805qf1k09d3246832aej0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn48g5qf1k09d3246fphnjn0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4905qf1k09d3246bujnjv8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn49g5qf1k09d3246e8f40vo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4a05qf1k09d3246brjunc8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4ag5qf1k09d32469j3nno8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4b05qf1k09d3246trbp8cg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234om69jn4bg5qf1k09d3246jrp5150?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "goods_info": {
+                "goods_name": []
+              },
+              "likes": 3,
+              "shared_count": 0,
+              "comments_count": 0,
+              "collected_count": 0,
+              "sticky": false,
+              "permission_code": 0,
+              "xsec_source": "pc_creatormng",
+              "ref_tip": 0,
+              "display_title": "第一次心理咨询，不知道说什么怎么办",
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "pk_cover_status": 0,
+              "visible_time": 1785168209
+            },
+            {
+              "comments_count": 0,
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "xsec_source": "pc_creatormng",
+              "visible_time": 1785146618,
+              "id": "6a672cc6000000000401c05c",
+              "likes": 3,
+              "collected_count": 0,
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6s8g5qf1k09d32466qnl5u8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6s905qf1k09d3246ubdi0s0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6s9g5qf1k09d32460a8ucqg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6sa05qf1k09d32463fjo0ko?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6sag5qf1k09d3246lae93jo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6sb05qf1k09d32469jajuio?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6sbg5qf1k09d3246bg494q0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3234ecjiv6sc05qf1k09d32466rn16ao?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_code": 0,
+              "goods_info": {
+                "goods_name": []
+              },
+              "cocreate": false,
+              "ref_tip": 0,
+              "display_title": "出轨后要不要做伴侣咨询？先问四句",
+              "type": "normal",
+              "view_count": 11,
+              "shared_count": 0,
+              "sticky": false,
+              "pk_cover_status": 0,
+              "time": "2026-07-27 18:02"
+            },
+            {
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs70005qf1k09d3246tfuta38?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs700g5qf1k09d3246n948fng?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs70105qf1k09d32469db9h50?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs701g5qf1k09d3246sks0tl0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs70205qf1k09d32462ndjv20?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs702g5qf1k09d3246svk2ceg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs70305qf1k09d3246f74guno?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233vcobs703g5qf1k09d3246vc8mjhg?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "xsec_token": "SCRUBBED",
+              "id": "6a66b1e90000000004029290",
+              "likes": 3,
+              "view_count": 28,
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "display_title": "追逃循环里，为什么好好说话也没用",
+              "sticky": false,
+              "permission_code": 0,
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "pk_cover_status": 0,
+              "visible_time": 1785115159,
+              "type": "normal",
+              "comments_count": 0,
+              "collected_count": 0,
+              "goods_info": {
+                "goods_name": []
+              },
+              "ref_tip": 0,
+              "time": "2026-07-27 09:18",
+              "shared_count": 0
+            },
+            {
+              "permission_msg": "",
+              "pk_cover_status": 0,
+              "id": "6a662f8a0000000005039af4",
+              "display_title": "出轨后还想留下来，是我没骨气吗",
+              "comments_count": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms005qf1k09d3246u53cj70?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms0g5qf1k09d3246icqppso?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms105qf1k09d32469jtedf8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms1g5qf1k09d32469u0h1i8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms205qf1k09d3246aidf0ho?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms2g5qf1k09d3246alpsks8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms305qf1k09d32465nafer8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03233ffm74ms3g5qf1k09d3246fmugc50?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_code": 0,
+              "schedule_post_time": 0,
+              "xsec_token": "SCRUBBED",
+              "goods_info": {
+                "goods_name": []
+              },
+              "view_count": 25,
+              "shared_count": 0,
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "ref_tip": 0,
+              "time": "2026-07-27 00:02",
+              "likes": 2,
+              "sticky": false,
+              "cocreate": false,
+              "visible_time": 1785081786,
+              "type": "normal",
+              "collected_count": 0
+            },
+            {
+              "id": "6a65db44000000000301cc4a",
+              "type": "normal",
+              "shared_count": 3,
+              "cocreate": false,
+              "visible_time": 1785060214,
+              "ref_tip": 0,
+              "display_title": "出轨后忍不住反复翻记录，正常吗",
+              "likes": 11,
+              "comments_count": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n2005qf1k09d32467nl38lg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n20g5qf1k09d3246au0k9pg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n2105qf1k09d32467anegug?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n21g5qf1k09d3246kv3hrk8?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n2205qf1k09d32463ouuej0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n22g5qf1k09d3246me02b08?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n2305qf1k09d3246jgbeiso?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k0323356239n23g5qf1k09d3246g1igbp0?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "time": "2026-07-26 18:02",
+              "collected_count": 7,
+              "permission_code": 0,
+              "xsec_token": "SCRUBBED",
+              "pk_cover_status": 0,
+              "view_count": 333,
+              "sticky": false,
+              "goods_info": {
+                "goods_name": []
+              }
+            },
+            {
+              "time": "2026-07-26 09:53",
+              "likes": 4,
+              "view_count": 37,
+              "comments_count": 0,
+              "collected_count": 0,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk74005qf1k09d32461iu09lg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk740g5qf1k09d3246d7q1uuo?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk74105qf1k09d3246qghqim0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk741g5qf1k09d3246ngcbvug?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk74205qf1k09d3246ttj40hg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk742g5qf1k09d3246atldc28?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk74305qf1k09d324647ejafg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03232n5tjk743g5qf1k09d3246qrdfp20?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "shared_count": 0,
+              "sticky": false,
+              "cocreate": false,
+              "type": "normal",
+              "permission_msg": "",
+              "schedule_post_time": 0,
+              "xsec_source": "pc_creatormng",
+              "visible_time": 1785030829,
+              "ref_tip": 0,
+              "id": "6a65687e000000000401dc46",
+              "permission_code": 0,
+              "tab_status": 1,
+              "xsec_token": "SCRUBBED",
+              "goods_info": {
+                "goods_name": []
+              },
+              "pk_cover_status": 0,
+              "display_title": "越追他越躲：亲密关系里的追逃循环"
+            },
+            {
+              "id": "6a64169c000000000100f542",
+              "type": "normal",
+              "shared_count": 0,
+              "collected_count": 0,
+              "xsec_token": "SCRUBBED",
+              "pk_cover_status": 0,
+              "ref_tip": 0,
+              "display_title": "亲密不等于失去自己",
+              "view_count": 17,
+              "sticky": false,
+              "permission_code": 0,
+              "schedule_post_time": 0,
+              "goods_info": {
+                "goods_name": []
+              },
+              "visible_time": 1784944331,
+              "likes": 2,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3231dvimb74205qf1k09d3246g52k4mg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g34o3231dvimb742g5qf1k09d3246pnr3mfo?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_msg": "",
+              "tab_status": 1,
+              "xsec_source": "pc_creatormng",
+              "cocreate": false,
+              "time": "2026-07-25 09:51",
+              "comments_count": 0
+            },
+            {
+              "ref_tip": 0,
+              "time": "2026-07-24 22:33",
+              "collected_count": 2,
+              "images_list": [
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03230qhoavms005qf1k09d3246j7fuba0?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03230qhoavms0g5qf1k09d3246n1udmpg?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03230qhoavms105qf1k09d3246m92oo8o?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03230qhoavms1g5qf1k09d3246sgk3040?imageView2/2/w/1080/format/jpg&origin=0"
+                },
+                {
+                  "url": "http://sns-na-i2.xhscdn.com/spectrum/1040g0k03230qhoavms205qf1k09d3246ruack98?imageView2/2/w/1080/format/jpg&origin=0"
+                }
+              ],
+              "permission_code": 0,
+              "schedule_post_time": 0,
+              "tab_status": 1,
+              "visible_time": 1784903664,
+              "id": "6a6377c0000000000301f0c0",
+              "view_count": 90,
+              "shared_count": 1,
+              "goods_info": {
+                "goods_name": []
+              },
+              "cocreate": false,
+              "display_title": "想找人聊聊，又怕选错咨询师？",
+              "comments_count": 0,
+              "permission_msg": "",
+              "xsec_token": "SCRUBBED",
+              "xsec_source": "pc_creatormng",
+              "pk_cover_status": 0,
+              "type": "normal",
+              "likes": 7,
+              "sticky": false
+            }
+          ],
+          "tags": [],
+          "page": 3
+        },
+        "code": 0,
+        "success": true,
+        "msg": "成功"
+      }
+    }
+  ],
+  "note": "真号只读采集;xsec_token 已抹除。**不要手改本文件** —— 它是证据,改它去迁就代码等于自欺,要更新只能重新采集。"
+}
