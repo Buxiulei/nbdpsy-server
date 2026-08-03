@@ -629,3 +629,40 @@ def test_describe_diff_locates_first_divergence():
     assert "首差异@" in msg and "83" in msg      # 4*20+3=83 处首次分叉
     assert "残留" in msg and "目标" in msg        # 两侧窗口都在
     assert f"读回长{len(got)}" in msg
+
+
+@pytest.mark.unit
+def test_atomic_chips_cleared_by_per_key_backspace():
+    """Ctrl+A 清不掉的 atomic chip → 第二阶段逐键退格删到空,然后正常输入。
+
+    2026-08-03 真号确诊:tiptap 话题 chip 是 atomic node,三轮全选删除后残留一字不变
+    ('#身边的心理学[话题]# #明日方舟[话题]#')。atomic 节点吃单独 Backspace,
+    光标到文末逐键退格即可清掉。
+    """
+    chips = "#身边的心理学[话题]# #明日方舟[话题]#"
+    # 读回序列:before → 3 次 Ctrl+A 阶段全残留 → 逐退格阶段第一次抽查即空 → 输入后读回
+    page = FakePage(boxes=[_box()], bodies=["旧正文 " + chips, chips, chips, chips, "", "新正文"])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, "新正文")
+
+    assert result["status"] == "done"
+    assert result["topics_dropped"] == ["身边的心理学", "明日方舟"]
+    # 第二阶段确实发生了:End 定位 + 若干退格
+    keys = [c[1] for c in human.kinds("key")]
+    assert any("End" in k for k in keys)
+    assert keys.count("Backspace") >= 4    # 3 次全选阶段 + 逐退格阶段
+
+
+@pytest.mark.unit
+def test_backspace_budget_exhaustion_still_fails_closed():
+    """逐键退格预算耗尽仍不空(结构异常)→ 失败,绝不在残留上输入。"""
+    stuck = "#顽固[话题]#"
+    page = FakePage(boxes=[_box()], bodies=["旧 " + stuck] + [stuck] * 60)
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, "新正文")
+
+    assert result["status"] == "error"
+    assert "清空失败" in result["reason"]
+    assert human.kinds("type") == []

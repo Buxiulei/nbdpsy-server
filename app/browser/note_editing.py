@@ -210,8 +210,11 @@ _BODY_READ_JS = r"""() => {
 }"""
 
 # 定位/输入重试上限:与 ``_type_into_robust`` 同为 3。
-# 清空重试上限:tiptap 多节点下一次 Ctrl+A 可能只选中部分,重清几次;仍不空必是异常结构
+# 清空重试上限:tiptap 多节点下一次 Ctrl+A 可能只选中部分,重清几次;仍不空转逐键退格
 _CLEAR_TRIES = 3
+# 逐键退格预算(清 atomic chip 用):话题 ≤10 个 + 少量残字,40 次绰绰有余;耗尽仍不空
+# 说明结构异常(如嵌套只读块),那不是"再按几下"能解的,交回失败路径
+_CHIP_BACKSPACE_BUDGET = 40
 _TYPE_TRIES = 3
 # 滚动进视口的尝试上限:与 ``note_components.click_publish`` 的滚动循环同为 3。
 _SCROLL_TRIES = 3
@@ -340,6 +343,24 @@ def _type_into(
                     if not _norm(left or ""):
                         cleared = True
                         break
+                if not cleared and read_current is not None:
+                    # 第二阶段:**逐键退格删 atomic 节点**(2026-08-03 真号确诊):
+                    # tiptap 的话题 chip 是 atomic node,Ctrl+A 选不中它们——三轮全选删除
+                    # 后残留一字不变('#身边的心理学[话题]# #明日方舟[话题]#')就是铁证。
+                    # atomic 节点吃单独的 Backspace(一次删一个),所以光标移到文末逐键退格,
+                    # 每几键读一次,读空即止。预算 _CHIP_BACKSPACE_BUDGET 封顶:残留是
+                    # chip 时按 chip 个数消耗,预算耗尽仍不空 = 结构异常,交回失败路径。
+                    human.press_key("Control+End", reason=f"光标移到{intent}末尾(清残留)")
+                    for i in range(_CHIP_BACKSPACE_BUDGET):
+                        human.press_key("Backspace", reason="")
+                        if (i + 1) % 4 == 0:
+                            human.wait(0.15, 0.35, context="退格间隔")
+                            if not _norm(read_current(page) or ""):
+                                cleared = True
+                                break
+                    if not cleared:
+                        human.wait(0.2, 0.4, context="末次退格后读回")
+                        cleared = not _norm(read_current(page) or "")
                 if not cleared:
                     last_err = (
                         f"{intent}清空失败:{_CLEAR_TRIES} 次 Ctrl+A+Backspace 后仍残留 "
