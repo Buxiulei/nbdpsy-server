@@ -410,16 +410,54 @@ async def test_poll_exposes_aborted_before_submit(tmp_path, monkeypatch):
         assert "image_remove_failed" in body["reason"]
 
 
-# ---------------- 服务层:执行入口对未接线的编辑字段 fail-closed ----------------
+# ---------------- 服务层:执行入口把编辑字段送到浏览器层 ----------------
 
 
-async def test_execute_fails_closed_on_unwired_edit_fields():
-    """浏览器层没接线前,带编辑字段的任务一律失败退出 —— 绝不静默丢改动照样提交。"""
-    result = await note_components.execute(
-        1, {"note_id": _NOTE, "activity_id": "43561", "title": "新标题"}
-    )
-    assert "note_editing_not_wired" in result["error"]
-    assert result["aborted_before_submit"] is True
+async def test_execute_passes_edit_fields_to_browser_layer(monkeypatch):
+    """带编辑字段的任务把五个键**同名**送到 set_note_components,与组件参数同一次调用。
+
+    这条用例原先钉的是「浏览器层没接线 → 一律 fail-closed」;T6 把编排接上后闸拆除,
+    它改钉接线本身。要防的坏事没变 —— **静默丢改动比失败坏得多**:参数在服务层被丢掉的话,
+    我们照样会点一次全量覆盖提交,然后报 done。所以这里断言的是"真送到了",而不是"没报错"。
+    """
+    seen = {}
+
+    async def fake_load(_account_id):
+        return [{"name": "a", "value": "b"}]
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw):
+            self.page = object()
+
+        def start(self):
+            return {"success": True}
+
+        def stop(self):
+            pass
+
+    def spy(_page, account_id, note_id, **kwargs):
+        seen.update(kwargs, account_id=account_id, note_id=note_id)
+        # applied 里没有 True 的文本项 → 不触发台账回写(回写另有专门用例)
+        return {"status": "partially_applied", "applied": {"title": None}}
+
+    monkeypatch.setattr(note_components, "load_account_cookies", fake_load)
+    monkeypatch.setattr(note_components, "SyncClient", _FakeClient)
+    monkeypatch.setattr(note_components, "set_note_components", spy)
+
+    result = await note_components.execute(1, {
+        "note_id": _NOTE, "activity_id": "43561",
+        "title": "", "content": "新正文",
+        "add_images": ["/tmp/a.png"], "remove_image_indexes": [3, 1],
+        "expected_image_count": 4,
+    })
+
+    assert result["status"] == "partially_applied" and "error" not in result
+    assert seen["note_id"] == _NOTE and seen["activity_id"] == "43561"
+    # title="" 是"清空标题"这一合法意图,**必须**送下去(真值判断会把它静默丢掉)
+    assert seen["title"] == "" and seen["content"] == "新正文"
+    assert seen["add_images"] == ["/tmp/a.png"]
+    assert seen["remove_image_indexes"] == [3, 1]   # 顺序原样,降序排是浏览器层的事
+    assert seen["expected_image_count"] == 4
 
 
 # ---------------- 服务层:台账回写(设计 3.3) ----------------
