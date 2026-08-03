@@ -90,6 +90,9 @@ async def execute(account_id: int, payload: dict) -> dict:
     (形状见 ``app.browser.note_components.set_note_components``);一项都没生效时结果里
     自带 ``error`` 键 → 台账落 error。入参不合法 / 前置失败 / 任何异常 →
     ``{"error": reason}``,**不抛出**。
+
+    payload 里的编辑字段(``EDIT_FIELDS``)按同名参数直传浏览器层;标题/正文回读确认
+    生效后追加台账回写(见 ``_sync_ledger``)。
     """
     payload = payload or {}
     note_id = str(payload.get("note_id") or "").strip()
@@ -99,19 +102,20 @@ async def execute(account_id: int, payload: dict) -> dict:
         field: (str(payload.get(field)).strip() if payload.get(field) else None)
         for field in COMPONENT_FIELDS
     }
-    if any(payload.get(field) is not None for field in EDIT_FIELDS):
-        # T6 接线点(设计 T6:set_note_components 步骤序列扩展)。在浏览器层接上之前,
-        # 带编辑字段的任务**一律 fail-closed**:否则这里会把 title/content/图片增删
-        # 静默丢掉,照样点一次全量覆盖提交,然后报 done —— 静默丢改动比失败坏得多。
-        return {
-            "error": "note_editing_not_wired: 标题/正文/图片编辑的浏览器层尚未接线,"
-                     "本次请求一步都没做(笔记原样未动)",
-            "aborted_before_submit": True,
-        }
-    if not any(components.values()):
+    # 编辑字段**同名直传**给浏览器层(``set_note_components`` 的可选参数与这里同名)。
+    # 用 ``is not None`` 而不是真值判断:``title=""`` 是"清空标题"这一合法意图(设计 3.1),
+    # 真值判断会把它当成"没请求"静默丢掉。纯组件 payload 不含这些键 → ``edits`` 为空,
+    # 调用形态与老版本逐字节一致。
+    edits = {
+        field: payload[field]
+        for field in EDIT_FIELDS
+        if payload.get(field) is not None
+    }
+    if not any(components.values()) and not edits:
         return {
             "error": "no_component_requested: collection_id / quoted_note_id / "
-                     "activity_id 至少要给一个,否则这次编辑什么都不会改"
+                     "activity_id / 编辑字段(title / content / 图片增删)至少要给一个,"
+                     "否则这次编辑什么都不会改"
         }
 
     try:
@@ -122,9 +126,11 @@ async def execute(account_id: int, payload: dict) -> dict:
         async with account_locks.get(account_id):
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队。
             async with browser_slot():
-                return await asyncio.to_thread(
-                    _apply_sync, account_id, cookies, note_id, components
+                result = await asyncio.to_thread(
+                    _apply_sync, account_id, cookies, note_id, components, edits
                 )
+        # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
+        return await _sync_ledger(account_id, note_id, result)
     except NoteComponentsError as exc:
         # 前置/硬失败(页面进不去 / 权限读不出 / 提交前权限已变):这几种都没点过发布
         logger.warning(
@@ -137,9 +143,13 @@ async def execute(account_id: int, payload: dict) -> dict:
 
 
 def _apply_sync(
-    account_id: int, cookies: list[dict], note_id: str, components: dict
+    account_id: int,
+    cookies: list[dict],
+    note_id: str,
+    components: dict,
+    edits: dict | None = None,
 ) -> dict:
-    """同一线程内:建 SyncClient → start → 设置三组件 → stop 收尾(finally 防泄漏)。
+    """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
     headed 真屏沿用 SyncClient 默认(headless=False);**不 block_images** —— 发布按钮靠
     截图找「小红书红」质心,拦图会改变页面布局与配色分布。
@@ -149,9 +159,30 @@ def _apply_sync(
         start = client.start()
         if not start.get("success"):
             raise NoteComponentsError(f"browser_start_failed: {start.get('error')}")
-        return set_note_components(client.page, account_id, note_id, **components)
+        return set_note_components(
+            client.page, account_id, note_id, **components, **(edits or {})
+        )
     finally:
         client.stop()
+
+
+async def _sync_ledger(account_id: int, note_id: str, result: dict) -> dict:
+    """标题/正文回读确认生效时把平台真值写回台账,结果里带 ``ledger_synced``(设计 3.3)。
+
+    没有文本编辑项(纯组件 / 只改图片 / 文本没成)时**不开 session、不带该键** —— 与
+    MANIFEST 口径一致:这个键出现就代表"这次确实有该写台账的东西"。
+
+    回写失败不改变 job 终态(``write_back_ledger`` 自己已经把异常收敛成 ``False``),
+    所以这里**不再包一层 try**:再吞一次只会把它的日志与返回值一起埋掉。
+    """
+    applied = (result or {}).get("applied") or {}
+    if not (applied.get("title") is True or applied.get("content") is True):
+        return result
+    async with get_session() as session:
+        result["ledger_synced"] = await write_back_ledger(
+            session, account_id, note_id, applied, result.get("read_back") or {}
+        )
+    return result
 
 
 # ---------------- 台账回写(标题 / 正文,设计 3.3) ----------------
