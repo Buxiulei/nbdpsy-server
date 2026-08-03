@@ -616,3 +616,60 @@ async def test_patch_explicit_null_title_or_content_400(tmp_path, monkeypatch):
             headers=bearer(op_key),
         )
         assert r_content.status_code == 400, r_content.text
+
+
+# ---------------- pending 到底在等什么(2026-08-03 运营误判事故) ----------------
+#
+# 一批排到 08-08 的定时稿被当成"卡了 4 天的僵尸任务",进而要求"pending 超 30 分钟自动
+# 置 failed" —— **那会把定时发布整个功能杀死**(每篇定时稿都在创建 30 分钟后、远早于
+# 发布时间被判失败)。根因不是超时缺失,是**接口没说清它在等什么**:
+# "定时等待中"和"已到点却没人派"表象一模一样,后果却完全相反。
+
+
+def test_pending_waiting_for_schedule_is_explained_as_normal(monkeypatch):
+    """未到点的定时任务:明说在等、还剩多久、**不是 overdue**。"""
+    from datetime import datetime, timedelta
+    from app.models.publish_job import PublishJob
+    from app.http import publish_rest as pr
+
+    job = PublishJob(
+        id=1, account_id=2, title="定时稿", status="pending",
+        schedule_time=datetime.utcnow() + timedelta(hours=50),
+        created_at=datetime.utcnow() - timedelta(days=4),
+    )
+    v = pr._job_view(job)
+
+    assert v["pending_reason"] == "waiting_schedule"
+    assert v["pending_seconds_remaining"] > 0
+    assert v["pending_overdue"] is False
+    assert "不要当成卡死" in v["pending_hint"]
+
+
+def test_pending_overdue_is_called_out_as_abnormal(monkeypatch):
+    """已到点却等了很久没被派发 → 明确标成异常(派发周期只有 5 秒)。"""
+    from datetime import datetime, timedelta
+    from app.models.publish_job import PublishJob
+    from app.http import publish_rest as pr
+
+    job = PublishJob(
+        id=2, account_id=2, title="到点没人管", status="pending",
+        schedule_time=None, created_at=datetime.utcnow() - timedelta(hours=3),
+    )
+    v = pr._job_view(job)
+
+    assert v["pending_reason"] == "due"
+    assert v["pending_overdue"] is True
+    assert "不正常" in v["pending_hint"]
+
+
+def test_terminal_job_has_no_pending_explain(monkeypatch):
+    """终态任务不附这组键(它们只对 pending 有意义)。"""
+    from datetime import datetime
+    from app.models.publish_job import PublishJob
+    from app.http import publish_rest as pr
+
+    job = PublishJob(id=3, account_id=2, title="已发", status="published",
+                     created_at=datetime.utcnow())
+    v = pr._job_view(job)
+
+    assert "pending_reason" not in v and "pending_overdue" not in v

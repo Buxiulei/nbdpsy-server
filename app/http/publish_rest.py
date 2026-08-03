@@ -96,6 +96,63 @@ def _job_view(job: PublishJob) -> dict:
             if job.created_at
             else None
         ),
+        **_pending_explain(job),
+    }
+
+
+# pending 长期不动的两种情形,**表象一模一样**,后果却完全相反:
+#   ① 定时任务在等它自己的点 —— 正常,不该动它;
+#   ② 已到点却始终没被派发 —— 异常,要查。
+# 2026-08-03 运营就是分不清这两者,把一批排到 08-08 的定时稿当成"卡了 4 天的僵尸任务",
+# 进而要求"pending 超 30 分钟自动置 failed" —— **那会把定时发布整个功能杀死**
+# (每篇定时稿都在创建 30 分钟后、远早于发布时间被判失败)。
+# 所以这里不是锦上添花:**接口必须自己说清楚它在等什么**,否则误判必然重演。
+_WAITING_SCHEDULE = "waiting_schedule"
+_WAITING_RETRY = "waiting_retry"
+_DUE = "due"
+# 已到点却迟迟没派发,超过这个秒数就明说"不正常"(派发周期只有 5s,给到 30 分钟极宽松)
+_OVERDUE_ALERT_SECONDS = 1800
+
+
+def _pending_explain(job: PublishJob) -> dict:
+    """给 pending 任务附一句"它到底在等什么",终态任务不附。
+
+    ``pending_reason`` 三态 + ``pending_seconds_remaining``(还要等多久,已到点为 0)+
+    ``pending_overdue``(已到点且等超阈值 = 真异常,值得查)。
+    """
+    if job.status != "pending":
+        return {}
+    now = datetime.utcnow()
+    waits = []
+    if job.schedule_time and job.schedule_time > now:
+        waits.append((_WAITING_SCHEDULE, job.schedule_time))
+    if job.next_retry_at and job.next_retry_at > now:
+        waits.append((_WAITING_RETRY, job.next_retry_at))
+    if waits:
+        reason, until = max(waits, key=lambda x: x[1])
+        remaining = int((until - now).total_seconds())
+        return {
+            "pending_reason": reason,
+            "pending_until": until.replace(tzinfo=timezone.utc).isoformat(),
+            "pending_seconds_remaining": remaining,
+            "pending_overdue": False,
+            "pending_hint": (
+                f"按计划等待中,还有约 {remaining // 3600} 小时 {(remaining % 3600) // 60} 分钟到点;"
+                "这是正常状态,不要当成卡死"
+            ),
+        }
+    # 已到点:派发周期 5 秒,正常情况下几乎立刻会被领走
+    waited = int((now - (job.created_at or now)).total_seconds())
+    overdue = waited > _OVERDUE_ALERT_SECONDS
+    return {
+        "pending_reason": _DUE,
+        "pending_until": None,
+        "pending_seconds_remaining": 0,
+        "pending_overdue": overdue,
+        "pending_hint": (
+            f"已到点但等了 {waited // 60} 分钟还没被派发,**不正常**,请查 worker"
+            if overdue else "已到点,等待派发(通常几秒内)"
+        ),
     }
 
 

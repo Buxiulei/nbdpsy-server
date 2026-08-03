@@ -626,7 +626,7 @@ def test_quote_card_title_mismatch_refuses_to_guess(monkeypatch, wired):
 
     result = _run(editor, quoted_note_id="n-quote")
 
-    assert "quote_card_title_mismatch" in result["failed"][0]["reason"]
+    assert "quote_card_not_unique_by_title" in result["failed"][0]["reason"]
     assert "确认引用" not in wired[0].texts
 
 
@@ -1006,7 +1006,7 @@ def test_no_fallback_on_uncertain_failures(monkeypatch, wired):
 
     result = _run(editor, quoted_note_id="n-quote")
 
-    assert "quote_card_title_mismatch" in result["failed"][0]["reason"]
+    assert "quote_card_not_unique_by_title" in result["failed"][0]["reason"]
     assert "他人笔记" not in wired[0].texts   # 一次都没切过去
 
 
@@ -1034,3 +1034,26 @@ def test_other_tab_rejects_wrong_note_from_search(monkeypatch, wired):
 
     assert "quote_other_id_mismatch" in result["failed"][0]["reason"]
     assert "确认引用" not in wired[0].texts
+
+
+def test_quote_matches_card_by_title_not_by_index(monkeypatch, wired):
+    """**卡片顺序与接口不一致时仍要找对那张卡** —— 这是引用功能整体不可用的真因。
+
+    2026-08-03 真号证伪:原实现假设"响应第 i 条 ↔ 弹窗第 i 张卡"(当初就写明"没有实测
+    背书")。实测第 6 张卡是「心理咨询师-彭旱雨…」,而接口第 6 条是「粤语咨询师-黄安麟…」
+    —— 同序不成立,于是每次都判 mismatch,引用功能整体不可用。
+
+    这里把卡片顺序**故意打乱**成与接口不同,断言仍然选中标题对得上的那一张。
+    """
+    editor = Editor(
+        notes=(("n-a", "第一篇"), ("n-quote", "徐瑞恒"), ("n-c", "第三篇")),
+        # 接口顺序是 第一篇/徐瑞恒/第三篇,弹窗渲染顺序完全不同(真号就是这样)
+        quote_card_titles=["第三篇", "第一篇", "徐瑞恒"],
+    )
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done"
+    assert result["components"]["quote"]["title"] == "徐瑞恒"
+    assert "徐瑞恒" in editor.quote_text      # 引用的确实是它,不是下标位置上那张

@@ -378,3 +378,52 @@ async def test_recover_stale_publish_resets_dead_but_spares_live(db_factory, mon
                 (await session.execute(select(PublishJob))).scalars().all()}
     assert rows[71].status == "pending" and rows[71].started_at is None  # 死者复位
     assert rows[72].status == "publishing"  # 在途豁免
+
+
+# ---------------- 已到点积压告警(2026-08-03) ----------------
+#
+# 宿主用 loguru,caplog(stdlib)抓不到 —— 直接挂一个 loguru sink 收文本。
+
+
+def _capture_warnings():
+    """挂 loguru sink 收 WARNING 文本,返回 (缓冲区, 卸载函数)。"""
+    from loguru import logger as _lg
+
+    buf = []
+    sink_id = _lg.add(lambda m: buf.append(str(m)), level="WARNING")
+    return buf, lambda: _lg.remove(sink_id)
+
+
+def test_backlog_warns_only_on_due_jobs():
+    """已到点的积压达阈值才告警,且**只告警不改状态**。
+
+    为什么强调不改状态:运营曾把一批排到 08-08 的定时稿当成僵尸任务,要求"pending 超
+    30 分钟自动置 failed" —— 那会把定时发布整个功能杀死。未到点的定时稿根本不进
+    _due_publish_jobs,所以这里天然不会碰到它们。
+    """
+    from app import worker as w
+
+    sup = w.Supervisor.__new__(w.Supervisor)
+    buf, done = _capture_warnings()
+    try:
+        sup._warn_publish_backlog([(1, 2, None), (2, 2, None), (3, 7, None)])
+    finally:
+        done()
+    text = "".join(buf)
+
+    assert "积压 3 条" in text
+    assert "未到点的定时稿不计入" in text
+
+
+def test_backlog_silent_below_threshold():
+    """没到阈值不吵——告警吵起来就没人看了。"""
+    from app import worker as w
+
+    sup = w.Supervisor.__new__(w.Supervisor)
+    buf, done = _capture_warnings()
+    try:
+        sup._warn_publish_backlog([(1, 2, None), (2, 2, None)])
+    finally:
+        done()
+
+    assert "积压" not in "".join(buf)

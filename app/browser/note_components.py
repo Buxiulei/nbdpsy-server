@@ -788,21 +788,31 @@ def _set_quote_in_modal(
         }
 
     cards = _wait_quote_cards(page)
-    if index >= len(cards):
-        return {
-            "status": "error",
-            "reason": f"quote_card_index_out_of_range: 响应第 {index + 1} 条,"
-                      f"但弹窗只渲染了 {len(cards)} 张卡",
-        }
-    card = cards[index]
     title = _norm((notes[index] or {}).get("display_title"))
-    card_text = _norm(card.inner_text())
-    if title and title not in card_text:
+
+    # **按标题找卡,不按下标取卡**(2026-08-03 真号证伪):原实现假设"响应第 i 条 ↔
+    # 弹窗第 i 张卡",该假设当初就写明"没有实测背书" —— 现在有反例了:实测第 6 张卡是
+    # 「心理咨询师-彭旱雨…」,而接口第 6 条是「粤语咨询师-黄安麟…」。同序不成立,
+    # 于是每次都判 quote_card_title_mismatch,引用功能整体不可用。
+    #
+    # 改成在**全部卡片**里找文案包含该标题的那一张:命中恰好一张才用,0 张或多张都拒绝
+    # (多张 = 同号有重名笔记,认不准就不认,与本模块一贯纪律一致)。
+    if not title:
+        # 空标题笔记没法按文案认卡。**不退回下标**(那正是被证伪的假设),交给
+        # 「他人笔记」那条路按 note_id 精确检索 —— 它不依赖任何顺序假设。
         return {
             "status": "error",
-            "reason": f"quote_card_title_mismatch: 第 {index + 1} 张卡文案 {card_text[:40]!r} "
-                      f"里没有平台标题「{title}」,卡片顺序与接口不一致,拒绝盲选",
+            "reason": "quoted_note_not_in_candidates: 目标是空标题笔记,"
+                      "「我的笔记」只能按文案认卡,改走按 note_id 精确检索",
         }
+    hits = [c for c in cards if title in _norm(c.inner_text())]
+    if len(hits) != 1:
+        return {
+            "status": "error",
+            "reason": f"quote_card_not_unique_by_title: 弹窗 {len(cards)} 张卡里,"
+                      f"文案含平台标题「{title}」的有 {len(hits)} 张(要求恰好 1 张,绝不猜)",
+        }
+    card = hits[0]
 
     human.click(card, reason=f"选中被引用笔记「{title[:15]}」")
     human.wait(0.5, 1.0, context="等选中态生效")

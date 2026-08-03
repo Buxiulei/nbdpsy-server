@@ -50,6 +50,9 @@ except ImportError:  # pragma: no cover - 集成前的过渡态
 # 仓库根:account_worker 子进程的 cwd 与 .venv python 解释器路径基准。
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# 已到点的发布任务积压到几条就告警(只告警,绝不据此改任务状态,理由见 _warn_publish_backlog)
+PUBLISH_BACKLOG_ALERT = 3
+
 
 def _sqlite_db_path() -> str:
     """从 ``settings.DATABASE_URL`` 提取 sqlite 文件路径(供 sync 侧台账直连与子进程 --db)。"""
@@ -291,6 +294,7 @@ class Supervisor:
             logger.exception("publish_jobs 僵死恢复失败(忽略,下轮重试)")
         # b. 可派发工作:publish_jobs(SQL 直查到期 pending)+ browser_jobs(queued 全量)
         publish_rows = await self._due_publish_jobs()
+        self._warn_publish_backlog(publish_rows)
         browser_rows: list[dict] = []
         if self._repo is not None:
             try:
@@ -333,6 +337,29 @@ class Supervisor:
         if res.rowcount:
             logger.warning(f"[supervisor] 复位僵死 publishing 发布任务 {res.rowcount} 条")
         return res.rowcount
+
+    def _warn_publish_backlog(self, rows: list) -> None:
+        """**已到点**却积压的发布任务超阈值就告警;绝不据此改任何任务状态。
+
+        为什么只告警不动手(2026-08-03 运营误判事故):一批排到 08-08 的定时稿被当成
+        "卡了 4 天的僵尸任务",提出"pending 超 30 分钟自动置 failed" —— 那会把定时发布
+        整个功能杀死(每篇定时稿都在创建 30 分钟后、远早于发布时间被判失败)。
+
+        所以判据只看**已到点的**(``_due_publish_jobs`` 已按 schedule_time 过滤掉未到点
+        的),未到点的定时稿一条都不会进这里。真僵死另有 ``_recover_stale_publish`` 负责
+        (那管的是 ``publishing`` 悬挂,有明确的超时语义)。
+
+        告警不落库、不改状态 —— 它是给人看的信号,不是自动处置的依据。
+        """
+        if len(rows) < PUBLISH_BACKLOG_ALERT:
+            return
+        by_account: dict[int, int] = {}
+        for row in rows:
+            by_account[row[1]] = by_account.get(row[1], 0) + 1
+        logger.warning(
+            f"[supervisor] 已到点的发布任务积压 {len(rows)} 条(阈值 {PUBLISH_BACKLOG_ALERT}),"
+            f"按账号: {by_account} —— 未到点的定时稿不计入,这里积压说明派发或执行侧有问题"
+        )
 
     async def _due_publish_jobs(self) -> list[tuple[int, int, datetime | None]]:
         """SQL 直查到期 pending 发布任务:(id, account_id, created_at),按 id 升序。
