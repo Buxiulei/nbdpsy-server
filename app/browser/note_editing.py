@@ -122,6 +122,25 @@ def title_length_ok(title: str) -> bool:
     return get_display_length(title) <= XHS_MAX_TITLE_DISPLAY
 
 
+def describe_diff(got: str, want: str) -> str:
+    """定位两串的**首个差异点**并给两侧窗口——比截断前缀有诊断力。
+
+    为什么必须有(2026-08-03 T7 实测):mismatch 只显示两边前 60 字时,"前缀相同、
+    差异在后段"的失败(残留/截断/丢尾,恰是最常见形态)显示出来两边一模一样,
+    零诊断力,真号连试两次都定位不了。首差异点 + 两侧窗口 + 双方长度一眼定性:
+    got 比 want 长 = 残留;短 = 丢尾;同长不同字 = 字符转换。
+    """
+    if got == want:
+        return "两串相等(不该走到这里)"
+    n = min(len(got), len(want))
+    i = next((k for k in range(n) if got[k] != want[k]), n)
+    lo = max(0, i - 12)
+    return (
+        f"首差异@{i}(读回长{len(got)}/目标长{len(want)}):"
+        f"读回[...{got[lo:i + 24]!r}...] vs 目标[...{want[lo:i + 24]!r}...]"
+    )
+
+
 def _norm(text: str | None) -> str:
     """空白归一(换行/多空格 → 单空格),便于回读值与目标值精确比对。
 
@@ -191,6 +210,8 @@ _BODY_READ_JS = r"""() => {
 }"""
 
 # 定位/输入重试上限:与 ``_type_into_robust`` 同为 3。
+# 清空重试上限:tiptap 多节点下一次 Ctrl+A 可能只选中部分,重清几次;仍不空必是异常结构
+_CLEAR_TRIES = 3
 _TYPE_TRIES = 3
 # 滚动进视口的尝试上限:与 ``note_components.click_publish`` 的滚动循环同为 3。
 _SCROLL_TRIES = 3
@@ -265,6 +286,7 @@ def _type_into(
     *,
     intent: str,
     clear_first: bool = True,
+    read_current=None,
 ) -> tuple[bool, str | None]:
     """拟人化把 ``value`` 打进目标框。返回 ``(ok, 最后一次错误)``。
 
@@ -300,10 +322,30 @@ def _type_into(
             human.click((cx, cy), reason=f"聚焦{intent}")
             human.wait(0.2, 0.5, context="聚焦后停顿")
             if clear_first:
-                # Ctrl+A → Backspace:E5 实证能把旧内容清干净
-                human.press_key("Control+a", reason=f"全选{intent}原内容")
-                human.press_key("Backspace", reason=f"清空{intent}")
-                human.wait(0.2, 0.5, context="清空后停顿")
+                # Ctrl+A → Backspace 清空,**清完必须读回为空再输入**(2026-08-03 真号打脸):
+                # E5 受控写只测了标题(input 单行,Ctrl+A 可靠),正文没测——tiptap 富文本的
+                # Ctrl+A 在多节点(段落+话题 chip)下可能只选中部分,残留旧内容;此时继续
+                # 输入,读回 = 新文本(前缀相同)+ 旧残留(后段不同),mismatch 只显示相同
+                # 前缀毫无诊断力,T7 真号连挂两次才定位到这。清不干净就再清,清空封顶
+                # _CLEAR_TRIES 次;仍不空 → 本次尝试失败(绝不在残留上输入)。
+                cleared = False
+                for _ in range(_CLEAR_TRIES):
+                    human.press_key("Control+a", reason=f"全选{intent}原内容")
+                    human.press_key("Backspace", reason=f"清空{intent}")
+                    human.wait(0.2, 0.5, context="清空后停顿")
+                    if read_current is None:
+                        cleared = True  # 没给读法的框(理论不该有)保持旧行为
+                        break
+                    left = read_current(page)
+                    if not _norm(left or ""):
+                        cleared = True
+                        break
+                if not cleared:
+                    last_err = (
+                        f"{intent}清空失败:{_CLEAR_TRIES} 次 Ctrl+A+Backspace 后仍残留 "
+                        f"{_norm(read_current(page) or '')[:40]!r}"
+                    )
+                    continue
             if value:
                 human.type_text(None, value, click_first=False, clear_first=False)
             logger.info(
@@ -362,7 +404,10 @@ def apply_title_edit(page, human, new_title: str) -> dict:
             "title_read_back": None,
         }
 
-    ok, err = _type_into(page, human, [_TITLE_INPUT], new_title, intent="标题")
+    ok, err = _type_into(
+        page, human, [_TITLE_INPUT], new_title, intent="标题",
+        read_current=read_title_value,
+    )
     if not ok:
         return {
             "status": "error",
@@ -434,7 +479,10 @@ def apply_content_edit(page, human, new_content: str) -> dict:
             "body_read_back": None,
         }
 
-    ok, err = _type_into(page, human, [_BODY_EDITOR], new_content, intent="正文")
+    ok, err = _type_into(
+        page, human, [_BODY_EDITOR], new_content, intent="正文",
+        read_current=read_body_value,
+    )
     if not ok:
         return {
             "status": "error",
@@ -450,8 +498,8 @@ def apply_content_edit(page, human, new_content: str) -> dict:
         return {
             "status": "error",
             "reason": (
-                f"content_readback_mismatch: 读回 {(read_back or '')[:60]!r} "
-                f"!= 目标 {new_content[:60]!r}"
+                "content_readback_mismatch: "
+                + describe_diff(_norm(read_back), _norm(new_content))
             ),
             "body_before": body_before,
             "topics_dropped": topics_dropped,

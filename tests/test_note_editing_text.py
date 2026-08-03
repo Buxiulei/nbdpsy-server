@@ -281,7 +281,7 @@ def test_scroll_up_when_target_pushed_above_viewport():
     动作静默失败而代码看起来一切正常(文字版发布丢话题同款陷阱,02b44f6)。
     只会向下滚的写法在这种情形下越滚越远,所以方向必须按落点算。
     """
-    page = FakePage(boxes=[_box(y=-815.0, h=30.0), _box(y=300.0)], titles=["旧", "新标题"])
+    page = FakePage(boxes=[_box(y=-815.0, h=30.0), _box(y=300.0)], titles=["旧", "", "新标题"])
     human = FakeHuman()
 
     result = ne.apply_title_edit(page, human, "新标题")
@@ -295,7 +295,7 @@ def test_scroll_up_when_target_pushed_above_viewport():
 
 @pytest.mark.unit
 def test_scroll_down_when_target_below_viewport():
-    page = FakePage(boxes=[_box(y=1200.0), _box(y=400.0)], titles=["旧", "新标题"])
+    page = FakePage(boxes=[_box(y=1200.0), _box(y=400.0)], titles=["旧", "", "新标题"])
     human = FakeHuman()
 
     ne.apply_title_edit(page, human, "新标题")
@@ -306,7 +306,7 @@ def test_scroll_down_when_target_below_viewport():
 @pytest.mark.unit
 def test_no_scroll_when_already_in_viewport():
     """已经在视口里就别乱滚(多余动作也是风控面)。"""
-    page = FakePage(boxes=[_box()], titles=["旧", "新标题"])
+    page = FakePage(boxes=[_box()], titles=["旧", "", "新标题"])
     human = FakeHuman()
 
     ne.apply_title_edit(page, human, "新标题")
@@ -322,7 +322,7 @@ def test_tall_editor_counts_as_in_viewport_by_click_point():
     """
     page = FakePage(
         boxes=[_box(y=320.0, h=839.0, w=816.0, ih=900.0)],
-        bodies=["旧正文", "新正文"],
+        bodies=["旧正文", "", "新正文"],
     )
     human = FakeHuman()
 
@@ -355,7 +355,7 @@ def test_refuses_to_click_when_still_out_of_viewport_after_scrolls():
 
 @pytest.mark.unit
 def test_apply_title_edit_success_shape():
-    page = FakePage(boxes=[_box()], titles=["旧标题", "新标题"])
+    page = FakePage(boxes=[_box()], titles=["旧标题", "", "新标题"])
     human = FakeHuman()
 
     result = ne.apply_title_edit(page, human, "新标题")
@@ -373,7 +373,7 @@ def test_apply_title_edit_readback_mismatch_is_error():
 
     本函数只如实报状态,弃提交是编排层(T6)的事 —— 这里不点发布、不做补救。
     """
-    page = FakePage(boxes=[_box()], titles=["旧标题", "新标"])
+    page = FakePage(boxes=[_box()], titles=["旧标题", "", "新标"])
     human = FakeHuman()
 
     result = ne.apply_title_edit(page, human, "新标题")
@@ -387,7 +387,7 @@ def test_apply_title_edit_readback_mismatch_is_error():
 @pytest.mark.unit
 def test_apply_title_edit_readback_normalizes_whitespace():
     """回读经 DOM 取值,换行/多空格与输入侧不保证逐字节一致 —— 归一后全等即算成。"""
-    page = FakePage(boxes=[_box()], titles=["旧标题", " 新的  标题 "])
+    page = FakePage(boxes=[_box()], titles=["旧标题", "", " 新的  标题 "])
     human = FakeHuman()
 
     assert ne.apply_title_edit(page, human, "新的 标题")["status"] == "done"
@@ -396,7 +396,7 @@ def test_apply_title_edit_readback_normalizes_whitespace():
 @pytest.mark.unit
 def test_apply_title_edit_clear_to_empty_is_done():
     """``title=""`` 清空标题:读回空串就是成功(不是"没读到")。"""
-    page = FakePage(boxes=[_box()], titles=["旧标题", ""])
+    page = FakePage(boxes=[_box()], titles=["旧标题", "", ""])
     human = FakeHuman()
 
     result = ne.apply_title_edit(page, human, "")
@@ -453,7 +453,7 @@ def test_apply_title_edit_unreadable_title_is_none_not_empty_string():
 def test_apply_content_edit_success_shape_and_topics_dropped():
     """``topics_dropped`` 取自**替换前**的旧正文(替换即丢失,如实上报,设计 3.2)。"""
     old = "旧正文 #身边的心理学[话题]# 收尾 #情绪管理[话题]#"
-    page = FakePage(boxes=[_box()], bodies=[old, "新的正文内容"])
+    page = FakePage(boxes=[_box()], bodies=[old, "", "新的正文内容"])
     human = FakeHuman()
 
     result = ne.apply_content_edit(page, human, "新的正文内容")
@@ -474,7 +474,7 @@ def test_apply_content_edit_uses_exact_match_not_prefix():
     成立;拿前缀判会把"话题 chip 没被 Ctrl+A 清干净"(E6 未闭环那半)放过去,残缺态就
     被提交出去了。``content_prefix_ok`` 是提交后重进页面才用的那条。
     """
-    page = FakePage(boxes=[_box()], bodies=["旧正文", "新的正文内容 #身边的心理学[话题]#"])
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", "新的正文内容 #身边的心理学[话题]#"])
     human = FakeHuman()
 
     result = ne.apply_content_edit(page, human, "新的正文内容")
@@ -489,7 +489,7 @@ def test_apply_content_edit_uses_exact_match_not_prefix():
 def test_apply_content_edit_readback_mismatch_keeps_before_and_topics():
     """失败也要把留底与丢掉的话题报全 —— 编排层要拿它们上报/人工比对。"""
     old = "旧正文 #焦虑[话题]#"
-    page = FakePage(boxes=[_box()], bodies=[old, "新的正"])
+    page = FakePage(boxes=[_box()], bodies=[old, "", "新的正"])
     human = FakeHuman()
 
     result = ne.apply_content_edit(page, human, "新的正文内容")
@@ -529,7 +529,7 @@ def test_apply_content_edit_type_failure_reports_reason():
 @pytest.mark.unit
 def test_apply_content_edit_clears_before_typing():
     """正文同样是"框里有旧内容":首次就得清(设计 4.1),顺序与标题一致。"""
-    page = FakePage(boxes=[_box()], bodies=["旧正文", "新正文"])
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", "新正文"])
     human = FakeHuman()
 
     ne.apply_content_edit(page, human, "新正文")
@@ -541,7 +541,7 @@ def test_apply_content_edit_clears_before_typing():
 @pytest.mark.unit
 def test_apply_content_edit_tolerates_unreadable_body_before():
     """读不到旧正文(None):``topics_dropped`` 给空列表,不炸。"""
-    page = FakePage(boxes=[_box()], bodies=[None, "新正文"])
+    page = FakePage(boxes=[_box()], bodies=[None, "", "新正文"])
     human = FakeHuman()
 
     result = ne.apply_content_edit(page, human, "新正文")
@@ -557,7 +557,7 @@ def test_apply_content_edit_tolerates_unreadable_body_before():
 @pytest.mark.unit
 @pytest.mark.parametrize("status_case", ["done", "error"])
 def test_title_result_keys_are_stable(status_case):
-    titles = ["旧标题", "新标题" if status_case == "done" else "别的"]
+    titles = ["旧标题", "", "新标题" if status_case == "done" else "别的"]
     result = ne.apply_title_edit(FakePage(boxes=[_box()], titles=titles), FakeHuman(), "新标题")
 
     assert result["status"] == status_case
@@ -571,7 +571,7 @@ def test_title_result_keys_are_stable(status_case):
 @pytest.mark.unit
 @pytest.mark.parametrize("status_case", ["done", "error"])
 def test_content_result_keys_are_stable(status_case):
-    bodies = ["旧正文", "新正文" if status_case == "done" else "别的"]
+    bodies = ["旧正文", "", "新正文" if status_case == "done" else "别的"]
     result = ne.apply_content_edit(FakePage(boxes=[_box()], bodies=bodies), FakeHuman(), "新正文")
 
     assert result["status"] == status_case
@@ -598,3 +598,34 @@ def test_clear_title_with_unreadable_readback_is_error_not_done():
     assert result["status"] == "error"
     assert result["reason"].startswith("title_readback_unavailable")
     assert result["title_read_back"] is None
+
+
+@pytest.mark.unit
+def test_clear_that_never_empties_fails_without_typing():
+    """清空后读回始终有残留 → 重清 _CLEAR_TRIES 次仍不空即失败,**绝不在残留上输入**。
+
+    2026-08-03 T7 真号实测:tiptap 富文本(多段落+话题 chip)下 Ctrl+A 可能只选中部分,
+    残留旧内容;此时继续输入 = 新文本+旧残留,mismatch 又只显示相同前缀,连试两次都
+    定位不了。清空验证是把这类失败从"打完才发现"提前到"打之前就拦住"。
+    """
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "残留", "残留", "残留"])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, "新正文")
+
+    assert result["status"] == "error"
+    assert "清空失败" in result["reason"]
+    assert human.kinds("type") == []   # 一个字都没输入
+
+
+@pytest.mark.unit
+def test_describe_diff_locates_first_divergence():
+    """差异定位:前缀相同时必须给出首差异点与两侧窗口——截断前缀零诊断力。"""
+    got = "共同前缀" * 20 + "然后是残留的旧内容"
+    want = "共同前缀" * 20 + "然后是目标的新内容"
+
+    msg = ne.describe_diff(got, want)
+
+    assert "首差异@" in msg and "83" in msg      # 4*20+3=83 处首次分叉
+    assert "残留" in msg and "目标" in msg        # 两侧窗口都在
+    assert f"读回长{len(got)}" in msg
