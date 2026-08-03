@@ -81,8 +81,8 @@ _REMOVE_SETTLE_TIMEOUT_S = 8.0
 # 但那是发布页单次;这里图可能更大,宁可等也不要误判失败)
 _UPLOAD_RENDER_TIMEOUT_S = 90.0
 _POLL_MS = 500
-# 滚进视口的拟人滚动轮次上限(同 click_publish 的 3 轮)
-_SCROLL_ATTEMPTS = 4
+# 滚进视口的拟人滚动轮次上限(同 click_publish 与 note_editing._SCROLL_TRIES,三处同为 3)
+_SCROLL_ATTEMPTS = 3
 
 
 # ---------------- 图数清点与校验闸 ----------------
