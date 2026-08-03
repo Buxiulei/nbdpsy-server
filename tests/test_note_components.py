@@ -1145,6 +1145,30 @@ def test_verify_after_submit_accepts_platform_rendering(monkeypatch, wired):
     assert result["applied"]["quote"] is True
 
 
+def test_verify_after_submit_survives_idempotent_reapply(monkeypatch, wired):
+    """给**已经带引用**的笔记再设一次同样的引用 → 仍判生效(幂等重跑不该报失败)。
+
+    这是"基线对比"顶不住的边界:重复设同一篇时提交前后文案一模一样,拿变化当判据会把
+    正确状态判成失败。所以回读判据改成认**空态文案**——问的是"现在有没有引用",
+    而不是"跟之前比变了没有"。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-quote", "徐瑞恒")))
+    editor.quote_text = "引用 @NBDpsy-好好生活 的笔记"   # 这篇本来就已经带着引用
+    _wire(monkeypatch, editor, wired)
+    real_submit = editor.submit
+
+    def submit_then_render():
+        real_submit()
+        editor.quote_text = "引用 @NBDpsy-好好生活 的笔记"   # 前后完全一样
+
+    editor.submit = submit_then_render
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done", f"幂等重跑被判失败: {result.get('failed')}"
+    assert result["applied"]["quote"] is True
+
+
 def test_verify_after_submit_still_catches_real_failure(monkeypatch, wired):
     """真没生效时仍要判失败 —— 放宽判据不能把"静默丢弃"也放过去。
 
@@ -1157,7 +1181,7 @@ def test_verify_after_submit_still_catches_real_failure(monkeypatch, wired):
 
     def submit_then_revert():
         real_submit()
-        editor.quote_text = "引用笔记"      # 服务端静默丢弃:回到未设置态
+        editor.quote_text = "引用笔记"      # 服务端静默丢弃:回到未设置态(空态文案)
 
     editor.submit = submit_then_revert
 

@@ -70,6 +70,10 @@ _QUOTE_CONTAINER = ".quote-note-container"
 _QUOTE_MODAL = ".d-modal.select-note-modal"
 _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card"
 _QUOTE_CONFIRM_TEXT = "确认引用"
+# 引用区**未设置**时的占位文案(夹具实测)。与 _COLLECTION_EMPTY_TEXT 同性质:
+# 判"到底有没有设上"要认空态,不能只靠"跟之前比变了没有"——重复设同一篇时前后一样,
+# 拿变化当判据会把幂等重跑判成失败。
+_QUOTE_EMPTY_TEXT = "引用笔记"
 # 关弹窗只能点它:Escape 关不掉这条产品线的弹窗(实测),见 _close_quote_modal
 _QUOTE_CANCEL_TEXT = "取消"
 # 「他人笔记」tab(2026-08-02 真号只读观察实测):
@@ -1365,12 +1369,14 @@ def _verify_after_submit(
         #
         # 基线是设置**之前**的引用区文案(无引用时是「引用笔记」这类占位),由设置阶段
         # 带出来(quote_text_before)。判据:非空且与基线不同。
-        before = outcome.get("quote_text_before") or ""
-        verified["quote"] = bool(quoted) and quoted != before
+        # 判据是"**现在有没有引用**",不是"跟之前比变了没有":重复给同一篇设同一个引用时
+        # 前后文案一模一样,拿变化当判据会把幂等重跑判成失败。
+        # 至于"引用的是不是**对**的那一篇",由设置阶段按 note_id 定位 + 标题交叉校验保证
+        # (见 _set_quote_in_modal);这里只负责确认它**提交后仍然在**。
+        verified["quote"] = bool(quoted) and _norm(quoted) != _QUOTE_EMPTY_TEXT
         if not verified["quote"]:
             logger.error(
-                f"[note_components] 引用回读未生效:引用区应非空且与设置前不同,"
-                f"实读 {quoted[:40]!r}(设置前 {before[:40]!r})"
+                f"[note_components] 引用回读未生效:引用区仍是未设置态,实读 {quoted[:40]!r}"
             )
     if activity_id:
         name = (outcomes.get("activity") or {}).get("name") or ""
