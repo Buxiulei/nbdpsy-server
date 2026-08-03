@@ -1103,8 +1103,11 @@ def test_untitled_refuses_when_exclusions_cannot_be_accounted_for(monkeypatch, w
     assert "确认引用" not in wired[0].texts
 
 
-def test_untitled_verifies_by_baseline_change(monkeypatch, wired):
-    """空标题没有可比对的文案,复核只能看引用区**变了没有**;没变判失败。"""
+def test_untitled_verifies_by_empty_state(monkeypatch, wired):
+    """空标题没有可比对的文案,复核看引用区**是不是还停在空态**;是就判失败。
+
+    (不看"变了没有":重复设同一篇时前后一样,拿变化当判据会把幂等重跑判成失败。)
+    """
     editor = Editor(
         notes=(("n-qr", ""),),
         quote_card_titles=["作者 5"],
@@ -1116,7 +1119,7 @@ def test_untitled_verifies_by_baseline_change(monkeypatch, wired):
     result = _run(editor, quoted_note_id="n-qr")
 
     assert "quote_not_applied" in result["failed"][0]["reason"]
-    assert "没有变化" in result["failed"][0]["reason"]
+    assert "未设置态" in result["failed"][0]["reason"]
 
 
 def test_verify_after_submit_accepts_platform_rendering(monkeypatch, wired):

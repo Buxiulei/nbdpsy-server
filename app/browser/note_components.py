@@ -719,10 +719,12 @@ def _set_quote_via_other_tab(
     human.wait(0.8, 1.5, context="等引用生效")
 
     after = read_quote_text(page)
-    if not after or after == before:
+    # 与「我的笔记」那条路同口径:看是不是不再是空态,不看"跟之前比变了没有"
+    # (重复设同一篇时前后一样,用变化当判据会把幂等重跑判成失败)。
+    if not after or _norm(after) == _QUOTE_EMPTY_TEXT:
         return {
             "status": "error",
-            "reason": f"quote_not_applied: 确认后引用区仍是 {after[:40]!r}(设置前 {before[:40]!r})",
+            "reason": f"quote_not_applied: 确认后引用区仍是未设置态 {after[:40]!r}",
             "observed": after,
         }
     return {
@@ -908,16 +910,17 @@ def _set_quote_in_modal(
     human.wait(0.8, 1.5, context="等引用生效")
 
     quoted = read_quote_text(page)
-    # 空标题笔记没有可比对的文案,退而用**基线对比**:引用区必须非空且与设置前不同。
-    # 比"没报错就算成功"强,也是空标题下唯一站得住的判据(与「他人笔记」那条路同口径)。
-    applied = (title in quoted) if title else (bool(quoted) and quoted != before)
+    # 判据与提交后回读同口径:**看引用区是不是不再是空态**,而不是"含不含标题"。
+    # 真号实测(2026-08-03):确认引用之后,引用区显示的是「引用 @<作者昵称> 的笔记」
+    # —— **编辑器内也不含标题**。拿标题去比对必然假阴性:引用其实设上了却报没设上。
+    #
+    # 那"引对了没有"谁保证?**选卡阶段**:按 note_id 在候选响应里定位 → 取其平台标题 →
+    # 在全部卡片里唯一命中那一张才点。身份在那时就已经钉死,这一步只需确认"设上了"。
+    applied = bool(quoted) and _norm(quoted) != _QUOTE_EMPTY_TEXT
     if not applied:
         return {
             "status": "error",
-            "reason": (f"quote_not_applied: 确认后引用区是 {quoted[:40]!r},没出现「{title}」"
-                       if title else
-                       f"quote_not_applied: 确认后引用区是 {quoted[:40]!r},"
-                       f"与设置前 {before[:40]!r} 没有变化"),
+            "reason": f"quote_not_applied: 确认后引用区仍是未设置态 {quoted[:40]!r}",
             "observed": quoted,
         }
     return {
