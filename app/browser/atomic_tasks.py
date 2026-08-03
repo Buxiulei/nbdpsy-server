@@ -1332,6 +1332,10 @@ class XHSPublishAtomicTasks:
 
         try:
             options_set = []
+            # 逐话题记账:调用方要拿它回显给运营(参数被静默丢弃时当场可见,不用等
+            # 笔记发出去人工读正文才发现 —— 2026-08-03 运营为此白删了一篇笔记)
+            topics_applied: List[str] = []
+            topics_failed: List[Dict[str, str]] = []
 
             if tags and len(tags) > 0:
                 # 去重 + 截断 ≤10(纯函数)
@@ -1345,28 +1349,57 @@ class XHSPublishAtomicTasks:
                 # (单击 1.3s),现在每个话题全流程 ~5-7s,窗口内绰绰有余,故恢复下拉精选流。
                 logger.info(f"6.1 下拉精选流添加话题: {tags}")
                 try:
-                    box = self.page.evaluate(r"""(sels) => {
-                        for (const sel of sels) {
-                            const el = document.querySelector(sel);
-                            if (!el) continue;
-                            const r = el.getBoundingClientRect();
-                            if (r.width > 0 && r.height > 0) {
-                                return {x: r.x, y: r.y, w: r.width, h: r.height};
-                            }
-                        }
-                        return null;
-                    }""", [
+                    # **先滚进视口再点,点完必须验焦点**(2026-08-03 文字版事故):
+                    # 文字版是超长竖图,上传后图片预览把页面撑得极高,正文框被顶出视口。
+                    # 旧实现拿 getBoundingClientRect 的中心直接点 —— 视口外元素的 rect
+                    # 中心落在页面顶栏(实测 y=72,对照正常轮播 y=788),点击根本没进正文框,
+                    # 光标不在,#话题 打进虚空,下拉永远不弹,6 个话题全报 no_floating_layer,
+                    # 而日志看起来只是"没匹配上"。标签是核心分发渠道,静默全丢等于白发。
+                    content_el = None
+                    for sel in (
                         "div[contenteditable='true'][data-placeholder*='正文']",
                         "div[contenteditable='true'][placeholder*='正文']",
                         "textarea[placeholder*='正文']",
                         "div[contenteditable='true']",
-                    ])
-                    if not box:
+                    ):
+                        content_el = self.page.query_selector(sel)
+                        if content_el is not None:
+                            break
+                    if content_el is None:
                         logger.warning("未找到正文框,跳过话题(不阻断发布)")
+                        topics_failed = [
+                            {"tag": str(t), "reason": "content_box_not_found"} for t in tags
+                        ]
                     else:
-                        cx = box["x"] + box["w"] * 0.5
-                        cy = box["y"] + box["h"] * 0.5
-                        self.human.click((cx, cy), reason="聚焦正文框(添加话题)")
+                        focused = False
+                        for focus_try in (1, 2):
+                            self.human.scroll_to_element(content_el)
+                            box = content_el.bounding_box() or {}
+                            if not box:
+                                break
+                            cx = box["x"] + box["width"] * 0.5
+                            cy = box["y"] + box["height"] * 0.5
+                            self.human.click((cx, cy), reason="聚焦正文框(添加话题)")
+                            # 只读验焦点:activeElement 必须落在 contenteditable 里。
+                            # 不验就打字 = 把话题打进虚空还以为是"下拉没匹配"。
+                            focused = bool(self.page.evaluate(
+                                "() => { const ae = document.activeElement;"
+                                " if (!ae) return false;"
+                                " if (ae.getAttribute && ae.getAttribute('contenteditable') === 'true') return true;"
+                                " return !!(ae.closest && ae.closest(\"[contenteditable='true']\")); }"
+                            ))
+                            if focused:
+                                break
+                            logger.warning(
+                                f"聚焦正文框后焦点不在编辑区(第 {focus_try} 次),重滚动重点"
+                            )
+                        if not focused:
+                            logger.warning("正文框聚焦失败,跳过话题(不阻断发布,但如实记账)")
+                            topics_failed = [
+                                {"tag": str(t), "reason": "content_box_focus_failed"}
+                                for t in tags
+                            ]
+                            raise RuntimeError("content_box_focus_failed")
                         self.human.press_key("Control+End", reason="光标移到正文末尾")
                         self.human.press_key("Enter", reason="话题另起一行")
                         added = 0
@@ -1437,10 +1470,12 @@ class XHSPublishAtomicTasks:
                                 self.human.click((ox, oy), reason=f"点击话题选项: {matched[:20]}")
                                 logger.info(f"   ✓ 话题下拉点击成功: '{matched}'")
                                 added += 1
+                                topics_applied.append(tag_name)
                             else:
                                 # 无精确匹配:回删刚输入的 #tag,绝不留残缺文本
                                 reason = option_pos.get("reason", "unknown") if option_pos else "error"
                                 logger.info(f"   下拉无精确匹配({reason}),回删该话题不插入")
+                                topics_failed.append({"tag": tag_name, "reason": reason})
                                 try:
                                     self.page.keyboard.press("Escape")
                                     for _ in range(len(tag_text)):
@@ -1452,6 +1487,12 @@ class XHSPublishAtomicTasks:
                         options_set.append("tags")
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"下拉精选流添加话题失败({e}),跳过话题不阻断发布")
+                    # 聚焦失败的话题在抛错前已记账;别的异常把还没处理的话题补记上
+                    done = {t for t in topics_applied} | {f["tag"] for f in topics_failed}
+                    for t in tags:
+                        name = str(t).lstrip("#").strip()
+                        if name not in done:
+                            topics_failed.append({"tag": name, "reason": f"exception: {e}"[:80]})
 
             if location:
                 logger.info(f"6.2 设置地点: {location}")
@@ -1459,7 +1500,12 @@ class XHSPublishAtomicTasks:
                 options_set.append("location")
 
             self._take_screenshot("11_options_set")
-            return {"success": True, "options_set": options_set}
+            return {
+                "success": True,
+                "options_set": options_set,
+                "topics_applied": topics_applied,
+                "topics_failed": topics_failed,
+            }
 
         except Exception as e:
             logger.error(f"设置发布选项失败: {e}")

@@ -47,6 +47,9 @@ class PublishJob(Base):
     collection_id: Mapped[str | None] = mapped_column(default=None)
     quoted_note_id: Mapped[str | None] = mapped_column(default=None)
     activity_id: Mapped[str | None] = mapped_column(default=None)
+    # 发布结果回显(JSON):服务端实际应用的话题逐个成败 + 三组件逐项结果。
+    # 参数被静默丢弃时调用方当场可见,不必等笔记发出去人工读正文(2026-08-03 运营教训)。
+    result_json: Mapped[str | None] = mapped_column(Text, default=None)
     # 这篇笔记推介哪位咨询师(姓名)。建 job 时据它推导 quoted_note_id
     # (见 app/services/counselor_quote.py),推不出来就留空绝不猜;发布当场随
     # generated_at / operator_id 一起带进 published_notes 台账,便于事后按咨询师归集。

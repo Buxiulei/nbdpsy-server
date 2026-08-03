@@ -734,3 +734,38 @@ def test_auto_archive_failure_does_not_break_publish(wdb, monkeypatch):
 
     aw.run_publish_job(db_path, account_id, job_id)  # 不应抛
     assert _get_job(engine, job_id).status == "published"  # 发布仍成功
+
+
+def test_publish_success_persists_applied_echo(wdb, monkeypatch):
+    """发布成功后 result_json 落库 = 服务端实际应用的话题/组件回显。
+
+    没有它,参数被静默丢弃(2026-08-03 文字版话题全丢)只能等笔记发出去人工读正文
+    才察觉 —— 运营为此白删了一篇。落了库,REST 轮询里 topics_applied: [] 当场可见。
+    """
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(engine, account_id)
+    calls = []
+    _patch_dewatermark(monkeypatch)
+    _patch_publish_once(
+        monkeypatch,
+        PublishResult(
+            success=True, note_id="nid", note_url="https://xhs/1",
+            applied={"topics_requested": ["恋爱脑"], "topics_applied": [],
+                     "topics_failed": [{"tag": "恋爱脑", "reason": "content_box_focus_failed"}],
+                     "components": {}},
+        ),
+        calls,
+    )
+
+    aw.run_publish_job(db_path, account_id, job_id)
+
+    import json as _json
+    import sqlite3 as _sq
+    with _sq.connect(db_path) as conn:
+        raw = conn.execute(
+            "SELECT result_json FROM publish_jobs WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+    echo = _json.loads(raw)
+    assert echo["topics_applied"] == []
+    assert echo["topics_failed"][0]["reason"] == "content_box_focus_failed"

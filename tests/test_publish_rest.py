@@ -673,3 +673,26 @@ def test_terminal_job_has_no_pending_explain(monkeypatch):
     v = pr._job_view(job)
 
     assert "pending_reason" not in v and "pending_overdue" not in v
+
+
+def test_job_view_echoes_applied(monkeypatch):
+    """result_json 有值 → 视图带 applied;NULL(功能上线前的旧任务)不带该键。"""
+    import json as _json
+    from datetime import datetime
+    from app.models.publish_job import PublishJob
+    from app.http import publish_rest as pr
+
+    echo = {"topics_requested": ["恋爱脑"], "topics_applied": [],
+            "topics_failed": [{"tag": "恋爱脑", "reason": "content_box_focus_failed"}],
+            "components": {}}
+    job = PublishJob(id=9, account_id=2, title="文字版", status="published",
+                     created_at=datetime.utcnow(),
+                     result_json=_json.dumps(echo, ensure_ascii=False))
+    v = pr._job_view(job)
+    assert v["applied"]["topics_applied"] == []
+    assert v["applied"]["topics_failed"][0]["reason"] == "content_box_focus_failed"
+
+    old = PublishJob(id=10, account_id=2, title="旧任务", status="published",
+                     created_at=datetime.utcnow(), result_json=None)
+    v2 = pr._job_view(old)
+    assert "applied" not in v2  # 没记录 ≠ 什么都没应用,不下发免得误读

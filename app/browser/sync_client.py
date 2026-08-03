@@ -121,6 +121,9 @@ class PublishResult:
     error: Optional[str] = None
     need_manual_login: bool = False
     account_restricted: bool = False
+    # 服务端**实际应用**了什么(话题逐个成败 + 三组件逐项结果)。回显给调用方:
+    # "参数被静默丢弃"这类问题没有回显就只能事后人工抽查(2026-08-03 运营为此白删一篇)。
+    applied: Optional[Dict[str, Any]] = None
 
 
 # sameSite 兜底映射(上游 cookie_service 已 normalize,这里防御性再收口一次)
@@ -656,7 +659,9 @@ class SyncClient:
             if not r.get("success"):
                 return {"success": False, "error": r.get("error")}
 
-            # step6 话题(失败仅告警,不阻断发布)
+            # step6 话题(失败仅告警,不阻断发布;逐话题成败要带回给调用方回显——
+            # 参数被静默丢弃时运营当场可见,不用等笔记发出去人工读正文才发现)
+            r6 = {}
             if topics:
                 r6 = atomic.step6_set_publish_options(tags=topics)
                 if not r6.get("success"):
@@ -683,6 +688,8 @@ class SyncClient:
                 "note_url": r.get("note_url", "") or "",
                 "note_id": r.get("note_id", "") or "",
                 "components": component_result,
+                "topics_applied": r6.get("topics_applied", []),
+                "topics_failed": r6.get("topics_failed", []),
             }
 
         except Exception as e:
@@ -780,6 +787,12 @@ def publish_once(
             error=result.get("error"),
             need_manual_login=bool(result.get("need_manual_login", False)),
             account_restricted=bool(result.get("account_restricted", False)),
+            applied={
+                "topics_requested": list(topics or []),
+                "topics_applied": result.get("topics_applied", []),
+                "topics_failed": result.get("topics_failed", []),
+                "components": result.get("components") or {},
+            } if result.get("success") else None,
         )
     except Exception as e:
         logger.error(f"[publish_once] 异常 account_id={account_id}: {e}")

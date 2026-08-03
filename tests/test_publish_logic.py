@@ -268,3 +268,68 @@ def test_normalize_cookies_solitary_hostonly_still_dotted():
     )
     assert out[0]["domain"] == ".xiaohongshu.com"
     assert any("url" in c for c in out)  # 加点后照常触发 creator fallback
+
+
+# ---------------- 发布结果回显(2026-08-03 文字版丢话题事故) ----------------
+#
+# 事故:文字版超长竖图把正文框顶出视口,聚焦点击落在页面顶栏(实测 y=72,对照正常
+# 轮播 y=788),#话题 打进虚空,6 个话题全报 no_floating_layer 静默丢光;运营删重发
+# 验证后才确认,白损失一篇笔记的数据。两层修:①step6 先滚进视口+点击后验焦点;
+# ②发布结果回显"实际应用了什么",丢弃当场可见。
+
+
+def test_publish_result_carries_applied_echo(monkeypatch):
+    """成功发布的 PublishResult.applied 带话题逐个成败 + 组件结果。"""
+    from app.browser import sync_client as sc
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            return {"success": True}
+
+        def publish_note(self, *a, **k):
+            return {
+                "success": True, "note_id": "n1", "note_url": "u1",
+                "components": {"activity": {"status": "done"}},
+                "topics_applied": ["恋爱脑", "亲密关系"],
+                "topics_failed": [{"tag": "融合渴望", "reason": "no_exact_match"}],
+            }
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(sc, "SyncClient", _FakeClient)
+
+    r = sc.publish_once(1, [], "标题", "正文", [], ["恋爱脑", "亲密关系", "融合渴望"])
+
+    assert r.success is True
+    assert r.applied["topics_requested"] == ["恋爱脑", "亲密关系", "融合渴望"]
+    assert r.applied["topics_applied"] == ["恋爱脑", "亲密关系"]
+    assert r.applied["topics_failed"][0]["tag"] == "融合渴望"
+    assert r.applied["components"]["activity"]["status"] == "done"
+
+
+def test_publish_failure_has_no_applied(monkeypatch):
+    """失败的发布不带 applied(没发出去,谈不上"实际应用了什么")。"""
+    from app.browser import sync_client as sc
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            return {"success": True}
+
+        def publish_note(self, *a, **k):
+            return {"success": False, "error": "boom"}
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(sc, "SyncClient", _FakeClient)
+
+    r = sc.publish_once(1, [], "标题", "正文", [], ["恋爱脑"])
+
+    assert r.success is False and r.applied is None

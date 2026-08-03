@@ -180,6 +180,7 @@ def _apply_publish_decision(
     decision: dict,
     note_id: str = "",
     note_url: str = "",
+    result_json: str | None = None,
 ) -> None:
     """把 decide_finish 裁决落库(C1 守卫:仅 status='publishing' 可落,防越权覆盖)。"""
     now = datetime.utcnow()
@@ -188,9 +189,9 @@ def _apply_publish_decision(
             # 成功:回填 note、清 error;started_at 保留(冷却门的历史依据)
             conn.execute(
                 "UPDATE publish_jobs SET status = 'published', note_id = ?,"
-                " note_url = ?, error = NULL"
+                " note_url = ?, error = NULL, result_json = ?"
                 " WHERE id = ? AND status = 'publishing'",
-                (note_id, note_url, job_id),
+                (note_id, note_url, result_json, job_id),
             )
             conn.commit()  # 终态先落定,再事后归档(归档失败不回滚发布)
             # 内容资产库:发布成功自动归档(幂等 + 绝不抛错阻断)。
@@ -313,12 +314,16 @@ def run_publish_job(db_path: str, account_id: int, job_id: int) -> None:
             job["retries"],
             settings.retry_delays,
         )
+        applied = getattr(result, "applied", None)
         _apply_publish_decision(
             db_path,
             job_id,
             decision,
             note_id=getattr(result, "note_id", "") or "",
             note_url=getattr(result, "note_url", "") or "",
+            # 回显"服务端实际应用了什么":话题逐个成败 + 三组件逐项结果。
+            # 序列化失败不能拖垮发布落库 —— 回显是排查辅助,不是正确性依据。
+            result_json=(json.dumps(applied, ensure_ascii=False) if applied else None),
         )
         logger.info("{} publish job {} 完成,终态 {}", prefix, job_id, decision["status"])
     except Exception as exc:

@@ -97,7 +97,25 @@ def _job_view(job: PublishJob) -> dict:
             else None
         ),
         **_pending_explain(job),
+        **_applied_echo(job),
     }
+
+
+def _applied_echo(job: PublishJob) -> dict:
+    """发布结果回显:服务端**实际应用**的话题逐个成败与三组件逐项结果。
+
+    为什么必须有(2026-08-03 运营上报):参数被静默丢弃(文字版话题全丢)时,调用方
+    只能等笔记发出去、人工读正文才察觉 —— 运营为验证这点白删了一篇笔记。有了回显,
+    `topics_applied: []` 一眼可见。NULL(本功能上线前发布的)不下发该键,别把"没记录"
+    渲染成"什么都没应用"。
+    """
+    raw = getattr(job, "result_json", None)
+    if not raw:
+        return {}
+    try:
+        return {"applied": json.loads(raw)}
+    except (TypeError, ValueError):
+        return {"applied_unreadable": True}
 
 
 # pending 长期不动的两种情形,**表象一模一样**,后果却完全相反:

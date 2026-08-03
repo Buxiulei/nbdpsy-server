@@ -120,6 +120,10 @@ _SUBMIT_TIMEOUT_S = 25.0
 # (换活动会取消旧的,但旧活动注入正文的话题不回收,反复切换话题会单调累积并真发出去)。
 _ACTIVITY_CLICK_ATTEMPTS = 3
 
+# 活动卡懒渲染:找不到时最多下滚几轮再判定(文字版超长图会把活动区顶得极深,
+# 首屏 DOM 里没有活动卡;滚到即止,不白滚)
+_ACTIVITY_REVEAL_SCROLLS = 6
+
 # 发布按钮像素定位:小红书红筛(与 atomic_tasks step7 同款阈值)
 _RED_MIN_PIXELS = 50
 
@@ -993,9 +997,20 @@ def _set_activity(
 
     action_text = read_activity_action_text(page, name)
     if action_text is None:
+        # **滚动触发懒渲染再找**(2026-08-03 文字版事故):文字版是超长竖图,把「关联活动」
+        # 区顶到页面很深处,首屏 DOM 里压根没渲染活动卡 —— 直接报 not_found 是误判。
+        # 拟人分段下滚,每滚一轮重查;找到即止,滚到底仍没有才是真没有。
+        for _ in range(_ACTIVITY_REVEAL_SCROLLS):
+            human.scroll("down")
+            human.wait(0.4, 0.9, context="等活动区渲染")
+            action_text = read_activity_action_text(page, name)
+            if action_text is not None:
+                break
+    if action_text is None:
         return {
             "status": "error",
-            "reason": f"activity_card_not_found: 页面上没有名为「{name}」的活动卡",
+            "reason": f"activity_card_not_found: 页面上没有名为「{name}」的活动卡"
+                      f"(已下滚 {_ACTIVITY_REVEAL_SCROLLS} 轮触发懒渲染仍未出现)",
         }
     if action_text == _ACTIVITY_LINKED_TEXT:
         # 本来就关联着 —— 绝不点「取消关联」
