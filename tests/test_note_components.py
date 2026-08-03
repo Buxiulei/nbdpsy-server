@@ -1117,3 +1117,51 @@ def test_untitled_verifies_by_baseline_change(monkeypatch, wired):
 
     assert "quote_not_applied" in result["failed"][0]["reason"]
     assert "没有变化" in result["failed"][0]["reason"]
+
+
+def test_verify_after_submit_accepts_platform_rendering(monkeypatch, wired):
+    """提交后回读的文案是「引用 @作者 的笔记」——**不含标题**,不能拿标题去比对。
+
+    2026-08-03 真号实测的假阴性:编辑器里引用区显示被引用笔记的**标题**,提交后重进
+    页面却显示「引用 @NBDpsy-好好生活 的笔记」。原判据 `title in quoted` 于是必然失败,
+    功能明明成了(in-editor done、submitted=true、权限未动)却报「回读未生效」。
+
+    改成基线对比后,这种平台渲染必须被认成生效。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-quote", "徐瑞恒")))
+    _wire(monkeypatch, editor, wired)
+    # 模拟平台行为:提交后引用区变成不含标题的「引用 @作者 的笔记」
+    real_submit = editor.submit
+
+    def submit_then_render():
+        real_submit()
+        editor.quote_text = "引用 @NBDpsy-好好生活 的笔记"
+
+    editor.submit = submit_then_render
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done", f"平台渲染形态被误判成失败: {result.get('failed')}"
+    assert result["applied"]["quote"] is True
+
+
+def test_verify_after_submit_still_catches_real_failure(monkeypatch, wired):
+    """真没生效时仍要判失败 —— 放宽判据不能把"静默丢弃"也放过去。
+
+    这条产品线的失败是静默的(私密笔记的合集绑定就会被服务端丢掉),所以"回读没变化"
+    必须继续判失败,否则整套回读复核就形同虚设。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-quote", "徐瑞恒")))
+    _wire(monkeypatch, editor, wired)
+    real_submit = editor.submit
+
+    def submit_then_revert():
+        real_submit()
+        editor.quote_text = "引用笔记"      # 服务端静默丢弃:回到未设置态
+
+    editor.submit = submit_then_revert
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] != "done"
+    assert result["applied"]["quote"] is False

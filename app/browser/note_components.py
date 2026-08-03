@@ -916,7 +916,14 @@ def _set_quote_in_modal(
                        f"与设置前 {before[:40]!r} 没有变化"),
             "observed": quoted,
         }
-    return {"status": "done", "quoted_note_id": str(quoted_note_id), "title": title}
+    return {
+        "status": "done",
+        "quoted_note_id": str(quoted_note_id),
+        "title": title,
+        # 提交后回读要用它做基线:回读文案是「引用 @作者 的笔记」**不含标题**,
+        # 只能比"变了没有"(见 _verify_after_submit)
+        "quote_text_before": before,
+    }
 
 
 def _wait_quote_cards(page) -> List[Any]:
@@ -1350,21 +1357,20 @@ def _verify_after_submit(
         outcome = outcomes.get("quote") or {}
         title = outcome.get("title") or ""
         quoted = read_quote_text(page)
-        if title:
-            verified["quote"] = title in quoted
-        else:
-            # 跨账号引用(走「他人笔记」)拿不到标题:目标典型就是主号那篇**空标题**的
-            # 小助手联系方式笔记,拿标题去比对必然失败。退而用"引用区跟设置前不一样了"
-            # 作判据 —— 比"没报错就算成功"强,也是空标题下唯一站得住的口径。
-            # 候选卡文案不能拿来当 title:卡上是「笔记封面 作者 ♡5」这类 UI 文字,
-            # 与引用区的显示文案根本不是一回事,用它比对必然假阴性。
-            before = outcome.get("quote_text_before") or ""
-            verified["quote"] = bool(quoted) and quoted != before
+        # **提交后的回读一律用"变了没有",绝不用"包含标题"**(2026-08-03 真号实测):
+        # 编辑器里引用区显示的是被引用笔记的**标题**,而提交后重进页面显示的是
+        # 「引用 @<作者昵称> 的笔记」—— **根本不含标题**。拿标题去比对必然假阴性:
+        # 引用其实设成了,却报「回读未生效」。真号那次就是这么被误判成失败的
+        # (in-editor 已 done、submitted=true、权限也没动,唯独这一步判错)。
+        #
+        # 基线是设置**之前**的引用区文案(无引用时是「引用笔记」这类占位),由设置阶段
+        # 带出来(quote_text_before)。判据:非空且与基线不同。
+        before = outcome.get("quote_text_before") or ""
+        verified["quote"] = bool(quoted) and quoted != before
         if not verified["quote"]:
             logger.error(
-                f"[note_components] 引用回读未生效:期望"
-                f"{('包含「%s」' % title) if title else '引用区非空且已变化'},"
-                f"实读 {quoted[:40]!r}"
+                f"[note_components] 引用回读未生效:引用区应非空且与设置前不同,"
+                f"实读 {quoted[:40]!r}(设置前 {before[:40]!r})"
             )
     if activity_id:
         name = (outcomes.get("activity") or {}).get("name") or ""
