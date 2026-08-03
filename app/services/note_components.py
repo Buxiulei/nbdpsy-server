@@ -22,6 +22,7 @@
 """
 
 import asyncio
+from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select
@@ -41,6 +42,11 @@ from app.services.cookie_check import load_account_cookies
 
 # 三个组件字段名(REST 请求体 / payload / publish_jobs 列名三处同名,别再各起一套)
 COMPONENT_FIELDS = ("collection_id", "quoted_note_id", "activity_id")
+# 已发布笔记编辑字段名(设计 docs/design/2026-08-03-note-editing-design.md 3.1);
+# payload 里有任一非空值即"这次请求要改内容,不只是挂组件"。
+EDIT_FIELDS = (
+    "title", "content", "add_images", "remove_image_indexes", "expected_image_count",
+)
 
 
 def start_components(
@@ -50,12 +56,16 @@ def start_components(
     quoted_note_id: str | None,
     activity_id: str | None,
     related_counselor: str | None = None,
+    edits: dict | None = None,
 ) -> str:
-    """REST 触发一次三组件设置;登记 browser_jobs 台账,返回轮询 id。
+    """REST 触发一次三组件设置 / 笔记编辑;登记 browser_jobs 台账,返回轮询 id。
 
     ``quoted_note_id`` 到这里已经是**推导完的最终值**(REST 层按 counselor_quote 的规则
     定下来);``related_counselor`` 只随 payload 存个由来,执行链路不读它 —— 这是次
     非幂等的全量覆盖提交,事后查"当时为什么引了这篇"必须有据可查。
+
+    ``edits`` 是 ``NoteComponentsRequest.note_edits()`` 的产物(``add_images`` 已在 REST
+    层落成本地路径),没有编辑意图时为 ``None`` —— 此时 payload 与老版本逐字节一致。
     """
     payload = {
         "note_id": note_id,
@@ -64,6 +74,8 @@ def start_components(
         "activity_id": activity_id,
         "related_counselor": related_counselor,
     }
+    if edits:
+        payload.update(edits)
     job_id = browser_jobs_repo.enqueue_from_request(
         "note_components", payload, account_id=account_id
     )
@@ -87,6 +99,15 @@ async def execute(account_id: int, payload: dict) -> dict:
         field: (str(payload.get(field)).strip() if payload.get(field) else None)
         for field in COMPONENT_FIELDS
     }
+    if any(payload.get(field) is not None for field in EDIT_FIELDS):
+        # T6 接线点(设计 T6:set_note_components 步骤序列扩展)。在浏览器层接上之前,
+        # 带编辑字段的任务**一律 fail-closed**:否则这里会把 title/content/图片增删
+        # 静默丢掉,照样点一次全量覆盖提交,然后报 done —— 静默丢改动比失败坏得多。
+        return {
+            "error": "note_editing_not_wired: 标题/正文/图片编辑的浏览器层尚未接线,"
+                     "本次请求一步都没做(笔记原样未动)",
+            "aborted_before_submit": True,
+        }
     if not any(components.values()):
         return {
             "error": "no_component_requested: collection_id / quoted_note_id / "
@@ -131,6 +152,86 @@ def _apply_sync(
         return set_note_components(client.page, account_id, note_id, **components)
     finally:
         client.stop()
+
+
+# ---------------- 台账回写(标题 / 正文,设计 3.3) ----------------
+
+
+async def write_back_ledger(
+    session, account_id: int, note_id: str, applied: dict, read_back: dict
+) -> bool:
+    """标题/正文改成功后,把**回读到的平台真值**写回 published_notes;返回 ledger_synced。
+
+    Args:
+        session: 调用方给的 AsyncSession(本函数负责 commit)。
+        account_id / note_id: 定位台账行(唯一键就是这两个)。
+        applied: 浏览器层逐项回读结论,只认 ``applied["title"] is True`` /
+            ``applied["content"] is True`` —— **三态里只有 True 算数**,False/None 一律
+            不回写(台账写错比没写更坏:后续所有引用都会拿到假值)。
+        read_back: 提交后回读的真值 ``{"title": ..., "content": ...}``。
+
+    Returns:
+        ``True`` = 该写的都写成了(**没什么可写时也是 True**:不存在"该写而没写成"的项);
+        ``False`` = 有该写的却没写成(台账行不存在 / 回读值缺失 / 落库异常)。回写失败
+        **不改变 job 结果**——平台侧改动已经生效并回读确认过,台账最终一致由 note 同步
+        链路兜底,为一次留痕把任务判成 error 是误报(与 note_visibility._record_change 同款取舍)。
+
+    图片增删不回写:台账不存图列表,没有可写的字段。
+    """
+    applied = applied or {}
+    read_back = read_back or {}
+    want_title = applied.get("title") is True
+    want_content = applied.get("content") is True
+    if not (want_title or want_content):
+        return True
+
+    # 回读值缺失说明浏览器层没把真值带回来,此时宁可不写:回写的意义就在于"用平台真值
+    # 覆盖我们自己的旧认知",拿请求值凑数等于把台账写成我们**以为**的样子。
+    if want_title and read_back.get("title") is None:
+        logger.warning(
+            f"[note_components] 台账回写跳过 note_id={note_id}:applied.title=True 但"
+            f"回读值缺失,不拿请求值凑数"
+        )
+        return False
+    if want_content and read_back.get("content") is None:
+        logger.warning(
+            f"[note_components] 台账回写跳过 note_id={note_id}:applied.content=True 但"
+            f"回读值缺失,不拿请求值凑数"
+        )
+        return False
+
+    try:
+        row = await session.scalar(
+            select(PublishedNote).where(
+                PublishedNote.account_id == account_id,
+                PublishedNote.note_id == note_id,
+            )
+        )
+        if row is None:
+            # 建台账行是 note_ledger 的职责,这里凭空造一行会绕过它那套
+            # pending/linked/orphan 判定(与 note_visibility 留痕同款纪律)。
+            logger.warning(
+                f"[note_components] 台账无 note_id={note_id} 的行,标题/正文回写跳过;"
+                f"下次台账同步会补上"
+            )
+            return False
+        if want_title:
+            row.title = read_back["title"]
+        if want_content:
+            row.content_text = read_back["content"]
+            row.content_fetched_at = datetime.utcnow()
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 — 回写失败不吞:只记日志 + 返回 False
+        logger.warning(
+            f"[note_components] 台账回写失败 note_id={note_id}"
+            f"(平台侧改动已生效,不影响任务终态): {exc}"
+        )
+        return False
+    logger.info(
+        f"[note_components] 台账回写完成 account_id={account_id} note_id={note_id} "
+        f"title={'是' if want_title else '否'} content={'是' if want_content else '否'}"
+    )
+    return True
 
 
 # ---------------- 目录只读查询(合集 / 活动列表) ----------------
