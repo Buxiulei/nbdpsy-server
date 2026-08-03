@@ -25,6 +25,15 @@ from tests.page_replay import ReplayPage, load_scene
 _SCENE = "quote_modal"
 
 
+@pytest.fixture(autouse=True)
+def _fast_settle(monkeypatch):
+    """把"分页到齐"的静默窗压到刚够跑一跳:逻辑不变,只缩时间。
+
+    回放里响应是一次性喂完的,真等 1.5 秒纯属浪费(20 篇候选各等一次 = 30 秒)。
+    """
+    monkeypatch.setattr(nc, "_PAGE_SETTLE_S", 0.01)
+
+
 @pytest.fixture
 def scene():
     return load_scene(_SCENE)
@@ -79,6 +88,94 @@ def test_edited_note_is_excluded_from_candidates(scene):
     assert len(cards) == len(notes) - 1, "候选卡应恰好比接口少一条(少的就是被编辑的那篇)"
 
 
+class _ReplayHuman:
+    """假拟人层:点击触发用例注入的状态迁移(见 ReplayPage.set_text 的分工说明)。"""
+
+    def __init__(self, page):
+        self.page = page
+        self.clicked = []
+
+    def wait(self, *_a, **_kw):
+        pass
+
+    def click(self, target, *, reason="", **_kw):
+        text = target.inner_text() if hasattr(target, "inner_text") else str(target)
+        self.clicked.append(text)
+        # 点「确认引用」→ 引用区变成"引用了 <被选中那张卡的文案>"(真页面的可观察行为)
+        if text == nc._QUOTE_CONFIRM_TEXT and len(self.clicked) >= 2:
+            self.page.set_text(nc._QUOTE_CONTAINER, f"引用了 {self.clicked[-2]}")
+
+    def type_text(self, target, text, **_kw):
+        self.clicked.append(text)
+
+
+def _drive_real_code(scene, quoted_note_id):
+    """用真夹具驱动**生产函数** ``_set_quote_in_modal``,返回它的结果。"""
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+    return _ReplayHuman(page), nc._set_quote_in_modal(
+        page, _ReplayHuman(page) if False else _ReplayHuman(page),
+        responses, quoted_note_id, 0,
+    )
+
+
+def test_real_code_quotes_every_candidate_on_real_layout(scene):
+    """**调用生产函数本身**跑遍真实布局里每一篇可引用笔记,全部必须成功。
+
+    与下面那条"复刻逻辑"的用例不同:这条走的是 ``_set_quote_in_modal`` 真身,
+    生产代码一旦改动跑偏,这里会红 —— 复刻逻辑的测试是测不出偏离的。
+    """
+    edited = scene["source_note_id"]
+    checked = 0
+    for note in _api_notes(scene):
+        note_id = str((note or {}).get("id"))
+        if note_id == edited:
+            continue
+        page = ReplayPage(scene)
+        human = _ReplayHuman(page)
+        responses = nc.ComponentResponses()
+        responses.attach(page)
+        page.emit_recorded(nc._POSTED_API_MARK)
+
+        out = nc._set_quote_in_modal(page, human, responses, note_id, 0)
+
+        assert out["status"] == "done", f"{note_id} 失败: {out.get('reason')}"
+        checked += 1
+    assert checked >= 10, f"只跑了 {checked} 篇,样本太小"
+
+
+def test_real_code_refuses_note_absent_from_candidates(scene):
+    """不在候选里的 id → 明确报 quoted_note_not_in_candidates(交给他人笔记那条路)。"""
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+
+    out = nc._set_quote_in_modal(page, _ReplayHuman(page), responses, "不存在的id", 0)
+
+    assert out["status"] == "error"
+    assert "quoted_note_not_in_candidates" in out["reason"]
+
+
+def test_real_code_refuses_the_note_being_edited(scene):
+    """引用"当前正在编辑的这篇"必然失败 —— 它被弹窗排除,候选里根本没有它。
+
+    钉住它是因为:这正是下标错位的来源,也是运营最容易踩的一种用法。
+    """
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+
+    out = nc._set_quote_in_modal(
+        page, _ReplayHuman(page), responses, scene["source_note_id"], 0
+    )
+
+    assert out["status"] == "error"
+
+
 def test_title_matching_picks_the_right_card_on_real_layout(scene):
     """现行修法(按标题在全部卡里找)在真实布局上确实选中正确那张。
 
@@ -128,3 +225,45 @@ def test_fixture_has_no_live_credentials(scene):
     for rec in scene["api"]:
         for note in ((rec.get("body") or {}).get("data") or {}).get("notes") or []:
             assert note.get("xsec_token") in (None, "SCRUBBED")
+
+
+def test_candidates_are_merged_across_pages(scene):
+    """候选列表**分页**,必须把各页合起来 —— 只看最后一页会漏掉第 0 页的全部笔记。
+
+    2026-08-03 回放实测:弹窗打开时连发 tab=1&page=0(11 条)与 page=1(10 条),
+    两页一起渲染成 20 张卡。原实现取 latest 只见 10 条,于是第 0 页那 11 篇一律被报成
+    「候选列表里没有」—— 生产日志里的 quoted_note_not_in_candidates 就是这么来的。
+    """
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    pages = page.emit_recorded(nc._POSTED_API_MARK)
+    assert pages >= 2, "这份夹具只有一页,证明不了合并;换个笔记多的账号重采"
+
+    merged = nc._wait_all_candidate_notes(page, responses, 0)
+
+    per_page = [
+        len(((r.get("body") or {}).get("data") or {}).get("notes") or [])
+        for r in scene["api"] if nc._POSTED_API_MARK in r["url"]
+    ]
+    assert len(merged) == sum(per_page), f"合并后应有 {sum(per_page)} 条,实得 {len(merged)}"
+    assert len(merged) > max(per_page), "合并后必须多于任何单页(否则等于没合并)"
+    # 顺序是选卡算法的依据,去重不能打乱它
+    first_page_first = ((scene["api"][0].get("body") or {}).get("data") or {})["notes"][0]
+    assert str(merged[0]["id"]) == str(first_page_first["id"]), "应保持首次出现的顺序"
+
+
+def test_first_page_note_is_quotable(scene):
+    """**第 0 页的笔记必须引用得了** —— 这是分页 bug 最直接的用户可见后果。"""
+    first_page = ((scene["api"][0].get("body") or {}).get("data") or {})["notes"]
+    target = next(
+        n for n in first_page if str(n.get("id")) != scene["source_note_id"]
+    )
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+
+    out = nc._set_quote_in_modal(page, _ReplayHuman(page), responses, str(target["id"]), 0)
+
+    assert out["status"] == "done", f"第 0 页的笔记引用失败: {out.get('reason')}"

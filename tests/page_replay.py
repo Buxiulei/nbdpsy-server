@@ -114,6 +114,17 @@ class ReplayPage:
             sent += 1
         return sent
 
+    def set_text(self, sel: str, text: str) -> None:
+        """改写某选择器下第一个元素的文案,用于**由用例注入状态迁移**。
+
+        分工是刻意的:**夹具只提供结构**(页面长什么样),**迁移由用例给**(点了之后
+        变成什么样)。把"点确认后引用区会变"写进夹具就等于把期望混进证据 —— 那样夹具
+        再也不能用来证伪代码了,而证伪正是它唯一的价值。
+        """
+        items = self._dom.get(sel)
+        if items:
+            items[0] = {**items[0], "text": text}
+
     def evaluate(self, js, arg=None):  # noqa: D401 — 明确不支持
         raise NotImplementedError(
             "回放夹具不支持 evaluate:JS 求值没法离线重放。"

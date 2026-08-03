@@ -105,6 +105,8 @@ _UPDATE_API_MARK = "capa/postgw/note/update"
 # 各步等待窗口(秒)。轮询步长固定,等的是接口响应/弹层渲染,不是拟人停顿。
 _POPOVER_TIMEOUT_S = 10.0
 _MODAL_TIMEOUT_S = 12.0
+# 候选列表分页到齐的判定:连续这么久没有新页就收工(见 _wait_all_candidate_notes)
+_PAGE_SETTLE_S = 1.5
 _CATALOG_TIMEOUT_S = 15.0
 _ACTIVITY_FLIP_TIMEOUT_S = 8.0
 _SUBMIT_TIMEOUT_S = 25.0
@@ -758,6 +760,45 @@ def _close_quote_modal(page, human: SyncHumanActions) -> None:
         logger.warning(f"[note_components] 关引用弹窗异常(不阻断发布): {exc}")
 
 
+def _wait_all_candidate_notes(page, responses: ComponentResponses, seen: int) -> List[dict]:
+    """收齐引用候选列表的**全部分页**并按接口顺序拼起来(去重后返回)。
+
+    **候选列表是分页的**(2026-08-03 回放夹具实测):弹窗打开时连发
+    ``posted?tab=1&page=0``(11 条)与 ``page=1``(10 条),两页一起渲染成 20 张卡。
+    而原实现用 ``_wait_body`` 取 ``latest`` —— **只看得见最后一页**,于是第 0 页的任何
+    一篇都会被报成「候选列表里没有」,尽管它就在弹窗里摆着。生产日志里那些
+    ``quoted_note_not_in_candidates`` 就是这么来的。
+
+    等法:先等到第一页,之后只要还有新页到达就继续等,连续 ``_PAGE_SETTLE_S`` 没有新页
+    才收工 —— 不能只等一页(会漏),也不能死等满超时(白白拖慢每一次引用)。
+
+    按 note_id 去重但**保持首次出现的顺序**:顺序是选卡算法的依据(见
+    ``_pick_untitled_card``),打乱它等于把刚修好的东西又弄坏。
+    """
+    deadline = time.monotonic() + _MODAL_TIMEOUT_S
+    last_count = seen
+    settled_at = None
+    while time.monotonic() < deadline:
+        count = responses.count(_POSTED_API_MARK)
+        if count > last_count:
+            last_count = count
+            settled_at = time.monotonic()
+        elif settled_at is not None and time.monotonic() - settled_at >= _PAGE_SETTLE_S:
+            break
+        page.wait_for_timeout(300)
+
+    merged: List[dict] = []
+    seen_ids: set = set()
+    for body in (responses.bodies.get(_POSTED_API_MARK) or [])[seen:]:
+        for note in ((body or {}).get("data") or {}).get("notes") or []:
+            note_id = str((note or {}).get("id") or "").strip()
+            if not note_id or note_id in seen_ids:
+                continue
+            seen_ids.add(note_id)
+            merged.append(note)
+    return merged
+
+
 def _pick_untitled_card(cards: List[Any], notes: List[dict], index: int):
     """空标题笔记的选卡:**按"扣除未渲染项之后的位置"**取,而不是裸下标。
 
@@ -807,9 +848,8 @@ def _set_quote_in_modal(
     seen: int,
 ) -> Dict[str, Any]:
     """引用弹窗内的本体流程(弹窗的开与关都由 ``_set_quote`` 负责)。"""
-    body = _wait_body(page, responses, _POSTED_API_MARK, _MODAL_TIMEOUT_S, seen)
-    notes = ((body or {}).get("data") or {}).get("notes")
-    if not isinstance(notes, list) or not notes:
+    notes = _wait_all_candidate_notes(page, responses, seen)
+    if not notes:
         return {
             "status": "error",
             "reason": "quote_candidates_unavailable: 没收到候选笔记列表响应,"
