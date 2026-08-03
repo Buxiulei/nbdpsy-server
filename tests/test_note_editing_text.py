@@ -580,3 +580,21 @@ def test_content_result_keys_are_stable(status_case):
         if status_case == "done"
         else {"status", "reason", "body_before", "topics_dropped", "body_read_back"}
     )
+
+
+@pytest.mark.unit
+def test_clear_title_with_unreadable_readback_is_error_not_done():
+    """title="" 清空 + 读回 None → **error 而非 done**(fable 验收必修项)。
+
+    读回 None 意味着"根本没读到",不是"读到了空"。若放进全等比较,
+    _norm(None)=="" 与 _norm("") 相等,"定位失败"会被谎报成"清空成功"——
+    而清空标题恰是合法意图(设计 3.1),这条路径真实存在,必须堵死。
+    """
+    page = FakePage(boxes=[_box()], titles=["旧标题", None])
+    human = FakeHuman()
+
+    result = ne.apply_title_edit(page, human, "")
+
+    assert result["status"] == "error"
+    assert result["reason"].startswith("title_readback_unavailable")
+    assert result["title_read_back"] is None

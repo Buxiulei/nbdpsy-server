@@ -373,6 +373,17 @@ def apply_title_edit(page, human, new_title: str) -> dict:
 
     human.wait(0.3, 0.8, context="等标题渲染稳定")
     read_back = read_title_value(page)
+    # **读回 None(定位失败/evaluate 异常)一律 error,不进全等比较**(fable 验收必修项):
+    # 否则 title="" 清空路径下 _norm(None)=="" 与 _norm("") 相等,"根本没读到"会被误判成
+    # "清空成功" —— 违反本模块"宁可漏报不可谎报"。content 因 min_length=1 天然免疫,
+    # 只有清空标题这一条路径踩得到,恰恰它又是合法意图,必须堵死。
+    if read_back is None:
+        return {
+            "status": "error",
+            "reason": "title_readback_unavailable: 输入后读不回标题值,无法确认是否生效",
+            "title_before": title_before,
+            "title_read_back": None,
+        }
     # 全等(空白归一后)才算成:标题没有"末尾会被追加东西"的情形,不存在正文那种前缀语义
     if _norm(read_back) != _norm(new_title):
         return {
