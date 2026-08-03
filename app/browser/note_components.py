@@ -758,6 +758,47 @@ def _close_quote_modal(page, human: SyncHumanActions) -> None:
         logger.warning(f"[note_components] 关引用弹窗异常(不阻断发布): {exc}")
 
 
+def _pick_untitled_card(cards: List[Any], notes: List[dict], index: int):
+    """空标题笔记的选卡:**按"扣除未渲染项之后的位置"**取,而不是裸下标。
+
+    为什么非要支持它:主号那篇「小助手联系方式」二维码笔记就是空标题的,而业务规则要求
+    每篇咨询师推介笔记都引用它 —— 单主号自己就有 20 篇推介笔记落在这条路上。空标题没法
+    按文案认卡,又不能不做。
+
+    为什么"扣除未渲染项"这个算法站得住(2026-08-03 真号夹具实测):弹窗会把**当前正在
+    编辑的那篇**排除掉(不能自己引用自己),接口 21 条只渲染 20 张卡;而**剔除那一条之后,
+    接口顺序与卡片顺序严格对齐 20/20**。所以顺序本身是可靠的,原实现唯一的错是没扣除
+    被排除的那篇。
+
+    **算不准就拒绝**:只有当"标题非空却没出现在任何卡里"的条数恰好等于接口与卡片的数量差
+    时,才说明所有被排除项都已被识别、算术可信。否则(比如列表里还有别的空标题笔记,
+    没法判断它渲染了没有)一律拒绝 —— 引用错一篇笔记比不引用糟得多。
+    """
+    rendered = [_norm(c.inner_text()) for c in cards]
+
+    def _titled_but_absent(note: dict) -> bool:
+        title = _norm((note or {}).get("display_title"))
+        return bool(title) and not any(title in r for r in rendered)
+
+    excluded_total = len(notes) - len(cards)
+    identified = [i for i, n in enumerate(notes) if _titled_but_absent(n)]
+    if excluded_total < 0 or len(identified) != excluded_total:
+        return {
+            "status": "error",
+            "reason": f"quote_untitled_position_unverifiable: 接口 {len(notes)} 条 / 卡片 "
+                      f"{len(cards)} 张,只认出 {len(identified)} 条未渲染项,"
+                      f"对不上数量差 {excluded_total},无法确定空标题笔记落在第几张,拒绝猜",
+        }
+    card_index = index - sum(1 for i in identified if i < index)
+    if not 0 <= card_index < len(cards):
+        return {
+            "status": "error",
+            "reason": f"quote_untitled_index_out_of_range: 算出的卡片位置 {card_index} "
+                      f"不在 0..{len(cards) - 1}",
+        }
+    return {"_card": cards[card_index], "_title": ""}
+
+
 def _set_quote_in_modal(
     page,
     human: SyncHumanActions,
@@ -797,24 +838,23 @@ def _set_quote_in_modal(
     #
     # 改成在**全部卡片**里找文案包含该标题的那一张:命中恰好一张才用,0 张或多张都拒绝
     # (多张 = 同号有重名笔记,认不准就不认,与本模块一贯纪律一致)。
-    if not title:
-        # 空标题笔记没法按文案认卡。**不退回下标**(那正是被证伪的假设),交给
-        # 「他人笔记」那条路按 note_id 精确检索 —— 它不依赖任何顺序假设。
-        return {
-            "status": "error",
-            "reason": "quoted_note_not_in_candidates: 目标是空标题笔记,"
-                      "「我的笔记」只能按文案认卡,改走按 note_id 精确检索",
-        }
-    hits = [c for c in cards if title in _norm(c.inner_text())]
-    if len(hits) != 1:
-        return {
-            "status": "error",
-            "reason": f"quote_card_not_unique_by_title: 弹窗 {len(cards)} 张卡里,"
-                      f"文案含平台标题「{title}」的有 {len(hits)} 张(要求恰好 1 张,绝不猜)",
-        }
-    card = hits[0]
+    before = read_quote_text(page)   # 基线必须在设置**之前**取(空标题笔记只能靠它复核)
+    if title:
+        hits = [c for c in cards if title in _norm(c.inner_text())]
+        if len(hits) != 1:
+            return {
+                "status": "error",
+                "reason": f"quote_card_not_unique_by_title: 弹窗 {len(cards)} 张卡里,"
+                          f"文案含平台标题「{title}」的有 {len(hits)} 张(要求恰好 1 张,绝不猜)",
+            }
+        card = hits[0]
+    else:
+        picked = _pick_untitled_card(cards, notes, index)
+        if "_card" not in picked:
+            return picked            # 算不准就原样上抛拒绝原因
+        card = picked["_card"]
 
-    human.click(card, reason=f"选中被引用笔记「{title[:15]}」")
+    human.click(card, reason=f"选中被引用笔记「{title[:15] or '(空标题)'}」")
     human.wait(0.5, 1.0, context="等选中态生效")
 
     confirm = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
@@ -824,10 +864,16 @@ def _set_quote_in_modal(
     human.wait(0.8, 1.5, context="等引用生效")
 
     quoted = read_quote_text(page)
-    if title and title not in quoted:
+    # 空标题笔记没有可比对的文案,退而用**基线对比**:引用区必须非空且与设置前不同。
+    # 比"没报错就算成功"强,也是空标题下唯一站得住的判据(与「他人笔记」那条路同口径)。
+    applied = (title in quoted) if title else (bool(quoted) and quoted != before)
+    if not applied:
         return {
             "status": "error",
-            "reason": f"quote_not_applied: 确认后引用区是 {quoted[:40]!r},没出现「{title}」",
+            "reason": (f"quote_not_applied: 确认后引用区是 {quoted[:40]!r},没出现「{title}」"
+                       if title else
+                       f"quote_not_applied: 确认后引用区是 {quoted[:40]!r},"
+                       f"与设置前 {before[:40]!r} 没有变化"),
             "observed": quoted,
         }
     return {"status": "done", "quoted_note_id": str(quoted_note_id), "title": title}

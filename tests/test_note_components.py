@@ -1057,3 +1057,63 @@ def test_quote_matches_card_by_title_not_by_index(monkeypatch, wired):
     assert result["status"] == "done"
     assert result["components"]["quote"]["title"] == "徐瑞恒"
     assert "徐瑞恒" in editor.quote_text      # 引用的确实是它,不是下标位置上那张
+
+
+# ---------------- 空标题笔记的引用(主号那篇二维码) ----------------
+#
+# 业务上非做不可:主号「小助手联系方式」那篇是**空标题**的,而规则要求每篇咨询师推介
+# 笔记都引用它 —— 单主号自己就有 20 篇推介笔记落在这条路上。
+#
+# 空标题没法按文案认卡,改用"扣除未渲染项之后的位置"。这个算法的依据是真号夹具实测:
+# 弹窗排除掉当前正在编辑的那篇后,接口顺序与卡片顺序**严格对齐 20/20**
+# (见 test_quote_modal_replay.py)。
+
+
+def test_untitled_note_picked_by_position_after_exclusion(monkeypatch, wired):
+    """空标题目标:扣掉"标题非空却没渲染"的那条后,按位置取到正确的卡。"""
+    editor = Editor(
+        notes=(("n-a", "第一篇"), ("n-skip", "被排除的那篇"), ("n-qr", ""), ("n-c", "第三篇")),
+        # 弹窗少渲染了「被排除的那篇」(= 当前正在编辑的那篇),空标题卡文案只有作者与赞数
+        quote_card_titles=["第一篇", "作者 5", "第三篇"],
+    )
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-qr")
+
+    assert result["status"] == "done"
+    # 接口里 n-qr 在第 3 位(下标 2),前面有 1 条未渲染 → 卡片第 2 位(下标 1)
+    assert "作者 5" in editor.quote_text
+
+
+def test_untitled_refuses_when_exclusions_cannot_be_accounted_for(monkeypatch, wired):
+    """数量差对不上认出的未渲染项 → 拒绝(引用错一篇比不引用糟得多)。
+
+    构造:接口 4 条、卡片只有 2 张(差 2),但只能认出 1 条"标题非空却没渲染"的 ——
+    另一条差额来源不明(可能是另一篇空标题笔记没渲染),位置就算不准了。
+    """
+    editor = Editor(
+        notes=(("n-a", "第一篇"), ("n-skip", "被排除的那篇"), ("n-qr", ""), ("n-x", "")),
+        quote_card_titles=["第一篇", "作者 5"],
+    )
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-qr")
+
+    assert "quote_untitled_position_unverifiable" in result["failed"][0]["reason"]
+    assert "确认引用" not in wired[0].texts
+
+
+def test_untitled_verifies_by_baseline_change(monkeypatch, wired):
+    """空标题没有可比对的文案,复核只能看引用区**变了没有**;没变判失败。"""
+    editor = Editor(
+        notes=(("n-qr", ""),),
+        quote_card_titles=["作者 5"],
+    )
+    # 让"确认引用"不生效:引用区保持原样
+    editor._confirm_quote = lambda: setattr(editor, "modal_open", False)
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-qr")
+
+    assert "quote_not_applied" in result["failed"][0]["reason"]
+    assert "没有变化" in result["failed"][0]["reason"]
