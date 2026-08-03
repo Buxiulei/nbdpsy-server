@@ -7,7 +7,10 @@
 - ``apply_components``:在**已经打开的编辑器页**上设置三组件(发布新笔记与编辑已发布
   笔记共用这一段);
 - ``set_note_components``:编辑已发布笔记的完整流程 —— 深链进更新页 → 权限只读留底 →
-  设置组件 → 点发布 → **重进更新页逐项回读**。
+  **破坏性编辑步(图片增删 / 标题 / 正文,任一失败即弃提交)** → 设置组件 → 点发布 →
+  **重进更新页逐项回读**。文本与图片的实现在 ``note_editing*.py``,本文件只做编排:
+  一次请求**只有一次提交**,提交次数就是风险次数(编辑设计
+  ``docs/design/2026-08-03-note-editing-design.md`` 第二节裁决)。
 
 这条产品线最反直觉的一点:**失败普遍是静默的**(设计 2.6 / 2.7④,均为真号实测):
 
@@ -47,6 +50,24 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from app.browser.creator_export import _goto_creator
+# 已发布笔记编辑的两个实现模块(T4/T5)。**单向依赖**:它们绝不 import 本模块(会成环),
+# 编排点在本文件 —— 这正是设计第二节那条"结构性修正"(新逻辑不再堆进本已 1541 行的文件,
+# 但提交路径仍然只有这里一条)。``add_images`` / ``remove_images`` 改名 import:
+# ``set_note_components`` 的同名入参会在函数体里把模块级函数遮住。
+from app.browser.note_editing import (
+    apply_content_edit,
+    apply_title_edit,
+    content_prefix_ok,
+    image_count_equation,
+    read_body_value,
+    read_title_value,
+)
+from app.browser.note_editing_images import (
+    add_images as add_images_step,
+    count_images,
+    image_gate,
+    remove_images as remove_images_step,
+)
 from app.browser.sync_human_actions import SyncHumanActions
 
 # 更新页深链(设计 2.1,三次独立验证成功)。**优先用它定位**,不走"笔记管理页悬停点第 3
@@ -135,6 +156,15 @@ DEFAULT_ACTIVITY_KEYWORDS = (
 
 # 正文里的话题实体形如 ``#身边的心理学[话题]#``(设计 2.7),从提交前后的正文差里提取
 _TOPIC_PATTERN = re.compile(r"#([^#\[\]]+)\[话题\]#")
+
+# 破坏性编辑步的 applied 键(编辑设计 3.2),**元组顺序就是执行顺序**(编辑设计 4.2:
+# 图片在文本之前——最可能失败的先做,弃提交尽早发生;正文在活动之前——活动往正文末尾
+# 追加话题,反过来 Ctrl+A 会把刚注入的话题一并清掉)。
+_EDIT_STEP_KEYS = ("image_remove", "image_add", "title", "content")
+_IMAGE_STEP_KEYS = ("image_remove", "image_add")
+# 弃提交时"因前序失败压根没执行"的项(编辑设计 4.4):与"执行了但失败"必须能区分开,
+# 否则调用方会以为我们真的动过它。
+_SKIPPED_REASON = "skipped_due_to_abort: 前序破坏性编辑步失败,本步一次都没执行"
 
 
 class NoteComponentsError(Exception):
@@ -1228,6 +1258,142 @@ def _wait_submitted(page, responses: ComponentResponses, seen: int) -> Optional[
     return None
 
 
+# ---------------- 破坏性编辑步(标题 / 正文 / 图片增删)的编排 ----------------
+
+
+def _image_gate_reason(
+    page, images_before: Optional[int], expected_image_count: Optional[int]
+) -> Optional[str]:
+    """图片两步的**共用前提**(编辑设计 4.3 前提②):图数可确认 + 页面实数 == expected。
+
+    返回 ``None`` = 闸过;返回字符串 = 拒绝原因,此时**一次 hover、一次点击都没发生**。
+    它不是"某一步失败"而是"前提不成立",所以两个图片步会记同一条原因。
+
+    台账认知过期(别处改过这篇、或调用方拿的是旧快照)时,下标语义整个失效——"第 3 张"
+    已经不是它以为的那张了。此时唯一安全的动作是零点击退出,而不是"尽力删删看"。
+    """
+    if images_before is None:
+        return ("image_count_unconfirmable: 留底时图数双判据没取到一致值,图数不可确认,"
+                "一次图片点击都不发(数错一张就等于删错一张,而误删不可逆)")
+    if expected_image_count is None:
+        return ("expected_image_count_missing: 请求了图片增删却没声明 expected_image_count,"
+                "无从判断调用方对这篇的认知是否过期,零点击退出")
+    gate = image_gate(page, expected_image_count)
+    if gate.get("status") != "ok":
+        return gate.get("reason")
+    return None
+
+
+def _run_edit_steps(
+    page,
+    human: SyncHumanActions,
+    *,
+    title: Optional[str],
+    content: Optional[str],
+    add_images: Optional[List[str]],
+    remove_image_indexes: Optional[List[int]],
+    expected_image_count: Optional[int],
+    images_before: Optional[int],
+) -> Dict[str, Any]:
+    """按 ``_EDIT_STEP_KEYS`` 顺序跑破坏性编辑步;**任一失败立刻停手**(编辑设计 4.4)。
+
+    Returns:
+        ``{"outcomes": {键: 步骤结果}, "aborted": bool, "abort_reason": str|None,
+        "removed": 实删数, "added": 实增数, "topics_dropped": list|None}``。
+
+    与组件步的失败语义**故意不同**:组件失败只是"没设上",原内容无损,所以部分成也提交;
+    而这里失败意味着编辑器里躺着**残缺态**(标题清了一半、图删了一张卡住),提交出去就是
+    把残缺真发布——不可逆。所以任一步 error 就整单弃提交,由调用方在⑦之前返回。
+    安全底座是附录 C / E4 实证:编辑器内的改动是纯前端态,不提交就不落库,笔记原样未动。
+
+    ``title`` 用 ``is not None`` 判"有没有请求":``title=""`` 是"清空标题"这一合法意图
+    (编辑设计 3.1),真值判断会把它静默丢掉。
+    """
+    plan = [
+        key for key, requested in (
+            ("image_remove", bool(remove_image_indexes)),
+            ("image_add", bool(add_images)),
+            ("title", title is not None),
+            ("content", content is not None),
+        ) if requested
+    ]
+    # 闸在**任何**图片动作之前判一次(编辑设计 4.3):不过就一步都不做
+    gate_reason = (
+        _image_gate_reason(page, images_before, expected_image_count)
+        if any(key in _IMAGE_STEP_KEYS for key in plan) else None
+    )
+
+    outcomes: Dict[str, Dict[str, Any]] = {}
+    aborted = False
+    abort_reason: Optional[str] = None
+    removed = 0
+    added = 0
+    topics_dropped: Optional[List[str]] = None
+
+    for key in plan:
+        if gate_reason and key in _IMAGE_STEP_KEYS:
+            outcomes[key] = {"status": "error", "reason": gate_reason}
+            aborted = True
+            abort_reason = abort_reason or gate_reason
+            continue
+        if aborted:
+            outcomes[key] = {"status": "error", "reason": _SKIPPED_REASON}
+            continue
+        try:
+            if key == "image_remove":
+                outcome = remove_images_step(page, human, list(remove_image_indexes))
+                removed = int(outcome.get("removed") or 0)
+            elif key == "image_add":
+                outcome = add_images_step(page, human, list(add_images))
+                added = int(outcome.get("added") or 0)
+            elif key == "title":
+                outcome = apply_title_edit(page, human, title)
+            else:
+                outcome = apply_content_edit(page, human, content)
+                # 正文整体替换会把既有话题实体一并冲掉,本期不重建、只如实上报(编辑设计 1.2)。
+                # 失败路径也带得出来(替换前就取好了),所以不判 status。
+                topics_dropped = list(outcome.get("topics_dropped") or [])
+        except Exception as exc:  # noqa: BLE001 — 异常也必须收敛成"这步失败 → 弃提交"
+            # 绝不能让异常穿出去:穿出去就丢了 aborted_before_submit,调用方无从知道
+            # "笔记原样未动、可安全重试"这件事(与"提交了但部分生效"是完全不同的处境)。
+            logger.exception(f"[note_components] 编辑步 {key} 异常")
+            outcome = {"status": "error", "reason": f"{key}_exception: {exc}"}
+        outcomes[key] = outcome
+        logger.info(
+            f"[note_components] 编辑步 {key}: {outcome.get('status')} "
+            f"{outcome.get('reason', '')}"
+        )
+        if outcome.get("status") != "done":
+            aborted = True
+            abort_reason = outcome.get("reason")
+
+    return {
+        "outcomes": outcomes,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        "removed": removed,
+        "added": added,
+        "topics_dropped": topics_dropped,
+    }
+
+
+def _skipped_components(
+    collection_id: Optional[str], quoted_note_id: Optional[str], activity_id: Optional[str]
+) -> Dict[str, Dict[str, Any]]:
+    """弃提交时组件步一步都没走:请求过的组件如实记「因前序失败未执行」。
+
+    不记的话,``failed`` 里就只剩编辑步,调用方会以为组件已经设上了(其实连弹层都没开)。
+    """
+    return {
+        key: {"status": "error", "reason": _SKIPPED_REASON}
+        for key, value in (
+            ("collection", collection_id),
+            ("quote", quoted_note_id),
+            ("activity", activity_id),
+        ) if value
+    }
+
+
 # ---------------- 编辑已发布笔记:完整流程 ----------------
 
 
@@ -1239,20 +1405,40 @@ def set_note_components(
     collection_id: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
     activity_id: Optional[str] = None,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    add_images: Optional[List[str]] = None,
+    remove_image_indexes: Optional[List[int]] = None,
+    expected_image_count: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """给一篇**已发布**笔记设置三组件:进更新页 → 设置 → 提交 → 逐项回读。
+    """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片:进更新页 → 改 → 提交 → 回读。
+
+    **全流程只有一次提交**(⑧那一次 ``click_publish``),这是方案 A 的立命之本:提交是
+    全量覆盖语义,提交次数就是风险次数。文本 / 图片 / 组件混在一次请求里也只覆盖一次。
 
     Args:
         page: 已建好登录态的同步 Playwright Page(SyncClient.start 之后)。
         account_id: 账号 id(日志用)。
         note_id: 目标笔记的平台 id(深链定位,设计 3.2 —— 台账 title 会过期,只认 id)。
-        collection_id / quoted_note_id / activity_id: 要设置的三组件,均可选,至少一个。
+        collection_id / quoted_note_id / activity_id: 要设置的三组件,均可选。
+        title: 整体替换标题;``None``=不改,``""``=清空(两者语义不同,编辑设计 3.1)。
+        content: 整体替换正文;``None``=不改(不支持清空,编辑设计 1.2)。
+        add_images: 追加到图序末尾的**本地路径**列表(REST 层已落好盘)。
+        remove_image_indexes: 按发布态图序删除的 1-based 下标。
+        expected_image_count: 调用方声明的现有图数;有图片操作时必给,与页面实数不符
+            → 一次图片点击都不发生,整单弃提交(编辑设计 4.3)。
 
     Returns:
         ``{"status": "done"|"partially_applied"|"failed", "applied": {...}, "failed": [...],
         "permission_before"/"permission_after"/"permission_preserved", "body_appended",
-        "topics_injected", "submitted", "components": {逐项明细}}``;
+        "topics_injected", "submitted", "aborted_before_submit", "components": {逐项明细}}``;
+        请求了编辑字段时按需带 ``topics_dropped`` / ``images_before`` / ``images_after`` /
+        ``read_back``(标题正文的回读真值,服务层台账回写要用)。
         一项都没生效时额外带 ``"error"`` 键(调用方据此把台账落 error,而不是假 done)。
+
+        ``aborted_before_submit=True`` 是**独立于"提交了但没全成"的终态**:破坏性编辑步
+        失败导致放弃提交,一次发布都没点、编辑器态不落库,笔记原样未动 —— 调用方可以直接
+        重试。其余失败必须先人工核对笔记现状(编辑设计 3.2 / 6.3)。
 
     Raises:
         NoteComponentsError: 前置/硬失败 —— 页面进不去、权限读不出、提交前权限已变。
@@ -1261,6 +1447,7 @@ def set_note_components(
     human = SyncHumanActions(page)
     responses = ComponentResponses()
     responses.attach(page)
+    wants_images = bool(add_images or remove_image_indexes)
     try:
         open_update_page(page, account_id, note_id)
         human.wait(0.8, 1.6, context="编辑页浏览")
@@ -1274,12 +1461,40 @@ def set_note_components(
             )
         title_on_page = read_note_title(page)
         body_before = read_body_text(page)
+        # 图数留底**只在真要动图时数**:不动图就没有"数错一张=删错一张"的风险敞口,
+        # 也不必为纯组件请求多跑一次清点。None = 不可确认,由 ③ 的闸拦下(编辑设计 4.3)。
+        images_before = count_images(page) if wants_images else None
         logger.info(
             f"[note_components] 账号{account_id} note_id={note_id} "
-            f"权限={permission_before!r} 标题={title_on_page[:20]!r}"
+            f"权限={permission_before!r} 标题={title_on_page[:20]!r} 图数={images_before}"
         )
 
-        # ② 逐项设置(单项失败不阻断其余项)
+        # ②③④ 破坏性编辑步(图片闸 → 删图 → 加图 → 标题 → 正文),任一失败即停手
+        edits = _run_edit_steps(
+            page, human,
+            title=title, content=content, add_images=add_images,
+            remove_image_indexes=remove_image_indexes,
+            expected_image_count=expected_image_count, images_before=images_before,
+        )
+        if edits["aborted"]:
+            # 弃提交(编辑设计 4.4):**不走组件步、不点发布**,直接返回。此刻编辑器里可能
+            # 躺着残缺态,但它是纯前端的(附录 C / E4 实证),离开页面即恢复原状。
+            logger.error(
+                f"[note_components] 账号{account_id} note_id={note_id}: 破坏性编辑步失败,"
+                f"放弃提交(一次发布都没点,笔记原样未动):{edits['abort_reason']}"
+            )
+            return _compose(
+                note_id,
+                _skipped_components(collection_id, quoted_note_id, activity_id),
+                {}, submitted=False,
+                permission_before=permission_before, permission_after=permission_before,
+                body_before=body_before, body_after=body_before,
+                edit_outcomes=edits["outcomes"], images_before=images_before,
+                images_after=None, topics_dropped=edits["topics_dropped"],
+                aborted_before_submit=True, abort_reason=edits["abort_reason"],
+            )
+
+        # ⑤ 三组件逐项设置(单项失败不阻断其余项 —— 与破坏性编辑步的语义差异见 4.4)
         outcomes = apply_components(
             page, human, responses,
             collection_id=collection_id,
@@ -1287,8 +1502,10 @@ def set_note_components(
             activity_id=activity_id,
         )
         body_after = read_body_text(page)
+        # ⑥ 提交决策:组件 done/skipped 或**任一编辑步 done** 都算"有东西可提交"
         in_editor_ok = [k for k, v in outcomes.items() if v["status"] in ("done", "skipped")]
-        if not in_editor_ok:
+        edits_ok = [k for k, v in edits["outcomes"].items() if v.get("status") == "done"]
+        if not in_editor_ok and not edits_ok:
             # 编辑器里一项都没设上 —— 提交毫无意义,而每次提交都是一次全量覆盖,不做
             logger.warning(
                 f"[note_components] 账号{account_id} note_id={note_id}: "
@@ -1298,9 +1515,11 @@ def set_note_components(
                 note_id, outcomes, {}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_after,
+                edit_outcomes=edits["outcomes"], images_before=images_before,
+                images_after=None, topics_dropped=edits["topics_dropped"],
             )
 
-        # ③ 点发布前再读一次权限:不符立刻中止,**不点** —— 这是硬约束,不是可选校验
+        # ⑦ 点发布前再读一次权限:不符立刻中止,**不点** —— 这是硬约束,不是可选校验
         permission_now = read_permission_label(page)
         if permission_now != permission_before:
             raise NoteComponentsError(
@@ -1320,20 +1539,36 @@ def set_note_components(
         elif not submitted.get("success"):
             logger.warning(f"[note_components] 提交响应非 success: {submitted}")
 
-        # ④ 重进更新页逐项回读 —— success:true 不等于生效(设计 2.6 合集被静默丢弃)
+        # ⑨ 重进更新页逐项回读 —— success:true 不等于生效(设计 2.6 合集被静默丢弃)
         human.wait(1.5, 3.0, context="等提交落地")
-        verified, permission_after = _verify_after_submit(
+        verified, permission_after, readback = _verify_after_submit(
             page, account_id, note_id,
             collection_id=collection_id, quoted_note_id=quoted_note_id,
             activity_id=activity_id, outcomes=outcomes, responses=responses,
+            title=title, content=content,
+            wants_add=bool(add_images), wants_remove=bool(remove_image_indexes),
+            images_before=images_before, removed=edits["removed"], added=edits["added"],
         )
+
+        # 正文被整体替换过时,"活动往正文末尾追加了什么"要拿**替换后**的正文当基线做差
+        # (编辑设计 4.2①)。拿留底的旧正文做差会把新正文里调用方自己写的话题统统算成
+        # "活动注入的"—— 那是假报,而这条产品线最忌讳的就是假报。
+        content_step = edits["outcomes"].get("content") or {}
+        diff_baseline = body_before
+        if content_step.get("status") == "done" and content_step.get("body_read_back") is not None:
+            diff_baseline = _norm(content_step["body_read_back"])
 
         result = _compose(
             note_id, outcomes, verified, submitted=submitted is not None,
             permission_before=permission_before, permission_after=permission_after,
-            body_before=body_before, body_after=body_after,
+            body_before=diff_baseline, body_after=body_after,
+            edit_outcomes=edits["outcomes"], images_before=images_before,
+            images_after=readback["images_after"], topics_dropped=edits["topics_dropped"],
         )
-        # ⑤ 权限被改动:大声告警 + 尝试改回(只有实测支持的两档能改回)
+        if readback["read_back"]:
+            # 标题/正文的回读真值:服务层台账回写只认它(不拿请求值凑数,编辑设计 3.3)
+            result["read_back"] = readback["read_back"]
+        # ⑩ 权限被改动:大声告警 + 尝试改回(只有实测支持的两档能改回)
         if permission_after is not None and permission_after != permission_before:
             result["permission_restored"] = _restore_permission(
                 page, account_id, note_id, title_on_page, permission_before, permission_after
@@ -1353,18 +1588,36 @@ def _verify_after_submit(
     activity_id: Optional[str],
     outcomes: Dict[str, Dict[str, Any]],
     responses: ComponentResponses,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    wants_add: bool = False,
+    wants_remove: bool = False,
+    images_before: Optional[int] = None,
+    removed: int = 0,
+    added: int = 0,
 ) -> tuple:
-    """重进更新页,逐项回读三组件与权限;返回 ``({组件: bool|None}, 权限文案|None)``。
+    """重进更新页,逐项回读三组件 / 标题 / 正文 / 图数与权限。
+
+    Returns:
+        ``({项: bool|None}, 权限文案|None, {"read_back": {...}, "images_after": int|None})``
+        —— ``read_back`` 只含请求过的 title/content 键(值为 ``None`` 表示没读到),
+        服务层台账回写要用。
 
     回读本身失败(页面进不去)不抛错 —— 那时"改没改成"确实未知,一律记 None,由调用方
     如实上报为未确认,而不是乐观当成功。
     """
     verified: Dict[str, Optional[bool]] = {}
+    read_back: Dict[str, Optional[str]] = {}
+    if title is not None:
+        read_back["title"] = None
+    if content is not None:
+        read_back["content"] = None
+    extra: Dict[str, Any] = {"read_back": read_back, "images_after": None}
     try:
         open_update_page(page, account_id, note_id)
     except NoteComponentsError as exc:
         logger.error(f"[note_components] 回读进不去更新页(生效情况未确认): {exc.reason}")
-        return {k: None for k in outcomes}, None
+        return {k: None for k in outcomes}, None, extra
 
     if collection_id:
         name = (outcomes.get("collection") or {}).get("name") or ""
@@ -1409,7 +1662,49 @@ def _verify_after_submit(
             logger.error(
                 f"[note_components] 活动回读未生效:「{name}」按钮不是「{_ACTIVITY_LINKED_TEXT}」"
             )
-    return verified, read_permission_label(page)
+
+    # ---- 编辑项回读(编辑设计 3.2 判据)----
+    if title is not None:
+        got = read_title_value(page)
+        read_back["title"] = got
+        # 标题用**全等**(归一后):没有"末尾会被追加东西"的情形。读不出 → None(未确认),
+        # 绝不当成"清空成功"——`title=""` 时 _norm(None) == _norm("") 会把定位失败谎报成生效。
+        verified["title"] = None if got is None else (_norm(got) == _norm(title))
+        if verified["title"] is not True:
+            logger.error(
+                f"[note_components] 标题回读未生效:期望 {title[:40]!r},实读 {got!r}"
+            )
+    if content is not None:
+        got = read_body_value(page)
+        read_back["content"] = got
+        # **这里才用前缀判据**:活动步已经把话题追加到正文末尾了,全等必然假阴性。
+        # 编辑器内那一步用的是全等(note_editing.apply_content_edit),两条判据别混用。
+        verified["content"] = None if got is None else content_prefix_ok(got, content)
+        if verified["content"] is not True:
+            logger.error(
+                f"[note_components] 正文回读未生效:实读 {(got or '')[:60]!r} "
+                f"不以目标正文 {content[:40]!r} 开头"
+            )
+    if wants_add or wants_remove:
+        images_after = count_images(page)
+        extra["images_after"] = images_after
+        # 两个键共用同一条计数等式(编辑设计 3.2),分开报只是为了让调用方定位哪半失败
+        if images_after is None or images_before is None:
+            applied_images = None
+            logger.error("[note_components] 图数回读不可确认(双判据没取到一致值)")
+        else:
+            expected = image_count_equation(images_before, removed, added)
+            applied_images = images_after == expected
+            if not applied_images:
+                logger.error(
+                    f"[note_components] 图数回读未生效:实读 {images_after} != 期望 "
+                    f"{expected}(留底 {images_before} - 实删 {removed} + 实增 {added})"
+                )
+        if wants_remove:
+            verified["image_remove"] = applied_images
+        if wants_add:
+            verified["image_add"] = applied_images
+    return verified, read_permission_label(page), extra
 
 
 def _compose(
@@ -1422,17 +1717,29 @@ def _compose(
     permission_after: Optional[str],
     body_before: str,
     body_after: str,
+    edit_outcomes: Optional[Dict[str, Dict[str, Any]]] = None,
+    images_before: Optional[int] = None,
+    images_after: Optional[int] = None,
+    topics_dropped: Optional[List[str]] = None,
+    aborted_before_submit: bool = False,
+    abort_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """把逐项结果汇总成对外结果;**一项都没生效时带 ``error`` 键**(绝不假 done)。
+    """把逐项结果(三组件 + 破坏性编辑步)汇总成对外结果;**一项都没生效时带 ``error`` 键**。
 
     ``applied[k]`` 三态:``True``=回读确认生效;``False``=回读确认没生效;``None``=没能
     回读(未确认)。**只有 True 才算数** —— 这条产品线的失败是静默的,"没报错"不是凭据。
+
+    编辑相关的键**按请求出现**(``topics_dropped`` / ``images_before`` / ``images_after``):
+    纯组件请求的结果与接线之前逐字节一致,老调用方不会凭空多出看不懂的键。唯一的例外是
+    ``aborted_before_submit`` —— 它在**所有**结果里都给值(正常路径 False),因为
+    "笔记原样未动"与"提交了但没全成"是完全不同的处境,调用方必须能一眼分清(编辑设计 3.2)。
     """
-    applied = {k: verified.get(k) for k in outcomes}
+    steps = {**outcomes, **(edit_outcomes or {})}
+    applied = {k: verified.get(k) for k in steps}
     failed = [
-        {"component": k, "reason": (outcomes[k].get("reason")
+        {"component": k, "reason": (steps[k].get("reason")
                                     or f"{k}_not_verified: 提交后回读未确认生效")}
-        for k in outcomes if applied.get(k) is not True
+        for k in steps if applied.get(k) is not True
     ]
     appended = appended_part(body_before, body_after)
     result: Dict[str, Any] = {
@@ -1448,7 +1755,13 @@ def _compose(
         ),
         "body_appended": appended,
         "topics_injected": extract_topics(appended),
+        "aborted_before_submit": aborted_before_submit,
     }
+    if topics_dropped is not None:
+        result["topics_dropped"] = topics_dropped
+    if any(k in steps for k in _IMAGE_STEP_KEYS):
+        result["images_before"] = images_before
+        result["images_after"] = images_after
     ok_count = sum(1 for v in applied.values() if v is True)
     if ok_count == len(applied) and applied:
         result["status"] = "done"
@@ -1457,6 +1770,9 @@ def _compose(
     else:
         result["status"] = "failed"
         result["error"] = (
+            f"note_edit_aborted_before_submit: 破坏性编辑步失败,已放弃提交 —— "
+            f"一次发布都没点,笔记原样未动,可安全重试;首个失败原因:{abort_reason}"
+            if aborted_before_submit else
             "note_components_all_failed: 请求的组件一项都没确认生效;"
             f"逐项原因见 failed({[f['component'] for f in failed]})"
         )
