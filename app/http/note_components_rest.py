@@ -309,11 +309,19 @@ async def get_note_components_endpoint(job_id: str) -> dict:
     done 时把服务侧的 ``status``(done=全部生效 / partially_applied=部分生效)另开一个键
     ``result_status`` 下发 —— 外层 status 是任务生命周期,内层是这次到底改成了几项,
     合成一个键会让"只成了一半"被读成"全成了"。
+
+    **error 也要下发逐项详情**(2026-08-03 运营上报):此前这段只在 ``status == "done"``
+    时下发 ``failed`` / ``applied``,而"三组件一项都没设上"恰恰以 ``error`` 收尾 ——
+    于是服务层明明写好了原因(``quote_card_title_mismatch: 第 6 张卡……与接口不一致``),
+    调用方却一个字都拿不到,只能靠换外部变量盲测(运营实际连测三次全无信息)。
+
+    **失败时的逐项原因比成功时更值钱**,把它藏起来是这个接口最不该有的行为。
     """
     row = await load_job(job_id, "note_components", "job_id")
     view = base_view(row)
     result = row.get("result") or {}
-    if row["status"] == "done":
+    # 终态(done / error)都下发;queued / running 时 result 本就还没有内容
+    if row["status"] in ("done", "error"):
         view["result_status"] = result.get("status")
         for key in (
             "applied", "failed", "submitted", "permission_before", "permission_after",

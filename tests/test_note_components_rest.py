@@ -527,3 +527,54 @@ def test_publish_jobs_components_migration(monkeypatch, tmp_path):
     after_down = columns()
     assert not ({"collection_id", "quoted_note_id", "activity_id"} & after_down)
     assert {"title", "content", "images_json", "topics_json", "status"} <= after_down
+
+
+async def test_poll_error_still_exposes_per_component_reasons(tmp_path, monkeypatch):
+    """任务以 error 收尾时,逐项失败原因**必须照样下发**。
+
+    2026-08-03 运营上报:三组件"一项都没设上"恰恰以 error 收尾,而此前只有
+    status=="done" 才下发 failed/applied —— 服务层明明写好了原因
+    (quote_card_title_mismatch: 第 6 张卡与接口不一致),调用方一个字都拿不到,
+    只能靠换外部变量盲测,实际连测三次全无信息。
+
+    **失败时的逐项原因比成功时更值钱**,藏起来是这个接口最不该有的行为。
+    """
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("组件失败号", "uNcErr", _COOKIES)
+        await _seed_job(
+            "nc-err-1", "note_components", acc, "error",
+            {
+                "status": "failed",
+                "applied": {"quote": None},
+                "failed": [{
+                    "component": "quote",
+                    "reason": "quote_card_title_mismatch: 第 6 张卡文案里没有平台标题,"
+                              "卡片顺序与接口不一致,拒绝盲选",
+                }],
+                "submitted": False,
+            },
+        )
+        body = (await c.get(
+            "/api/note-components/nc-err-1", headers=bearer(ADMIN_KEY)
+        )).json()
+
+        assert body["status"] == "error"          # 生命周期状态不变
+        assert body["result_status"] == "failed"  # 内层结果也要给
+        assert body["applied"] == {"quote": None}
+        assert "quote_card_title_mismatch" in body["failed"][0]["reason"]
+
+
+async def test_poll_running_has_no_result_keys(tmp_path, monkeypatch):
+    """还在跑的时候不下发结果键(那时 result 本就没内容,给了反而像"已经有结论")。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("组件在跑号", "uNcRun", _COOKIES)
+        await _seed_job("nc-run-1", "note_components", acc, "running", {})
+
+        body = (await c.get(
+            "/api/note-components/nc-run-1", headers=bearer(ADMIN_KEY)
+        )).json()
+
+        assert body["status"] == "running"
+        assert "failed" not in body and "result_status" not in body
