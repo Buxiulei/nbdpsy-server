@@ -808,3 +808,25 @@ def _events_by_image(events):
         elif event[0] == "hit_test" and current is not None:
             grouped[current].append(event)
     return grouped
+
+
+@pytest.mark.unit
+def test_hit_accepts_hover_state_card_text():
+    """hover 态容器文案 '2\\n编辑' 必须通过身份复核(2026-08-03 真号打脸)。
+
+    悬停显形后图容器 innerText 会多出「编辑」按钮文案,全等比对把**正确落点**误拒
+    (落点就在删除按钮的 SVG path 上)。首 token 比对只认序号本身。
+    """
+    outcome = nei._verify_close_hit(
+        {"tag": "path", "cls": "", "on_close_btn": True, "card_text": "2\n编辑"}, 2
+    )
+    assert outcome is True
+
+
+@pytest.mark.unit
+def test_hit_still_rejects_wrong_ordinal_with_suffix():
+    """'12 编辑' 的首 token 是 '12',不得误配序号 1。"""
+    outcome = nei._verify_close_hit(
+        {"tag": "path", "cls": "", "on_close_btn": True, "card_text": "12\n编辑"}, 1
+    )
+    assert outcome is False

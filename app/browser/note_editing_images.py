@@ -361,7 +361,7 @@ def _locate_close_button(
         return {"status": "error",
                 "reason": f"close_point_unverifiable: 第 {ordinal} 张图删除按钮落点 "
                           f"({x:.0f},{y:.0f}) 的 elementFromPoint 读不出,拒绝点击"}
-    if not hit.get("on_close_btn") or (hit.get("card_text") or "").strip() != str(ordinal):
+    if not _verify_close_hit(hit, ordinal):
         return {"status": "error",
                 "reason": f"close_point_mismatch: 落点 ({x:.0f},{y:.0f}) 上是 "
                           f"tag={hit.get('tag')!r} class={hit.get('cls')!r} "
@@ -584,6 +584,20 @@ _HIT_TEST_JS = r"""
     };
 }
 """
+
+
+def _verify_close_hit(hit: Dict[str, Any], ordinal: int) -> bool:
+    """落点是否确为"第 ordinal 张图容器内的删除控件"。
+
+    容器文案取**首个 token** 比对序号(2026-08-03 真号打脸):hover 显形后容器 innerText
+    会从 '2' 变成 '2\n编辑'(悬停态多出「编辑」按钮文案),全等比对把正确落点误拒——
+    落点明明就在删除按钮上(elementFromPoint 命中的是按钮里的 SVG path)。首 token
+    仍然只认序号本身:'12 编辑' 首 token '12' 不会误配 '1'。
+    """
+    if not hit.get("on_close_btn"):
+        return False
+    first_token = ((hit.get("card_text") or "").split() or [""])[0]
+    return first_token == str(ordinal)
 
 
 def _hit_test(page, x: float, y: float) -> Optional[Dict[str, Any]]:
