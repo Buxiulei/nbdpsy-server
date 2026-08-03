@@ -44,7 +44,25 @@ FIXTURE_DIR = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "page
 # 接口必须按场景过滤 —— 编辑页加载时会顺带返回活动列表(181 个活动,单独就 280KB+),
 # 那与引用弹窗毫无关系,留着只会让夹具大到没人愿意 review。夹具的价值在于**能被看懂**。
 _SCENES = {
+    # 更新页图片区/文本区(已发布笔记编辑功能的 E1/E2只读/E3入口/E8/E9 证据)。
+    # flow="update_editor":不开引用弹窗,而是 ①dump 基态 ②hover 首图让 close-btn 显形
+    # 再 dump ③开引用弹窗 dump 遮挡关系后关掉。全程零破坏性点击。
+    "update_editor_images": {
+        "flow": "update_editor",
+        "dom": [
+            ".img-upload-area",
+            ".img-upload-area .img-container",
+            ".img-container .close-btn",
+            "input[type='file']",
+            "input[placeholder*='标题']",
+            "div[contenteditable='true']",
+            # E9:图片区附近的约束提示文案(有没有"至少 1 张"之类)
+            "[class*='tip']", "[class*='hint']", "[class*='limit']",
+        ],
+        "api_marks": [],
+    },
     "quote_modal": {
+        "flow": "quote_modal",
         "dom": [
             nc._QUOTE_NOTE_CARD,
             f"{nc._QUOTE_MODAL} button",
@@ -113,13 +131,41 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
         nc.open_update_page(page, account_id, note_id)
         human.wait(1.0, 2.0, context="编辑页停留")
 
-        entry = page.query_selector(nc._QUOTE_CONTAINER)
-        if entry is None:
-            raise RuntimeError("没找到引用笔记入口")
-        human.click(entry, reason="打开引用笔记弹窗(只读采集)")
-        human.wait(2.0, 3.0, context="等弹窗与候选渲染")
-
-        dom = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
+        flow = _SCENES[scene].get("flow", "quote_modal")
+        extra: dict = {}
+        if flow == "update_editor":
+            # ① 基态 dump(图片区/文本区/file input/提示文案)
+            base = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
+            # ② hover 首图让 hoverShow 的 close-btn 显形,再 dump 一次(E2 只读部分:
+            #    按钮怎么出现、显形后的形态;hover 是观察不是写)
+            first_img = page.query_selector(".img-upload-area .img-container")
+            if first_img is not None:
+                human.hover(first_img, reason="悬停首图让删除按钮显形(只读采集)")
+                human.wait(0.6, 1.2, context="等 hoverShow 渲染")
+                extra["close_btn_after_hover"] = page.evaluate(
+                    _DUMP_JS, ".img-container .close-btn"
+                )
+            # ③ E8:开引用弹窗,dump 弹窗矩形与图片区矩形看遮挡;完了必须关掉
+            #    (弹窗不关会盖住发布按钮 —— 2026-08-02 事故,收尾走 finally 语义)
+            entry = page.query_selector(nc._QUOTE_CONTAINER)
+            if entry is not None:
+                human.click(entry, reason="打开引用笔记弹窗(E8 遮挡采集)")
+                human.wait(1.5, 2.5, context="等弹窗渲染")
+                try:
+                    extra["modal_overlap"] = {
+                        "modal": page.evaluate(_DUMP_JS, nc._QUOTE_MODAL),
+                        "img_area": page.evaluate(_DUMP_JS, ".img-upload-area"),
+                    }
+                finally:
+                    nc._close_quote_modal(page, human)
+            dom = base
+        else:
+            entry = page.query_selector(nc._QUOTE_CONTAINER)
+            if entry is None:
+                raise RuntimeError("没找到引用笔记入口")
+            human.click(entry, reason="打开引用笔记弹窗(只读采集)")
+            human.wait(2.0, 3.0, context="等弹窗与候选渲染")
+            dom = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
         snapshot = {
             "scene": scene,
             "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -127,6 +173,7 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
             "source_note_id": note_id,
             "url": page.url,
             "dom": dom,
+            "extra": extra,
             "api": api,
             "note": "真号只读采集;xsec_token 已抹除。**不要手改本文件** —— 它是证据,"
                     "改它去迁就代码等于自欺,要更新只能重新采集。",

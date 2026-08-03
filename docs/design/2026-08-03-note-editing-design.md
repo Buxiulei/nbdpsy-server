@@ -398,3 +398,17 @@ title/content_text 在成功后自动回写。
 - 依赖检查:每个标 [E*] 的实现步骤都能在第五节找到对应条目,T4/T5 的依赖关系与之对齐;
 - 已知修正:调研报告"published_notes 无 content_text"过时,模型已有该列(3.3),
   回写方案不需迁移。
+
+---
+
+## 附录 B:T1 只读采集证据记录(2026-08-03,账号8 笔记 6a6f18c4,夹具 update_editor_images.json)
+
+| # | 问题 | 答案 | 状态 |
+|---|---|---|---|
+| E1 | 图数怎么数/单图容器 | `.img-upload-area .img-container` 命中数 == 实际图数(6==6);单图 82x82 缩略,序号即文案 | **闭环** |
+| E2(只读半) | 删除按钮怎么出现/选择器 | `.img-container .close-btn`(cls 含 hoverShow),常驻 DOM,hover 显形,20x20 位于图右上角 | 半闭环(点击行为留受控写) |
+| E3(入口半) | 追加图 input 归属 | 3 个 file input:`accept=".jpg,.jpeg,.png,.webp"` 带 `multiple` 的那个是图片批量通道;另一同 accept 无 multiple(疑单张替换);第三个 accept pdf/doc 是「选择文件」无关组件。选择器锚 `input[type='file'][accept*='.jpg'][multiple]` | 半闭环(灌入行为留受控写) |
+| E8 | 弹层与图片/文本区遮挡 | **开引用弹窗后图片区 rect.y = -815(被滚出视口上方)** —— 弹窗操作会改变页面滚动位;编排层每个破坏性编辑步前**必须重新滚动目标进视口**(文字版丢话题同款陷阱,T4/T5 硬要求) | **闭环** |
+| E9 | 有无"至少1张"约束文案 | 无此类提示(hint/limit 零命中);意外收获:正文里话题 chip 的 innerText 就是 `#xx[话题]#` 纯文本形态,topics_dropped 正则可提 | **闭环** |
+
+剩余 HARD-GATE:E2(点击删除)/E3(灌入)/E4(纯前端态)/E5(文本写入)/E6(提交后 hash_tag)/E7(未提交恢复)——全部属受控写测试(T2)。

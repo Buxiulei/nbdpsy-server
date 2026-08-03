@@ -1,0 +1,683 @@
+{
+  "scene": "update_editor_images",
+  "captured_at": "2026-08-03T06:27:40.067977+00:00",
+  "account_id": 8,
+  "source_note_id": "6a6f18c4000000002402c52b",
+  "url": "https://creator.xiaohongshu.com/publish/update?id=6a6f18c4000000002402c52b&noteType=normal",
+  "dom": {
+    ".img-upload-area": [
+      {
+        "text": "1 2 3 4 5 6",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "class": "img-upload-area"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 128,
+          "width": 816,
+          "height": 100
+        }
+      }
+    ],
+    ".img-upload-area .img-container": [
+      {
+        "text": "1",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 832,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "2",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 922,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "3",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1012,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "4",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1102,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "5",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1192,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "6",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1282,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      }
+    ],
+    ".img-container .close-btn": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1173,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1263,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1353,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      }
+    ],
+    "input[type='file']": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "type": "file",
+          "hidden": "",
+          "multiple": "",
+          "accept": ".jpg,.jpeg,.png,.webp",
+          "alt": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "type": "file",
+          "hidden": "",
+          "accept": ".jpg,.jpeg,.png,.webp",
+          "alt": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-245e136a": "",
+          "style": "display: none;",
+          "type": "file",
+          "accept": ".pdf,.doc,.docx,.ppt,.pptx"
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      }
+    ],
+    "input[placeholder*='标题']": [
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-text",
+          "type": "text",
+          "placeholder": "填写标题会有更多赞哦",
+          "value": "心理咨询师-徐瑞恒，陪你从内耗里出来"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 276,
+          "width": 683,
+          "height": 24
+        }
+      }
+    ],
+    "div[contenteditable='true']": [
+      {
+        "text": "徐瑞恒，NBDpsy 心理咨询师🌿 北京大学心理学本科、临床心理学硕士，CPS 注册助理心理师。个体咨询 400+ 小时，团体 90+ 小时，接受督导 300+ 小时。 三种很耗人的日常👇 事情办完了，那句话说得对不对，能复盘到半夜。 被夸一句，第一反应是不敢认，觉得对方只是客气。 一处没做好，就把自己整个人否掉。 这些不是想太多，它有来处💭 她常做的，是先陪你把来处找出来，再把自我价值感一",
+        "attrs": {
+          "contenteditable": "true",
+          "role": "textbox",
+          "translate": "no",
+          "class": "tiptap ProseMirror",
+          "tabindex": "0"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 320,
+          "width": 816,
+          "height": 839
+        }
+      }
+    ],
+    "[class*='tip']": [
+      {
+        "text": "徐瑞恒，NBDpsy 心理咨询师🌿 北京大学心理学本科、临床心理学硕士，CPS 注册助理心理师。个体咨询 400+ 小时，团体 90+ 小时，接受督导 300+ 小时。 三种很耗人的日常👇 事情办完了，那句话说得对不对，能复盘到半夜。 被夸一句，第一反应是不敢认，觉得对方只是客气。 一处没做好，就把自己整个人否掉。 这些不是想太多，它有来处💭 她常做的，是先陪你把来处找出来，再把自我价值感一",
+        "attrs": {
+          "data-v-787eeb26": "",
+          "class": "tiptap-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 320,
+          "width": 816,
+          "height": 839
+        }
+      },
+      {
+        "text": "徐瑞恒，NBDpsy 心理咨询师🌿 北京大学心理学本科、临床心理学硕士，CPS 注册助理心理师。个体咨询 400+ 小时，团体 90+ 小时，接受督导 300+ 小时。 三种很耗人的日常👇 事情办完了，那句话说得对不对，能复盘到半夜。 被夸一句，第一反应是不敢认，觉得对方只是客气。 一处没做好，就把自己整个人否掉。 这些不是想太多，它有来处💭 她常做的，是先陪你把来处找出来，再把自我价值感一",
+        "attrs": {
+          "contenteditable": "true",
+          "role": "textbox",
+          "translate": "no",
+          "class": "tiptap ProseMirror",
+          "tabindex": "0"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 320,
+          "width": 816,
+          "height": 839
+        }
+      },
+      {
+        "text": "#长期内耗[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"type\":\"topic\",\"link\":\"\",\"record_count\":0,\"record_unit\":\"\",\"record_emoji\":\"\",\"current_score\":0,\"biz_id\":\"\",\"id\":\"6436b3ac00000000280115a7\",\"name\":\"长期内耗\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1572,
+          "width": 70,
+          "height": 18
+        }
+      },
+      {
+        "text": "#自我价值感[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"name\":\"自我价值感\",\"link\":\"\",\"record_count\":0,\"biz_id\":\"\",\"id\":\"6182bf86000000000101dc1c\",\"type\":\"topic\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 815,
+          "y": 1572,
+          "width": 85,
+          "height": 18
+        }
+      },
+      {
+        "text": "#完美主义[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"biz_id\":\"\",\"name\":\"完美主义\",\"type\":\"topic\",\"link\":\"\",\"id\":\"5ccbc4be000000000e020ff2\",\"record_emoji\":\"\",\"record_count\":0,\"record_unit\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 904,
+          "y": 1572,
+          "width": 70,
+          "height": 18
+        }
+      },
+      {
+        "text": "#社交焦虑[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_count\":0,\"record_unit\":\"\",\"current_score\":0,\"biz_id\":\"\",\"id\":\"5cfc694c000000000d02e135\",\"record_emoji\":\"\",\"name\":\"社交焦虑\",\"type\":\"topic\",\"link\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 978,
+          "y": 1572,
+          "width": 70,
+          "height": 18
+        }
+      },
+      {
+        "text": "#情绪自救[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"biz_id\":\"\",\"name\":\"情绪自救\",\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"id\":\"5d05cbc0000000000f001d11\",\"type\":\"topic\",\"record_unit\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1052,
+          "y": 1572,
+          "width": 70,
+          "height": 18
+        }
+      },
+      {
+        "text": "#心理咨询师[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"record_count\":0,\"biz_id\":\"\",\"id\":\"5c017a080e4c820001c29821\",\"name\":\"心理咨询师\",\"type\":\"topic\",\"link\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1126,
+          "y": 1572,
+          "width": 85,
+          "height": 18
+        }
+      },
+      {
+        "text": "#身边的心理学[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"id\":\"6555302f0000000014028cfb\",\"type\":\"topic\",\"link\":\"\",\"record_unit\":\"\",\"biz_id\":\"\",\"name\":\"身边的心理学\",\"record_emoji\":\"\",\"record_count\":0,\"current_score\":0}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1220,
+          "y": 1572,
+          "width": 100,
+          "height": 18
+        }
+      },
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "has-tips"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 1455,
+          "width": 56,
+          "height": 17
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text has-tips"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1198,
+          "y": 1741,
+          "width": 56,
+          "height": 21
+        }
+      },
+      {
+        "text": "#长期内耗",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"type\":\"topic\",\"link\":\"\",\"record_count\":0,\"record_unit\":\"\",\"record_emoji\":\"\",\"current_score\":0,\"biz_id\":\"\",\"id\":\"6436b3ac00000000280115a7\",\"name\":\"长期内耗\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1665,
+          "y": 2630,
+          "width": 73,
+          "height": 19
+        }
+      },
+      {
+        "text": "#自我价值感",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"name\":\"自我价值感\",\"link\":\"\",\"record_count\":0,\"biz_id\":\"\",\"id\":\"6182bf86000000000101dc1c\",\"type\":\"topic\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1742,
+          "y": 2630,
+          "width": 89,
+          "height": 19
+        }
+      },
+      {
+        "text": "#完美主义",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"biz_id\":\"\",\"name\":\"完美主义\",\"type\":\"topic\",\"link\":\"\",\"id\":\"5ccbc4be000000000e020ff2\",\"record_emoji\":\"\",\"record_count\":0,\"record_unit\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1836,
+          "y": 2630,
+          "width": 73,
+          "height": 19
+        }
+      },
+      {
+        "text": "#社交焦虑",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_count\":0,\"record_unit\":\"\",\"current_score\":0,\"biz_id\":\"\",\"id\":\"5cfc694c000000000d02e135\",\"record_emoji\":\"\",\"name\":\"社交焦虑\",\"type\":\"topic\",\"link\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1914,
+          "y": 2630,
+          "width": 73,
+          "height": 19
+        }
+      },
+      {
+        "text": "#情绪自救",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"biz_id\":\"\",\"name\":\"情绪自救\",\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"id\":\"5d05cbc0000000000f001d11\",\"type\":\"topic\",\"record_unit\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1665,
+          "y": 2630,
+          "width": 352,
+          "height": 45
+        }
+      },
+      {
+        "text": "#心理咨询师",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"record_count\":0,\"biz_id\":\"\",\"id\":\"5c017a080e4c820001c29821\",\"name\":\"心理咨询师\",\"type\":\"topic\",\"link\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1717,
+          "y": 2656,
+          "width": 89,
+          "height": 19
+        }
+      },
+      {
+        "text": "#身边的心理学",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"id\":\"6555302f0000000014028cfb\",\"type\":\"topic\",\"link\":\"\",\"record_unit\":\"\",\"biz_id\":\"\",\"name\":\"身边的心理学\",\"record_emoji\":\"\",\"record_count\":0,\"current_score\":0}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1816,
+          "y": 2656,
+          "width": 105,
+          "height": 19
+        }
+      }
+    ],
+    "[class*='hint']": [],
+    "[class*='limit']": []
+  },
+  "extra": {
+    "close_btn_after_hover": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1173,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1263,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1353,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      }
+    ],
+    "modal_overlap": {
+      "modal": [
+        {
+          "text": "选择笔记 我的笔记 他人笔记 引用的笔记是我们小助手的联系方式 NBDpsy-好好生活 6 心理咨询师-李明聪，陪你练习靠近与沟通 NBDpsy-好好生活 6 心理咨询师-于施文，帮高敏感的你降低内耗 NBDpsy-好好生活 7 心理咨询师-彭旱雨，陪你梳理原生家庭牵绊 NBDpsy-好好生活 6 心理咨询师-黄安麟，帮你在依恋里稳下来 NBDpsy-好好生活 5 心理咨询师-李宇，陪你看懂童年创",
+          "attrs": {
+            "class": "d-modal select-note-modal",
+            "style": "width: 802px; z-index: 300;"
+          },
+          "visible": true,
+          "rect": {
+            "x": 879,
+            "y": 80,
+            "width": 802,
+            "height": 620
+          }
+        }
+      ],
+      "img_area": [
+        {
+          "text": "1 2 3 4 5 6",
+          "attrs": {
+            "data-v-a39dfc98": "",
+            "class": "img-upload-area"
+          },
+          "visible": true,
+          "rect": {
+            "x": 742,
+            "y": -815,
+            "width": 816,
+            "height": 100
+          }
+        }
+      ]
+    }
+  },
+  "api": [],
+  "note": "真号只读采集;xsec_token 已抹除。**不要手改本文件** —— 它是证据,改它去迁就代码等于自欺,要更新只能重新采集。"
+}
