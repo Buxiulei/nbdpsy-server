@@ -1192,3 +1192,35 @@ def test_verify_after_submit_still_catches_real_failure(monkeypatch, wired):
 
     assert result["status"] != "done"
     assert result["applied"]["quote"] is False
+
+
+# ---------------- 合集已选态识别(2026-08-04 P1-1 翻案) ----------------
+#
+# 运营建合集时把笔记选了进去 → 页面显示已选展示条,「加入合集」按钮本来就不渲染。
+# 旧代码报 entry_not_found,把「已是目标态」误报成失败,还被归因成"账号玄学"
+# (两号复现两号正常——其实是笔记在不在合集里的差别)。
+
+
+def test_collection_already_chosen_same_target_is_skipped(monkeypatch, wired):
+    """已在目标合集里 → skipped(与活动「已关联绝不点」同一纪律),一次点击都不发生。"""
+    editor = Editor(collection="咨询师简介")
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, collection_id="c-1", collection_name="咨询师简介")
+
+    assert result["status"] == "done"
+    assert result["applied"]["collection"] is True   # skipped=平台已是目标态,回读也过
+    assert "打开合集弹层" not in [r for r, _t in wired[0].clicks]
+
+
+def test_collection_chosen_different_target_refuses(monkeypatch, wired):
+    """已在**别的**合集里 → 明确报错,绝不自动换(换=先移出,移除是红线)。"""
+    editor = Editor(collection="另一个合集")
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, collection_id="c-1", collection_name="咨询师简介")
+
+    reason = result["failed"][0]["reason"]
+    assert "collection_already_in_another" in reason
+    assert "另一个合集" in reason
+    assert "打开合集弹层" not in [r for r, _t in wired[0].clicks]

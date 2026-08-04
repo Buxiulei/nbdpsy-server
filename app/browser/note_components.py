@@ -608,13 +608,50 @@ def _activity_linked(page, activity_name: str) -> bool:
 
 
 def _set_collection(
-    page, human: SyncHumanActions, responses: ComponentResponses, collection_id: str
+    page, human: SyncHumanActions, responses: ComponentResponses, collection_id: str,
+    collection_name: str | None = None,
 ) -> Dict[str, Any]:
     """加入合集:点入口 → 等弹层 → 按名字点选 → **当场读回**是否真加上了。
 
     合集名由 ``list_v2`` 响应里的 id→name 映射得到(调用方传的是 id);映射拿不到就
     报错**不点**——按文案点一个不知道是不是它的条目,等于瞎猜。
     """
+    # **先认已选态**(2026-08-04 P1-1 翻案):笔记已在某个合集里时,页面显示的是已选
+    # 展示条(_COLLECTION_CHOSEN,如「咨询师简介」),「加入合集」按钮**本来就不渲染**。
+    # 旧代码直接报 entry_not_found,把「已是目标态」误报成失败——运营建合集时把 9 篇
+    # 选了进去,批量挂载全数撞上,还被归因成"账号玄学"。语义对齐活动的纪律:
+    # 已选同一个合集 → skipped(绝不重复操作);已选**别的**合集 → 明确报错——
+    # 换合集 = 先移出旧的(移除是「绝不点」红线 .close-icon),那是业务决策不是本函数
+    # 能替用户做的。
+    chosen = read_collection_label(page)
+    if chosen and _COLLECTION_EMPTY_TEXT not in chosen:
+        # 已选态的 id→名:优先用调用方随 payload 传的 collection_name(他们从
+        # GET collections 本就有映射);其次 list_v2 被动缓存 —— 但注意 **list_v2 只在
+        # 弹层打开时才发**(设计 2.9),已选态开不了弹层,缓存多半是空的,所以 name
+        # 才是主路径。两样都没有 = 无法确认已选的是不是目标,如实报出让调用方判断。
+        target_name = _norm(collection_name or "")
+        if not target_name:
+            catalog0 = parse_collections(responses.latest(_COLLECTION_API_MARK))
+            target0 = next((c for c in catalog0 if c["id"] == str(collection_id)), None)
+            target_name = _norm(target0["name"]) if target0 else ""
+        if target_name and target_name in _norm(chosen):
+            return {"status": "skipped", "collection_id": str(collection_id),
+                    "name": target_name, "reason": "该笔记本就在这个合集里"}
+        if target_name:
+            return {
+                "status": "error",
+                "reason": f"collection_already_in_another: 该笔记已在合集「{_norm(chosen)[:20]}」"
+                          f"里,不是目标「{target_name}」;换合集需先移出旧的,"
+                          "那是移除类操作本函数绝不代做",
+            }
+        return {
+            "status": "error",
+            "reason": f"collection_chosen_unverifiable: 该笔记已在合集「{_norm(chosen)[:20]}」里,"
+                      f"但无法确认是否即目标 id={collection_id}(已选态开不了弹层拿不到 id→名;"
+                      "请求里带 collection_name 即可确认)。若名字就是你要的合集,视为已挂,"
+                      "可用 note-component-reads 复核",
+        }
+
     btn = page.query_selector(_COLLECTION_BUTTON)
     if btn is None:
         return {"status": "error", "reason": "collection_entry_not_found: 页面没有合集入口"}
@@ -1151,6 +1188,7 @@ def apply_components(
     responses: ComponentResponses,
     *,
     collection_id: Optional[str] = None,
+    collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
     activity_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -1164,7 +1202,8 @@ def apply_components(
     丢弃(设计 2.6),那要靠提交后重进页面回读才发现。
     """
     steps = (
-        ("collection", collection_id, lambda cid: _set_collection(page, human, responses, cid)),
+        ("collection", collection_id, lambda cid: _set_collection(
+            page, human, responses, cid, collection_name=collection_name)),
         ("quote", quoted_note_id, lambda nid: _set_quote(page, human, responses, nid)),
         ("activity", activity_id, lambda aid: _set_activity(page, human, responses, aid)),
     )
@@ -1448,6 +1487,7 @@ def set_note_components(
     note_id: str,
     *,
     collection_id: Optional[str] = None,
+    collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
     activity_id: Optional[str] = None,
     title: Optional[str] = None,
@@ -1543,6 +1583,7 @@ def set_note_components(
         outcomes = apply_components(
             page, human, responses,
             collection_id=collection_id,
+            collection_name=collection_name,
             quoted_note_id=quoted_note_id,
             activity_id=activity_id,
         )

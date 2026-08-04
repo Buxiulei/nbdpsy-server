@@ -290,9 +290,9 @@ async def test_pure_component_request_skips_ledger_precheck(tmp_path, monkeypatc
             headers=bearer(ADMIN_KEY),
         )
         assert r.status_code == 202, r.text
-        # payload 与老版本逐字节一致:不多出编辑五键
+        # payload 不多出编辑五键(collection_name 是 2026-08-04 起的辅助键,恒在)
         assert await _payload_of(r.json()["job_id"]) == {
-            "note_id": "台账里没有这篇", "collection_id": "c1",
+            "note_id": "台账里没有这篇", "collection_id": "c1", "collection_name": None,
             "quoted_note_id": None, "activity_id": None, "related_counselor": None,
         }
 

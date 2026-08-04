@@ -290,6 +290,13 @@ class NoteComponentsRequest(BaseModel):
         min_length=1, max_length=64, description="要编辑的笔记平台 id(深链定位)"
     )
     collection_id: str | None = Field(default=None, max_length=64)
+    collection_name: str | None = Field(
+        default=None,
+        description="合集名(可选,**辅助字段**):笔记已在某合集里时,「加入合集」按钮不渲染,"
+                    "浏览器层只能靠名字确认已选的就是目标——带上它,已在目标合集会得 "
+                    "skipped(视为成功)而非报错;不带且无法确认时报 "
+                    "collection_chosen_unverifiable。单独出现不构成组件请求",
+    )
     quoted_note_id: str | None = Field(default=None, max_length=64)
     activity_id: str | None = Field(default=None, max_length=64)
     related_counselor: str | None = Field(
@@ -532,6 +539,7 @@ async def start_note_components_endpoint(
         quoted_note_id,
         payload.activity_id,
         payload.related_counselor,
+        collection_name=payload.collection_name,
         edits=edits,
     )
     return {"job_id": job_id, "status": "queued"}

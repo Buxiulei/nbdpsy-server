@@ -57,6 +57,7 @@ def start_components(
     activity_id: str | None,
     related_counselor: str | None = None,
     edits: dict | None = None,
+    collection_name: str | None = None,
 ) -> str:
     """REST 触发一次三组件设置 / 笔记编辑;登记 browser_jobs 台账,返回轮询 id。
 
@@ -70,6 +71,7 @@ def start_components(
     payload = {
         "note_id": note_id,
         "collection_id": collection_id,
+        "collection_name": collection_name,
         "quoted_note_id": quoted_note_id,
         "activity_id": activity_id,
         "related_counselor": related_counselor,
@@ -102,6 +104,14 @@ async def execute(account_id: int, payload: dict) -> dict:
         field: (str(payload.get(field)).strip() if payload.get(field) else None)
         for field in COMPONENT_FIELDS
     }
+    # collection_name 是**辅助**字段(已选态下确认"已选的就是目标"用,见 _set_collection
+    # 2026-08-04 注释),不进 COMPONENT_FIELDS —— 它单独出现不构成一次组件请求,
+    # 也不参与"至少给一个"的判定。只在真的请求了 collection_id 时才透传。
+    collection_name = (
+        str(payload.get("collection_name")).strip()
+        if payload.get("collection_name") and components.get("collection_id")
+        else None
+    )
     # 编辑字段**同名直传**给浏览器层(``set_note_components`` 的可选参数与这里同名)。
     # 用 ``is not None`` 而不是真值判断:``title=""`` 是"清空标题"这一合法意图(设计 3.1),
     # 真值判断会把它当成"没请求"静默丢掉。纯组件 payload 不含这些键 → ``edits`` 为空,
@@ -127,7 +137,8 @@ async def execute(account_id: int, payload: dict) -> dict:
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队。
             async with browser_slot():
                 result = await asyncio.to_thread(
-                    _apply_sync, account_id, cookies, note_id, components, edits
+                    _apply_sync, account_id, cookies, note_id, components, edits,
+                    collection_name,
                 )
         # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
         return await _sync_ledger(account_id, note_id, result)
@@ -148,6 +159,7 @@ def _apply_sync(
     note_id: str,
     components: dict,
     edits: dict | None = None,
+    collection_name: str | None = None,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
@@ -160,7 +172,8 @@ def _apply_sync(
         if not start.get("success"):
             raise NoteComponentsError(f"browser_start_failed: {start.get('error')}")
         return set_note_components(
-            client.page, account_id, note_id, **components, **(edits or {})
+            client.page, account_id, note_id, **components,
+            collection_name=collection_name, **(edits or {})
         )
     finally:
         client.stop()

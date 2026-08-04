@@ -152,7 +152,7 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
         # related_counselor 是推导引用笔记的由来,没传就是 None;显式给了 quoted_note_id
         # 时推导根本不跑,登记的就是调用方给的那个 id。
         assert payload == {
-            "note_id": "6a4ce556", "collection_id": "c1",
+            "note_id": "6a4ce556", "collection_id": "c1", "collection_name": None,
             "quoted_note_id": "n-quote", "activity_id": "43561",
             "related_counselor": None,
         }
