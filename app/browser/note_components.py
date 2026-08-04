@@ -545,6 +545,51 @@ def _find_activity_card(page, activity_name: str):
     return None
 
 
+def read_components_snapshot(page, account_id: int, note_id: str) -> Dict[str, Any]:
+    """**只读**打开更新页,读回该笔记当前的组件状态快照;零点击零修改。
+
+    为什么要有它(2026-08-04 运营 P0-1):引用与合集在正文里没有任何痕迹,调用方除了
+    人工开 App 逐条看**没有任何程序化验证手段**;而台账 published_notes 压根没有
+    quoted_note_id / collection_id 列(运营误读的是 publish_jobs 的请求参数列)。
+    8 月计划 360 篇每篇都要挂引用+合集,必须能程序化自证。
+
+    读的都是本模块既有的只读 helper,与 set_note_components 的回读同一套口径:
+
+    - ``quote_text`` 原文 + ``quote_set`` 判读(空态文案「引用笔记」= 未设置;
+      已设置时平台显示「引用 @作者 的笔记」,**不含被引笔记标题**,故只能判有无、
+      判不了"引的是不是那一篇"——那由设置时的选卡阶段保证);
+    - ``collection_label`` 原文 + ``collection_set`` 判读(空态「选择合集」)+
+      ``collection_entry_present``(页面有没有「加入合集」入口——2026-08-04 起两个
+      账号实测入口消失,这个布尔就是 P1-1 的定位器);
+    - ``topics``:正文里的话题实体(``#xx[话题]#``),活动是否生效也可由此侧写;
+    - ``image_count`` / ``permission`` / ``title`` / ``body_head``。
+    """
+    open_update_page(page, account_id, note_id)
+    quote_text = read_quote_text(page)
+    collection_label = read_collection_label(page)
+    body = None
+    try:
+        body = read_body_text(page)
+    except Exception as exc:  # noqa: BLE001 — 单项读不出不拖垮整个快照
+        logger.warning(f"[note_components] 快照读正文失败(留空): {exc}")
+    return {
+        "note_id": note_id,
+        "title": read_note_title(page),
+        "permission": read_permission_label(page),
+        "quote_text": quote_text,
+        "quote_set": bool(_norm(quote_text)) and _norm(quote_text) != _QUOTE_EMPTY_TEXT,
+        "collection_label": collection_label,
+        "collection_set": bool(_norm(collection_label or ""))
+        and _COLLECTION_EMPTY_TEXT not in (collection_label or ""),
+        "collection_entry_present": page.query_selector(_COLLECTION_BUTTON) is not None,
+        "topics": extract_topics(body),
+        "image_count": len(page.query_selector_all(
+            ".img-upload-area .img-container"
+        )),
+        "body_head": _norm(body or "")[:80],
+    }
+
+
 def read_activity_action_text(page, activity_name: str) -> Optional[str]:
     """该活动卡上按钮的当前文案(「关联」/「取消关联」);卡或按钮找不到返回 None。"""
     card = _find_activity_card(page, activity_name)

@@ -378,6 +378,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         return lambda account_id, payload: interaction_backfill.execute(
             account_id, payload
         )
+    if kind == "note_components_read":
+        from app.services import note_components_read
+
+        return lambda account_id, payload: note_components_read.execute(account_id, payload)
     if kind == "note_visibility":
         from app.services import note_visibility
 
