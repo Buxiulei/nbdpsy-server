@@ -1,4 +1,11 @@
-"""发布后评论互动:发布成功钩子登记延时评论任务(kind=``note_comment_task``)。
+"""发布后评论互动(**已从自动管线摘除**):延时评论任务登记(kind=``note_comment_task``)。
+
+**2026-08-04 起发布钩子不再调用本模块**(运营裁定:自动互动只做点赞+收藏)——
+``schedule_note_comments`` 保留为可手工/程序显式调用的能力,执行契约
+``note_comment_task`` 也保留(account_worker 仍认历史行与显式登记的行)。
+手工单篇评论走 ``note-comments`` REST(``app.services.note_comment``),不受影响。
+
+以下为原设计文档(登记规则仍有效,只是不再被发布钩子自动触发):
 
 话术池与分配规则见 ``app.services.comment_phrases``(《评论互动话术池-v5》的落地);
 浏览器动作与执行契约**完全复用**已真号验证过的 ``app.services.note_comment.execute``

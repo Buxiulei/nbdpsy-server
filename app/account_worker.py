@@ -200,10 +200,8 @@ def _apply_publish_decision(
             # 矩阵互动:给矩阵内其余账号登记窗口内随机时刻的互动任务(幂等 + 绝不抛错阻断)。
             from app.services.matrix_interact import schedule_matrix_interact
             schedule_matrix_interact(db_path, job_id)
-            # 发布后评论:所属账号一条预约引导(最先发)+ 各矩阵号一条本号定位的补充,
-            # 排期散在窗口内(幂等 + 绝不抛错阻断)。
-            from app.services.note_comment_task import schedule_note_comments
-            schedule_note_comments(db_path, job_id)
+            # 发布后自动评论已摘除(2026-08-04 运营裁定:自动互动只点赞+收藏)——
+            # schedule_note_comments 保留为模块能力,手工评论走 note-comments REST。
             # 发布笔记永久台账:T0 当场落行(纯 DB,内容侧字段全写死),再登记 T1 同步去
             # 补 note_id。**顺序不能颠倒**——台账行必须先于同步存在,否则同步回来的数据
             # 没有落点。两步都幂等 + 绝不抛错阻断;笔记进列表有延迟,T1 补不到留 pending_id

@@ -769,3 +769,32 @@ def test_publish_success_persists_applied_echo(wdb, monkeypatch):
     echo = _json.loads(raw)
     assert echo["topics_applied"] == []
     assert echo["topics_failed"][0]["reason"] == "content_box_focus_failed"
+
+
+def test_publish_success_does_not_schedule_comments(wdb, monkeypatch):
+    """发布成功**不再**排自动评论(2026-08-04 运营裁定:自动互动只点赞+收藏)。
+
+    schedule_note_comments 保留为模块能力(执行契约 note_comment_task 也要认历史行),
+    但发布钩子不再调它;矩阵互动(点赞+收藏)钩子照常。本测锁住"评论步已从自动管线
+    摘除",防止日后有人看到模块还在就把钩子接回去。
+    """
+    db_path, engine = wdb
+    account_id = _make_account(engine)
+    job_id = _make_job(engine, account_id)
+    _patch_publish_once(monkeypatch, PublishResult(success=True, note_url="https://xhs/10"))
+
+    called = {"comments": False, "interact": False}
+    monkeypatch.setattr(
+        "app.services.note_comment_task.schedule_note_comments",
+        lambda dbp, jid: called.__setitem__("comments", True) or [],
+    )
+    monkeypatch.setattr(
+        "app.services.matrix_interact.schedule_matrix_interact",
+        lambda dbp, jid: called.__setitem__("interact", True) or [],
+    )
+
+    aw.run_publish_job(db_path, account_id, job_id)
+
+    assert _get_job(engine, job_id).status == "published"
+    assert called["interact"] is True    # 点赞+收藏钩子照常
+    assert called["comments"] is False   # 评论钩子已摘除
