@@ -105,7 +105,9 @@ MANIFEST_ENTRIES = [
             "account_id": "path,int",
             "note_id": "body,str(要编辑的笔记平台 id,**必填**,深链定位)",
             "collection_id": "body,str|None(加入哪个合集,取自 GET /collections)",
-            "quoted_note_id": "body,str|None(引用哪篇笔记,只能引用**本号自己**的笔记;"
+            "quoted_note_id": "body,str|None(引用哪篇笔记;本号笔记走「我的笔记」,"
+                              "他号笔记自动走「他人笔记」tab 按 note_id 检索(显式跨账号"
+                              "引用可行,如接待员联系方式那篇——检索不到会如实报错拒引);"
                               "**优先级高于 related_counselor**)",
             "activity_id": "body,str|None(关联哪个活动,取自 GET /activities)",
             "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
