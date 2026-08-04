@@ -288,7 +288,8 @@ async def test_rename_failure_only_collapses_that_slot(tmp_path, monkeypatch):
 
     monkeypatch.setattr(oi.settings, "DATA_DIR", str(tmp_path))
 
-    async def fake_batch(self, prompts, *, anchor_path=None, save_prefix="p"):
+    async def fake_batch(self, prompts, *, anchor_path=None, save_prefix="p",
+                         aspect_ratio="3:4"):
         out = []
         for i, _ in enumerate(prompts):
             p = tmp_path / f"raw{i}.png"
@@ -319,3 +320,32 @@ async def test_rename_failure_only_collapses_that_slot(tmp_path, monkeypatch):
     assert res["urls"][0] and res["urls"][2], "其余页照常交付"
     assert res["urls"][1] == "" and "改名失败" in res["errors"][1], "只塌第 2 位"
     assert res["orig_urls"][1], "原图仍可取"
+
+
+def test_aspect_ratio_reaches_provider(tmp_path, monkeypatch):
+    """公众号配图要横版：aspect_ratio 必须原样透到 provider，缺省回落 3:4。
+
+    这条锁死的是「端点 → start_images_job → payload → execute → provider」整条
+    透传链。链上任一处漏掉该键，出图就会静默回落成竖版 1024x1536——公众号封面
+    拿到竖图不会报错，只会版面全毁，是最难在事后发现的一类回归。
+    """
+    seen: dict = {}
+
+    class FakeProvider:
+        def __init__(self, save_dir=None):
+            pass
+
+        async def generate_batch(self, prompts, *, anchor_path=None,
+                                 save_prefix="p", aspect_ratio="3:4"):
+            seen["aspect_ratio"] = aspect_ratio
+            return []
+
+    monkeypatch.setattr(op_images, "OpenAIImageProvider", FakeProvider)
+    monkeypatch.setattr(op_images, "_uploads_root", lambda: tmp_path)
+
+    asyncio.run(op_images.execute({"prompts": ["p1"], "aspect_ratio": "16:9"}))
+    assert seen["aspect_ratio"] == "16:9", "16:9 必须透到 provider，否则公众号拿到竖图"
+
+    seen.clear()
+    asyncio.run(op_images.execute({"prompts": ["p1"]}))  # 老台账无该键
+    assert seen["aspect_ratio"] == "3:4", "缺省必须回落 3:4，保小红书轮播不变"

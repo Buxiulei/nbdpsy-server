@@ -24,7 +24,8 @@ MANIFEST_ENTRIES = [
         "summary": "异步触发 gpt-image-2 锚点法一致性批量生图(含去水印后处理)",
         "admin_only": False,
         "params": {"prompts": "body,list[str](每页绘图提示词,顺序即页序,1-100 条)",
-                   "anchor_url": "body,str|None(已确认 P1 的 /uploads 直链,跨篇一致性锚点)"},
+                   "anchor_url": "body,str|None(已确认 P1 的 /uploads 直链,跨篇一致性锚点)",
+                   "aspect_ratio": "body,str(默认 3:4 竖版;公众号传 16:9 出横版 1536x1024)"},
         "returns": '{"job_id": int, "session_id": str}',
         "errors": "400=prompts 为空/超限",
         "notes": "202 异步契约:拿 job_id+session_id 后每 10s 轮询 GET "
@@ -59,6 +60,10 @@ class ConsistentImagesRequest(BaseModel):
     # 上限 99:产物按页序落 01.png..99.png(/uploads 免鉴权路由白名单为两位数字名)
     prompts: list[str] = Field(min_length=1, max_length=99)
     anchor_url: str | None = Field(default=None, max_length=2000)
+    # 出图宽高比。gpt-image-2 只有三种物理尺寸,provider 内按此归一:竖版类
+    # (3:4/4:5/2:3/9:16)→1024x1536、方版 1:1→1024x1024、横版类(4:3/3:2/16:9)→1536x1024。
+    # 小红书轮播用默认 3:4;公众号封面与正文插图传 16:9(横版)。缺省保持 3:4 向后兼容。
+    aspect_ratio: str = Field(default="3:4", max_length=16)
 
 
 @router.post("/api/op/consistent-images", status_code=202)
@@ -69,7 +74,9 @@ async def start_consistent_images_endpoint(payload: ConsistentImagesRequest) -> 
     prompts = [str(p).strip() for p in payload.prompts if str(p).strip()]
     if not prompts:
         raise ValueError("prompts 为空(全部为空白串)")
-    job_id, session_id = op_images.start_images_job(prompts, payload.anchor_url)
+    job_id, session_id = op_images.start_images_job(
+        prompts, payload.anchor_url, aspect_ratio=payload.aspect_ratio
+    )
     return {"job_id": job_id, "session_id": session_id}
 
 

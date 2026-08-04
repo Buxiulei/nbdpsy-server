@@ -75,12 +75,13 @@ def resolve_anchor_path(anchor_url: str) -> Optional[str]:
 
 
 def start_images_job(
-    prompts: List[str], anchor_url: Optional[str] = None
+    prompts: List[str], anchor_url: Optional[str] = None, *, aspect_ratio: str = "3:4"
 ) -> tuple[int, str]:
     """登记 browser_jobs 台账并(all 模式)派进程内执行,立即返回 (job_id, session_id)。"""
     job_id = 1  # 对外 ext job_id 恒 1(session_id 全局唯一,复合主键不撞)
     session_id = uuid.uuid4().hex
-    payload = {"prompts": list(prompts), "anchor_url": anchor_url}
+    payload = {"prompts": list(prompts), "anchor_url": anchor_url,
+               "aspect_ratio": aspect_ratio}
     ledger_id = browser_jobs_repo.enqueue_from_request(
         "op_images", payload, account_id=None, job_id=_ledger_id(session_id, job_id)
     )
@@ -115,6 +116,8 @@ async def execute(payload: dict) -> dict:
     """
     prompts: List[str] = (payload or {}).get("prompts") or []
     anchor_url: Optional[str] = (payload or {}).get("anchor_url")
+    # 出图比例:老台账(改动前入队的 job)没有该键 → 回落 3:4,与改动前行为一致。
+    aspect_ratio: str = (payload or {}).get("aspect_ratio") or "3:4"
     try:
         # 外部锚点先解析;解析不到按契约整批报错(done + 全失败位),不静默降级。
         anchor_path: Optional[str] = None
@@ -134,7 +137,8 @@ async def execute(payload: dict) -> dict:
         provider = OpenAIImageProvider(save_dir=str(out_dir))
 
         results = await provider.generate_batch(
-            prompts, anchor_path=anchor_path, save_prefix="p")
+            prompts, anchor_path=anchor_path, save_prefix="p",
+            aspect_ratio=aspect_ratio)
 
         # 逐张去水印(非整数缩小 0.855 + PNG,失败即该页失败,不拿带水印图冒充交付),
         # 终名改页序 NN.ext 作默认交付;去水印前的原图另存 NN.orig.ext 供提取——
