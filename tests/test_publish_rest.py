@@ -696,3 +696,36 @@ def test_job_view_echoes_applied(monkeypatch):
                      created_at=datetime.utcnow(), result_json=None)
     v2 = pr._job_view(old)
     assert "applied" not in v2  # 没记录 ≠ 什么都没应用,不下发免得误读
+
+
+async def test_publish_promo_title_still_derives_receptionist(tmp_path, monkeypatch):
+    """发布路径回归锁(2026-08-04 P1-2 收口时定):推介形态标题 + 无 related_counselor →
+    仍隐式推导出「接待员联系方式」笔记。
+
+    编辑路径(note-components)已收口为仅显式意图才推导;发布路径语义是"按业务规则
+    产出完整笔记",隐式推导是设计内业务,**保持不变**——本测锁住这条边界,防止日后
+    有人"顺手统一"把发布路径也收口掉。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "RECEPTIONIST_CONTACT_NOTE_ID", "n-receptionist")
+        acc = await seed_account("推介号", "uPromo", _COOKIES)
+        op_key = "op-publish-promo-01"
+        await _make_operator_with_access(acc, key=op_key)
+
+        r = await c.post(
+            "/api/publish-jobs",
+            json={
+                "account_id": acc,
+                "title": "心理咨询师-李宇，陪你读懂内耗",
+                "content": "C",
+                "images": ["https://cdn/a.png"],
+            },
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 202, r.text
+
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, r.json()["job_id"])
+        assert job.quoted_note_id == "n-receptionist"

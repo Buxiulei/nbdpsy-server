@@ -1224,3 +1224,22 @@ def test_collection_chosen_different_target_refuses(monkeypatch, wired):
     assert "collection_already_in_another" in reason
     assert "另一个合集" in reason
     assert "打开合集弹层" not in [r for r, _t in wired[0].clicks]
+
+
+def test_other_tab_empty_search_reason_is_actionable(monkeypatch, wired):
+    """检索返回空 id(got_id='')时,原因码升级为可操作提示(2026-08-04 P1-2 缺陷 b)。
+
+    b90dfb4f 实录:跨账号引接待员笔记,检索接口返回 note_id='',运营只看到
+    "返回的是 note_id=''"没法行动。空 id 与"拿错 id"是两种处境:前者要复现取证
+    (响应竞态/笔记不可检索),后者是消费错了响应——报错必须区分并给出下一步。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=())
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE)
+
+    reason = result["failed"][0]["reason"]
+    assert "quote_other_id_mismatch" in reason          # 前缀不变,运营侧按前缀匹配
+    assert "检索返回空" in reason                        # 空 id 单独定性
+    assert "job_id" in reason                            # 指路:带 job_id 复现取证
+    assert "显式传本账号" in reason                      # 指路:短期规避

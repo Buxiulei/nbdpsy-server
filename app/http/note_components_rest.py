@@ -146,18 +146,19 @@ MANIFEST_ENTRIES = [
                  "都不点),提交后若发现被改会自动改回并在结果里告警(permission_* 字段);"
                  "④ **部分生效是常态**——私密笔记的合集绑定会被平台静默丢弃(照返成功),"
                  "所以 done 只在全部回读确认后才给,别拿 202 或 'no error' 当成功凭据。"
-                 "**引用哪篇笔记可以不用自己算**:不传 quoted_note_id 时按四条规则自动推导"
-                 "(标题从台账现查):① 这篇标题形如「X咨询师-姓名，…」= 它本身就是咨询师推介"
-                 "笔记 → 引用「接待员联系方式」那篇(**这条最先判**,所以推介笔记不会引用自己);"
-                 "② 传了 related_counselor → 引用**本账号**该咨询师的公开推介笔记;③ 标题里"
-                 "提到某位已知咨询师 → 同上;④ 都不满足 → 不引用。**只引用 permission_code=0 "
-                 "的公开笔记,推不出来一律留空绝不猜**。⚠️ **只会引用本账号自己的咨询师推介"
-                 "笔记**:每个账号背后是不同运营,从该账号来的客户算其 KPI,跨账号引用等于抢"
-                 "同事绩效,故本账号没有该咨询师的公开推介笔记时**留空,绝不跨账号兜底**;唯一"
-                 "例外是接待员联系方式那篇(含二维码有违规风险,集中在单一账号,由服务端配置"
-                 "指定,**未配置时规则①同样留空**)。"
-                 "⚠️ 由此:对一篇咨询师推介笔记只设 collection_id,也会顺带给它加上对接待员"
-                 "笔记的引用——这是业务规则要的,不想要就显式传 quoted_note_id。"
+                 "**引用推导仅在显式引用意图时进行**(2026-08-04 收口):只传 "
+                 "collection_id/activity_id/编辑项时**绝不**顺带推导出引用——本端点对已"
+                 "发布笔记只做被请求的事(发布端点 POST /api/publish-jobs 的隐式推导是"
+                 "另一条语义,保持不变)。传了 related_counselor(且没显式给 quoted_note_id)"
+                 "才推导(标题从台账现查):① 这篇标题形如「X咨询师-姓名，…」= 它本身就是"
+                 "咨询师推介笔记 → 引用「接待员联系方式」那篇(**这条最先判**,所以推介笔记"
+                 "不会引用自己);② 否则引用**本账号**该咨询师的公开推介笔记;③ 推不出 → "
+                 "留空不引用。**只引用 permission_code=0 的公开笔记,推不出来一律留空绝不"
+                 "猜**。⚠️ **只会引用本账号自己的咨询师推介笔记**:每个账号背后是不同运营,"
+                 "从该账号来的客户算其 KPI,跨账号引用等于抢同事绩效,故本账号没有该咨询师"
+                 "的公开推介笔记时**留空,绝不跨账号兜底**;唯一例外是接待员联系方式那篇"
+                 "(含二维码有违规风险,集中在单一账号,由服务端配置指定,**未配置时规则①"
+                 "同样留空**)。"
                  "── 编辑标题/正文/图片(title / content / add_images / "
                  "remove_image_indexes)另有四条必读:"
                  "① **正文替换会丢既有话题实体**——旧正文里的 #xx[话题]# 实体在整体替换后"
@@ -505,13 +506,17 @@ async def start_note_components_endpoint(
             raise NotFoundError(f"账号 {account_id} 不存在")
         if edits is not None:
             await _assert_editable_note(session, account_id, payload.note_id)
-        # 引用哪篇:显式 quoted_note_id 优先;没给才按 related_counselor + **台账里这篇的
-        # 标题**推导(规则见 app/services/counselor_quote.py),推不出来落 None 不引用。
-        quoted_note_id = payload.quoted_note_id or (
-            await counselor_quote.resolve_for_published_note(
+        # 引用哪篇:显式 quoted_note_id 优先;推导**仅在显式给了 related_counselor 时**
+        # 进行(2026-08-04 收口,运营清单 P1-2):编辑路径的语义是"对已发布笔记只做被
+        # 请求的事"——只传 collection_id/activity_id/编辑项时绝不顺带推导出一个引用
+        # (此前规则 3 会给推介笔记自动挂跨账号的接待员引用,运营完全没请求过)。
+        # 发布路径(publish_rest)的隐式推导是"按业务规则产出完整笔记"的设计内业务,
+        # 保持不变——两条路径触发条件刻意不同,别"顺手统一"。
+        quoted_note_id = payload.quoted_note_id
+        if quoted_note_id is None and (payload.related_counselor or "").strip():
+            quoted_note_id = await counselor_quote.resolve_for_published_note(
                 session, account_id, payload.note_id, payload.related_counselor
             )
-        )
     # 推导完还是一个组件都没有(且没给任何编辑项)→ 422。走到这里说明调用方只给了
     # related_counselor,而它没能落到任何一篇公开笔记上(查不到就留空是硬纪律)。此时这次
     # 编辑什么都不会改,却要真提交一次全量覆盖的发布,一样是纯风险零收益,和请求体校验

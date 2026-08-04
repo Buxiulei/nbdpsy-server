@@ -812,6 +812,17 @@ def _set_quote_via_other_tab(
     body = _wait_body(page, responses, _OTHERS_SEARCH_API_MARK, _MODAL_TIMEOUT_S, seen)
     got_id = str(((body or {}).get("data") or {}).get("note_id") or "").strip()
     if got_id != str(quoted_note_id):
+        # 空 id 与"拿错 id"是两种处境,报错分开说(2026-08-04 P1-2 缺陷 b,b90dfb4f 实录):
+        # 空 = 该 id 检索不出结果(笔记被删/私密/平台限制)或消费到了逐字输入中间态的
+        # 空响应(竞态,待复现取证);非空不等 = 消费错了响应。都拒绝,但给运营的下一步不同。
+        if not got_id:
+            return {
+                "status": "error",
+                "reason": f"quote_other_id_mismatch: 他人笔记检索返回空(note_id=''),"
+                          f"id={quoted_note_id!r} 检索不到——可能笔记被删/私密/平台限制,"
+                          f"或检索响应竞态;请带本次 job_id 复现上报以便网络层取证;"
+                          f"短期规避:显式传本账号内的 quoted_note_id 或暂不挂引用",
+            }
         return {
             "status": "error",
             "reason": f"quote_other_id_mismatch: 检索接口返回的是 note_id={got_id!r},"

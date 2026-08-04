@@ -578,3 +578,113 @@ async def test_poll_running_has_no_result_keys(tmp_path, monkeypatch):
 
         assert body["status"] == "running"
         assert "failed" not in body and "result_status" not in body
+
+
+# ---------------- 引用推导触发时机(2026-08-04 收口:仅显式意图才推导) ----------------
+#
+# 背景(运营 08-04 清单 P1-2):只传 collection_id 也会触发标题推导(规则 3),给推介
+# 笔记顺带挂上跨账号的接待员引用,拖着整单一起失败。裁决(fable):编辑路径语义是
+# "对已发布笔记只做被请求的事",推导仅在显式引用意图(related_counselor 非空,或
+# quoted_note_id 显式给出)时进行;发布路径("按业务规则产出完整笔记")保持隐式推导不变。
+
+from app.services import counselor_quote as _cq
+
+
+def _spy_derive(monkeypatch, result=None):
+    """打桩 resolve_for_published_note,记录是否被调用。"""
+    seen = {"called": False}
+
+    async def fake(session, account_id, note_id, related_counselor):
+        seen["called"] = True
+        return result
+
+    monkeypatch.setattr(_cq, "resolve_for_published_note", fake)
+    return seen
+
+
+async def test_collection_only_never_derives_quote(tmp_path, monkeypatch):
+    """只传 collection_id → 完全不进推导,payload 里 quoted_note_id=None。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        spy = _spy_derive(monkeypatch, result="不该被用到")
+        acc = await seed_account("收口甲号", "uNcScope1", _COOKIES)
+        op_key = "op-nc-scope-01"
+        op_id = await make_operator(op_key)
+        await _grant(op_id, acc)
+
+        r = await c.post(
+            f"/api/accounts/{acc}/note-components",
+            json={"note_id": "6a4c0001", "collection_id": "c1"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 202, r.text
+        assert spy["called"] is False
+
+        async with db_module.async_session() as s:
+            row = await s.get(BrowserJob, r.json()["job_id"])
+        assert json.loads(row.payload)["quoted_note_id"] is None
+
+
+async def test_related_counselor_still_triggers_derivation(tmp_path, monkeypatch):
+    """显式传 related_counselor → 推导照跑,产物落 payload。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        spy = _spy_derive(monkeypatch, result="n-derived")
+        acc = await seed_account("收口乙号", "uNcScope2", _COOKIES)
+        op_key = "op-nc-scope-02"
+        op_id = await make_operator(op_key)
+        await _grant(op_id, acc)
+
+        r = await c.post(
+            f"/api/accounts/{acc}/note-components",
+            json={"note_id": "6a4c0002", "related_counselor": "李宇"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 202, r.text
+        assert spy["called"] is True
+
+        async with db_module.async_session() as s:
+            row = await s.get(BrowserJob, r.json()["job_id"])
+        assert json.loads(row.payload)["quoted_note_id"] == "n-derived"
+
+
+async def test_explicit_quoted_note_id_skips_derivation(tmp_path, monkeypatch):
+    """显式 quoted_note_id → 推导不跑(现状回归锁,收口后依然成立)。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        spy = _spy_derive(monkeypatch, result="不该被用到")
+        acc = await seed_account("收口丙号", "uNcScope3", _COOKIES)
+        op_key = "op-nc-scope-03"
+        op_id = await make_operator(op_key)
+        await _grant(op_id, acc)
+
+        r = await c.post(
+            f"/api/accounts/{acc}/note-components",
+            json={"note_id": "6a4c0003", "quoted_note_id": "n-explicit"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 202, r.text
+        assert spy["called"] is False
+
+        async with db_module.async_session() as s:
+            row = await s.get(BrowserJob, r.json()["job_id"])
+        assert json.loads(row.payload)["quoted_note_id"] == "n-explicit"
+
+
+async def test_related_counselor_underivable_still_422(tmp_path, monkeypatch):
+    """只传 related_counselor 且推不出 → 422 语义不变(收口后这一关仍可达)。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _spy_derive(monkeypatch, result=None)
+        acc = await seed_account("收口丁号", "uNcScope4", _COOKIES)
+        op_key = "op-nc-scope-04"
+        op_id = await make_operator(op_key)
+        await _grant(op_id, acc)
+
+        r = await c.post(
+            f"/api/accounts/{acc}/note-components",
+            json={"note_id": "6a4c0004", "related_counselor": "查无此人"},
+            headers=bearer(op_key),
+        )
+        assert r.status_code == 422
+        assert "推导不出" in r.text
