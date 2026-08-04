@@ -22,7 +22,7 @@ from app.browser.browser_gate import browser_slot
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import risk_events
-from app.services.cookie_check import pick_probe_user_id
+from app.services.cookie_check import _run_check_with_watchdog, pick_probe_user_id
 
 # check_login_once 返回 user_info 时回填到账号的字段(与 cookies 工具一致的子集)
 _USER_INFO_FIELDS = ("nickname", "user_id", "red_id", "avatar")
@@ -127,8 +127,10 @@ class CookieChecker:
         # - 套全局浏览器闸:周期巡检的 camoufox 也计入总并发上限(否则绕过闸,"全局"上限被击穿)。
         async with account_locks.get(account_id):
             async with browser_slot():
-                result = await asyncio.to_thread(
-                    sync_client.check_login_once, account_id, cookies, probe_user_id
+                # 与手动检测同一把看门狗(180s 强杀+限时 rejoin):巡检跑在 supervisor
+                # 常驻进程里,裸 to_thread 僵死会无限占着进程内账号锁,同号发布/检测全排队。
+                result = await _run_check_with_watchdog(
+                    account_id, cookies, probe_user_id
                 )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")

@@ -242,3 +242,26 @@ async def test_lifespan_starts_and_stops_checker_when_positive(tmp_path, monkeyp
     assert checker.interval == 42
     assert checker.started is True
     assert checker.stopped is True
+
+
+async def test_check_account_routes_through_watchdog(smk, monkeypatch):
+    """周期巡检的浏览器段必须走 _run_check_with_watchdog(与手动检测同一把看门狗)。
+
+    背景:ac87011 只给手动检测(cookie_check.execute)加了 180s 看门狗;巡检路径
+    (supervisor 进程内直调)同类僵死会无限占着进程内账号锁,同号发布/检测全部排队。
+    本测锁定接线:巡检不再裸 to_thread(check_login_once),而是经同一个看门狗助手。
+    """
+    acc_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
+    called = {"v": False}
+
+    async def fake_watchdog(account_id, cookies, probe_user_id):
+        called["v"] = True
+        return {"status": "error", "user_info": None, "reason": "看门狗桩"}
+
+    monkeypatch.setattr(checker_mod, "_run_check_with_watchdog", fake_watchdog)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    executed = await checker._check_account(acc_id)
+
+    assert executed is True   # error 态也算已检测(不写回,保留原状态)
+    assert called["v"] is True
