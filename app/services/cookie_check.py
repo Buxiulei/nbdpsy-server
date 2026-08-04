@@ -101,8 +101,8 @@ async def execute(account_id: int, payload: dict) -> dict:
         async with account_locks.get(account_id):
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队(仅罩浏览器段,不含写回)。
             async with browser_slot():
-                result = await asyncio.to_thread(
-                    sync_client.check_login_once, account_id, cookies, probe_user_id
+                result = await _run_check_with_watchdog(
+                    account_id, cookies, probe_user_id
                 )
         status = result.get("status", "invalid")
         user_info = result.get("user_info")
@@ -123,6 +123,72 @@ async def execute(account_id: int, payload: dict) -> dict:
     except Exception as exc:  # 兜底:检测异常也要给终态结果,别让轮询方死等
         logger.exception(f"cookie 检测任务异常 account_id={account_id}")
         return {"status": "error", "user_info": None, "reason": f"检测任务异常:{exc}"}
+
+
+# 浏览器段看门狗:正常全链检测(launch+首页+API+个人页+他人主页探测)实测 <90s,
+# 180s 只逮真僵死(camoufox launch 卡死 / driver 死锁),不误杀慢而正常的检测。
+_WATCHDOG_S = 180.0
+# 强杀浏览器后等检测线程归队的上限:阻塞的 playwright 调用在浏览器死掉后应立刻抛错。
+_REJOIN_GRACE_S = 30.0
+
+
+def _kill_profile_browser(account_id: int) -> None:
+    """强杀该账号 profile 的全部 camoufox 进程(看门狗超时专用,同步函数)。"""
+    from app.browser.profile_guard import kill_orphans, profile_dir
+
+    kill_orphans(profile_dir(account_id))
+
+
+async def _run_check_with_watchdog(
+    account_id: int, cookies: list[dict], probe_user_id: str | None
+) -> dict:
+    """跑 check_login_once 并加墙钟看门狗;超时先杀浏览器、限时 rejoin,再返回 error。
+
+    为什么不能裸 ``asyncio.wait_for(to_thread(...))``:超时只取消 await,同步线程还
+    抱着浏览器活着;锁一放,下一个同号任务 SyncClient.start() 里的 kill_orphans 会与
+    残存会话互杀。正确顺序是**先杀浏览器**(让阻塞的 sync 调用抛错、线程尽快返回)→
+    限时等线程归队 → 才把锁还回去。超时结果一律判 error(超时):被强杀线程的迟到
+    结果不可信(浏览器中途被杀),不能拿去写回账号状态——error 语义正好是"基础设施
+    失败,保留账号原值"。
+    """
+    task = asyncio.ensure_future(
+        asyncio.to_thread(
+            sync_client.check_login_once, account_id, cookies, probe_user_id
+        )
+    )
+    try:
+        # shield:超时只取消外层等待,不取消线程 task(to_thread 本就不可取消)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_WATCHDOG_S)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[cookie_check] 检测超过 {_WATCHDOG_S:.0f}s 未返回,强杀浏览器 "
+            f"account_id={account_id}"
+        )
+        try:
+            await asyncio.to_thread(_kill_profile_browser, account_id)
+        except Exception:
+            logger.exception(f"[cookie_check] 强杀浏览器失败 account_id={account_id}")
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_REJOIN_GRACE_S)
+        except asyncio.TimeoutError:
+            # 极端僵死:线程连浏览器被杀都唤不醒(如 driver 启动死锁)。浏览器进程已杀,
+            # 放锁是安全的;线程泄漏记日志观察,不为它把整条检测队列拖死。
+            logger.error(
+                f"[cookie_check] 强杀后检测线程 {_REJOIN_GRACE_S:.0f}s 仍未归队,"
+                f"放弃等待(线程泄漏,浏览器已杀)account_id={account_id}"
+            )
+        except Exception:
+            logger.exception(
+                f"[cookie_check] 检测线程收尾异常(已按超时处理)account_id={account_id}"
+            )
+        return {
+            "status": "error",
+            "user_info": None,
+            "reason": (
+                f"检测超时(>{_WATCHDOG_S:.0f}s 未返回):已强杀浏览器,"
+                "账号状态保留原值,可直接重试"
+            ),
+        }
 
 
 async def load_account_cookies(account_id: int) -> list[dict]:
