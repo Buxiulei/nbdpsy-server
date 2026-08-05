@@ -85,9 +85,14 @@ _SDK_MAX_RETRIES = 1
 _WRITE_TIMEOUT = 120.0
 _POOL_TIMEOUT = 30.0
 
-# 锚点图喂上游前的瘦身阈值:长边超过即等比缩到该值并转 JPEG。锚点只用于风格锚定,
-# 不需要原始像素;而 1.4MB 原图的上传窗口更长,抖动期更容易踩超时(需求文档第 2 条)。
+# 锚点图喂上游前的瘦身阈值,**尺寸与体积是两个独立判据**(2026-08-06 改口径):
+# 上传耗时取决于体积不是像素数,而 gpt-image 原图 1024x1536 就有 1.6-2.4MB——长边
+# 没超阈值,按老的"只看长边"口径一律不动,恰恰漏掉真正的大载荷。故拆成两条:
+# - 长边 > _ANCHOR_MAX_SIDE 才等比缩(缩放损画面细节,只对确实过大的图做);
+# - 原始体积 > _ANCHOR_MAX_BYTES 就转 JPEG q90,**尺寸一个像素不动**(实测真实产物
+#   降 85-90%:2342KB→307KB / 2043KB→207KB),风格锚定精度不受影响。
 _ANCHOR_MAX_SIDE = 1536
+_ANCHOR_MAX_BYTES = 500 * 1024
 _ANCHOR_JPEG_QUALITY = 90
 
 
@@ -167,12 +172,11 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 
 def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
-    """锚点图瘦身:长边超阈值则等比缩到 _ANCHOR_MAX_SIDE + 转 JPEG q90。
+    """锚点图瘦身:超尺寸就缩、超体积就转 JPEG q90,两个判据各管各的。
 
     返回 ``(文件名, bytes, mime)`` 三元组,即 images.edit 的 image 载荷形状(顺序是
-    SDK 约定的 file tuple,别写反)。长边未超阈值原样返回(gpt-image 原生 1024x1536
-    走这条,不做多余重编码)。
-    **任何失败一律回退原字节**:压缩只是给上传瘦身,绝不能因为它把一次生图搞挂。
+    SDK 约定的 file tuple,别写反)。两个判据都不触发就原样返回(小图小文件不折腾)。
+    **任何失败一律回退原字节**:瘦身只是给上传减负,绝不能因为它把一次生图搞挂。
     """
     try:
         import io
@@ -180,21 +184,34 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
         from PIL import Image
 
         with Image.open(io.BytesIO(raw)) as im:
-            if max(im.size) <= _ANCHOR_MAX_SIDE:
+            oversized = max(im.size) > _ANCHOR_MAX_SIDE
+            heavy = len(raw) > _ANCHOR_MAX_BYTES
+            if not oversized and not heavy:
                 return "anchor.png", raw, "image/png"
-            ratio = _ANCHOR_MAX_SIDE / max(im.size)
-            new_size = (max(1, round(im.width * ratio)), max(1, round(im.height * ratio)))
             # JPEG 不支持 alpha:RGBA/P 等模式必须先转 RGB,否则 save 直接抛
-            resized = im.convert("RGB").resize(new_size, Image.LANCZOS)
+            out = im.convert("RGB")
+            if oversized:
+                ratio = _ANCHOR_MAX_SIDE / max(im.size)
+                new_size = (max(1, round(im.width * ratio)),
+                            max(1, round(im.height * ratio)))
+                out = out.resize(new_size, Image.LANCZOS)
             buf = io.BytesIO()
-            resized.save(buf, format="JPEG", quality=_ANCHOR_JPEG_QUALITY)
+            out.save(buf, format="JPEG", quality=_ANCHOR_JPEG_QUALITY)
+            size_after = out.size
         data = buf.getvalue()
+        # 纯转码路径(没缩尺寸)有可能反而更大——源本就是高压缩 JPEG 时,重编到 q90
+        # 实测能从 664KB 涨到 1363KB。瘦身产出更大就是负收益,原样退回。
+        if not oversized and len(data) >= len(raw):
+            logger.info(
+                f"[openai_image] 锚点转码反而变大({len(raw) / 1024:.0f}KB → "
+                f"{len(data) / 1024:.0f}KB),保留原字节")
+            return "anchor.png", raw, "image/png"
         logger.info(
-            f"[openai_image] 锚点压缩: {len(raw) / 1024:.0f}KB → {len(data) / 1024:.0f}KB "
-            f"{new_size}")
+            f"[openai_image] 锚点瘦身: {len(raw) / 1024:.0f}KB → {len(data) / 1024:.0f}KB "
+            f"{size_after}{'(已缩放)' if oversized else '(仅转码,尺寸不变)'}")
         return "anchor.jpg", data, "image/jpeg"
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[openai_image] 锚点压缩失败,回退原字节: {exc}")
+        logger.warning(f"[openai_image] 锚点瘦身失败,回退原字节: {exc}")
         return "anchor.png", raw, "image/png"
 
 

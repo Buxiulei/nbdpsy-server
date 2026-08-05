@@ -649,10 +649,14 @@ async def test_global_gate_released_during_backoff(tmp_path, monkeypatch):
         image_gate._reset_for_test()
 
 
-# ── 锚点图压缩(2026-08-05:1.4MB 原图上传更容易踩抖动超时)──────────────────
+# ── 锚点图瘦身(2026-08-06 改口径:尺寸与体积**两个独立判据**)────────────────
+#
+# 上一版只按长边判,而上传耗时取决于**体积**不是像素数:gpt-image 原图 1024x1536
+# 就有 1.6-2.4MB(长边不超阈值),按老口径一律不动。现在两条各管各的:
+# 长边超阈值才缩(保画面细节),体积超阈值才转 JPEG(尺寸零损失)。
 
 def _png_bytes(width: int, height: int, mode: str = "RGB") -> bytes:
-    """造一张指定尺寸的 PNG(内容是随机噪点,避免纯色被 PNG 压到几百字节)。"""
+    """造一张**体积很大**的 PNG(随机噪点不可压缩,1024x1536 约 4.5MB)。"""
     import io
     import os
 
@@ -660,6 +664,18 @@ def _png_bytes(width: int, height: int, mode: str = "RGB") -> bytes:
 
     im = Image.frombytes(mode, (width, height),
                          os.urandom(width * height * len(mode)))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _light_png_bytes(width: int, height: int) -> bytes:
+    """造一张**体积很小**的 PNG(平滑渐变,1024x1536 仅约 8KB):两个判据都不触发。"""
+    import io
+
+    from PIL import Image
+
+    im = Image.linear_gradient("L").resize((width, height)).convert("RGB")
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     return buf.getvalue()
@@ -693,10 +709,53 @@ def test_compress_anchor_converts_rgba_before_jpeg():
         assert im.mode == "RGB" and max(im.size) == 1536
 
 
-def test_compress_anchor_leaves_small_image_untouched():
-    """长边 <= 1536(含 gpt-image 原生 1024x1536)原样返回,不做多余重编码。"""
-    raw = _png_bytes(1024, 1536)
+def test_heavy_but_normal_size_is_transcoded_without_resize():
+    """**本轮回归锁**:尺寸不超阈值但体积超阈值 → 尺寸一个像素不动,只转 JPEG。
+
+    这正是 gpt-image 原图当锚点的形态(1024x1536 / 1.6-2.4MB):老口径只看长边,
+    这类图一律不动,而它才是真正的大载荷。判据必须是体积。
+    """
+    import io
+
+    from PIL import Image
+
+    raw = _png_bytes(1152, 1536)          # 长边正好 1536(不超),体积约 5MB(超)
+    assert len(raw) > openai_image._ANCHOR_MAX_BYTES
+    name, data, mime = openai_image._compress_anchor(raw)
+
+    assert (name, mime) == ("anchor.jpg", "image/jpeg")
+    assert len(data) < len(raw), "体积必须真的降下来"
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.size == (1152, 1536), "尺寸不许动——只转码,不缩放"
+
+
+def test_compress_anchor_leaves_light_small_image_untouched():
+    """尺寸与体积**都**不超阈值 → 原样返回,不做多余重编码(mime 仍是 png)。"""
+    raw = _light_png_bytes(1024, 1536)
+    assert len(raw) < openai_image._ANCHOR_MAX_BYTES
     assert openai_image._compress_anchor(raw) == ("anchor.png", raw, "image/png")
+
+
+def test_transcode_skipped_when_it_would_grow_the_payload():
+    """源本就是高压缩 JPEG 时,转 q90 反而更大(实测 664KB → 1363KB)→ 保留原字节。
+
+    瘦身的目的是减体积,产出更大就是负收益(还白搭一次有损重编码)。
+    """
+    import io
+    import os
+
+    from PIL import Image
+
+    im = Image.frombytes("RGB", (1400, 1400), os.urandom(1400 * 1400 * 3))
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=40)      # 低质高压缩源,体积超阈值
+    raw = buf.getvalue()
+    assert len(raw) > openai_image._ANCHOR_MAX_BYTES
+
+    name, data, mime = openai_image._compress_anchor(raw)
+
+    assert data == raw, "转码反而更大时必须原样返回"
+    assert (name, mime) == ("anchor.png", "image/png")
 
 
 def test_compress_anchor_falls_back_on_pil_failure():
