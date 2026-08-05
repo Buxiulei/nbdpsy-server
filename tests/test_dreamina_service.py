@@ -610,3 +610,70 @@ async def test_materialize_writes_distinct_copies_per_stem(tmp_path, monkeypatch
     assert first.name == "ref.png", "单张默认名不变（老行为逐字节保持）"
     assert second.name == "ref_2.png"
     assert first.read_bytes() == _PNG and second.read_bytes() == _PNG + b"second"
+
+
+# ── 多帧故事 multiframe2video ────────────────────────────────────────────────
+def test_estimate_credit_is_unknown_for_multiframe():
+    """multiframe2video 单价从未实测 → 一律返回 None，**绝不套用别的档硬算一个数**。
+
+    这条 operation 的模型由平台固定，我们库里那个 model 值只是占位；拿它去查 _PRICE_PER_5S
+    会算出 seedance2.5 的 130/5s，那是个凭空捏造的数字，会让运营按它做预算。
+    """
+    assert dreamina.estimate_credit("seedance2.5", 10) == 260          # 老口径不变
+    assert dreamina.estimate_credit(
+        "seedance2.5", 10, operation="multiframe2video") is None
+    assert dreamina.estimate_credit(
+        "seedance2.5", 10, operation="multimodal2video") == 260
+
+
+def test_build_submit_args_multiframe_shorthand():
+    """恰好 2 张的简写：--prompt + --duration，**不带任何 transition-***。
+
+    也不带 --model_version（CLI help：model_version is fixed and is not configurable
+    on this command）与 --ratio（ratio is inferred from the first image）。
+    """
+    args = dreamina.build_submit_args(_clip(
+        operation="multiframe2video", ratio=None, duration=5,
+        prompt="镜头从空椅缓缓推到窗外",
+        image_path="/tmp/a.png", image_paths_json='["/tmp/a.png", "/tmp/b.png"]'))
+    assert args[0] == "multiframe2video"
+    # --images 是 strings（逗号连接），**不是** --image；写错 flag 名 CLI 直接拒
+    assert "--images=/tmp/a.png,/tmp/b.png" in args
+    assert "--prompt=镜头从空椅缓缓推到窗外" in args and "--duration=5" in args
+    assert not any(a.startswith("--transition-") for a in args)
+    assert not any(a.startswith("--model_version") for a in args)
+    assert not any(a.startswith("--ratio") for a in args)
+    assert "--video_resolution=720p" in args and "--poll=0" in args
+
+
+def test_build_submit_args_multiframe_transitions():
+    """3+ 张：逐段 --transition-prompt / --transition-duration 各 N-1 个，不带简写的两个 flag。"""
+    args = dreamina.build_submit_args(_clip(
+        operation="multiframe2video", ratio=None, duration=12, prompt="甲 → 乙 → 丙",
+        image_path="/tmp/1.png",
+        image_paths_json='["/tmp/1.png", "/tmp/2.png", "/tmp/3.png"]',
+        transitions_json='[{"prompt": "甲转向乙", "duration": 4.0},'
+                         ' {"prompt": "乙推近丙", "duration": 8.0}]'))
+    assert args[0] == "multiframe2video"
+    assert "--images=/tmp/1.png,/tmp/2.png,/tmp/3.png" in args
+    assert [a for a in args if a.startswith("--transition-prompt=")] == [
+        "--transition-prompt=甲转向乙", "--transition-prompt=乙推近丙"]
+    assert [a for a in args if a.startswith("--transition-duration=")] == [
+        "--transition-duration=4.0", "--transition-duration=8.0"]
+    # 长式下简写的两个 flag 一个都不能出现（CLI 的 --prompt/--duration 是 2 张专用）
+    assert not any(a.startswith("--prompt=") or a.startswith("--duration=") for a in args)
+
+
+def test_build_submit_args_multiframe_omits_durations_when_unset():
+    """没给逐段时长就**整个 flag 不出现**，让 CLI 按它自己的每段 3s 默认走。
+
+    补一串我们自己编的 3.0 上去是多余的：CLI 的默认值将来若变，我们会把它钉死在旧值上。
+    """
+    args = dreamina.build_submit_args(_clip(
+        operation="multiframe2video", ratio=None, duration=6, prompt="甲 → 乙 → 丙",
+        image_path="/tmp/1.png",
+        image_paths_json='["/tmp/1.png", "/tmp/2.png", "/tmp/3.png"]',
+        transitions_json='[{"prompt": "甲转向乙", "duration": null},'
+                         ' {"prompt": "乙推近丙", "duration": null}]'))
+    assert len([a for a in args if a.startswith("--transition-prompt=")]) == 2
+    assert not any(a.startswith("--transition-duration") for a in args)

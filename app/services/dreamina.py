@@ -21,7 +21,9 @@ BGM、ffmpeg 合成、审查仍在 skill 侧，不在本模块范围。
 CLI 事实（均已实测，非二手）：输出干净 JSON；submit 后顶层 ``submit_id``（16 位 hex）；
 ``query_result --submit_id=X --download_dir=Y`` 成功返回 ``result_json.videos[].path`` +
 ``credit_count``；``gen_status`` ∈ querying/success/failed/…；``--video_resolution`` 必填且逐档校验，720p 是
-唯一对全家族都合法的一档；``image2video`` 画幅由输入图推断、不接受 ``--ratio``。
+唯一对全家族都合法的一档；``image2video`` 画幅由输入图推断、不接受 ``--ratio``；
+``multiframe2video`` 自成一格——图列表是逗号串的 ``--images``、模型平台固定不可配、
+时长按 N-1 段逐段给（详见 ``_multiframe_args``）。
 
 非阻塞红线：本模块跑在 worker 的单一事件循环上（与 supervisor 扫描、视频调度共享），
 所有 CLI 调用一律 ``asyncio.create_subprocess_exec``，**禁止 subprocess.run**。
@@ -52,7 +54,7 @@ from app.core.config import settings
 from app.models.video_clip import VideoClip
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
-# 默认档（六档模型 / 六种画幅 / 四种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）。
+# 默认档（六档模型 / 六种画幅 / 五种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）。
 # 2026-08-05 CLI 升级后模型面从四档扩到六档（新增 seedance2.0mini / seedance2.5，2.5 **没有**
 # fast / vip 变体），默认档同时切到 seedance2.5。
 DEFAULT_MODEL = "seedance2.5"
@@ -75,6 +77,21 @@ _DURATION_MAX_BY_MODEL = {"seedance2.5": 30}
 REF_IMAGE_MAX = 30
 _REF_IMAGE_MAX_DEFAULT = 9
 _REF_IMAGE_MAX_BY_MODEL = {"seedance2.5": REF_IMAGE_MAX}
+
+# multiframe2video（多图连贯故事）的口径，全部照 CLI help 原文，**与上面几档无关**：
+# "inputs: 2-20 images"、"for N images, the transition count is N-1"、
+# "each duration segment must be 1-8 seconds and total duration must be >= 2"、
+# "omit --transition-duration to default each segment to 3 seconds"。
+# 张数上限**不看 model**——这条子命令的模型由平台固定（"model_version is fixed and is not
+# configurable on this command"），所以 max_ref_images 那套按档分级在这里不适用。
+MULTIFRAME_IMAGE_MIN = 2
+MULTIFRAME_IMAGE_MAX = 20
+MULTIFRAME_SEGMENT_MIN = 1.0
+MULTIFRAME_SEGMENT_MAX = 8.0
+MULTIFRAME_TOTAL_MIN = 2.0
+# CLI 省略 --transition-duration 时每段的默认秒数。只用来**估算台账里的总时长**，
+# 提交时绝不把它拼成显式参数——那会把 CLI 将来可能改的默认值钉死在我们这边。
+MULTIFRAME_DEFAULT_SEGMENT = 3.0
 
 # 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
 # seedance2.5 = 130（2026-08-05 生产实测 vc_3e1260f8ce，credit_count 与余额扣减对账精确；
@@ -350,12 +367,18 @@ def max_ref_images(model: str) -> int:
     return _REF_IMAGE_MAX_BY_MODEL.get(model, _REF_IMAGE_MAX_DEFAULT)
 
 
-def estimate_credit(model: str, duration: int) -> int | None:
+def estimate_credit(model: str, duration: int, operation: str | None = None) -> int | None:
     """按 5s 档粗估一镜积分；未知模型返回 None（不估、不给 warning）。
 
     只用于**提示**：扣费 success 才结算、排队中还有变数，所以低余额一律 warning 不拦截
     （需求第四节第 5 条）。真正拦截只有一种情况——余额连最便宜一镜都不够。
+
+    ``multiframe2video`` 恒返回 None：它的模型由平台固定，我们库里那个 ``model`` 值只是
+    请求默认档的占位，拿它去查价会算出 seedance2.5 的 130/5s——一个凭空来的数字，运营会
+    照它做预算。真实单价等第一条任务跑完由 ``credit_count`` 结算给出（绝不瞎编价格常量）。
     """
+    if operation == "multiframe2video":
+        return None
     unit = _PRICE_PER_5S.get(model)
     if unit is None:
         return None
@@ -534,6 +557,49 @@ def ref_paths(clip: VideoClip) -> list[str]:
     return [clip.image_path] if clip.image_path else []
 
 
+def transitions(clip: VideoClip) -> list[dict]:
+    """这条 clip 的逐段转场（``[{"prompt": str, "duration": float|None}, …]``）。
+
+    只有 multiframe2video 的长式有值；简写（恰好 2 张走 prompt + duration）与其余四种
+    operation 恒为空列表。坏 JSON 按空处理并回落简写分支——理由同 ``ref_paths``。
+    """
+    if not clip.transitions_json:
+        return []
+    try:
+        items = json.loads(clip.transitions_json)
+    except json.JSONDecodeError:
+        return []
+    return [t for t in items if isinstance(t, dict)] if isinstance(items, list) else []
+
+
+def _multiframe_args(clip: VideoClip, paths: list[str]) -> list[str]:
+    """multiframe2video 的参数（形态与另四个子命令差得多，单独拆出来）。
+
+    三处与别处**不一样**，都照 CLI help 原文：
+
+    1. flag 名是 ``--images``（``strings`` 类型，逗号连接一次给全），不是别处那个可重复的
+       ``--image``。CLI 自己的示例就是 ``--images ./a.png,./b.png``。前提是路径里不含逗号
+       ——路径由我们自己生成（``{clip_dir}/ref_N.ext``），只有 DATA_DIR 含逗号才会出事。
+    2. **不带 ``--model_version``**："model_version is fixed and is not configurable on this
+       command"。带上去就是给一个 CLI 不认的参数。
+    3. **不带 ``--ratio``**："ratio is inferred from the first image"（REST 层已 422 拦过）。
+
+    形态二选一：恰好 2 张可走简写 ``--prompt`` + ``--duration``；否则逐段
+    ``--transition-prompt`` ×(N-1)。逐段时长全为 null 时整个 flag 不出现，交给 CLI 的默认。
+    """
+    args = ["multiframe2video", f"--images={','.join(paths)}",
+            "--video_resolution=720p", "--poll=0"]
+    segments = transitions(clip)
+    if not segments:
+        args.append(f"--prompt={clip.prompt}")
+        args.append(f"--duration={clip.duration}")
+        return args
+    args.extend(f"--transition-prompt={t.get('prompt', '')}" for t in segments)
+    if any(t.get("duration") is not None for t in segments):
+        args.extend(f"--transition-duration={t['duration']}" for t in segments)
+    return args
+
+
 def build_submit_args(clip: VideoClip) -> list[str]:
     """按 operation 组装 dreamina 生成子命令参数（与 skill 侧本地实现逐字同形）。
 
@@ -542,8 +608,13 @@ def build_submit_args(clip: VideoClip) -> list[str]:
     分辨率并不一致（2.5 只有 480p/720p、2.0_vip 到 4k、其余只有 720p），**720p 是唯一对全家族
     都合法的一档**，故继续统一传它。``image2video`` **一律不带 --ratio**（画幅由输入图推断，
     CLI 不收该参数）；``frames2video`` 同理——CLI help 原文 "ratio is inferred from the first
-    frame image size"，显式传会被严格校验拒收。
+    frame image size"，显式传会被严格校验拒收。``multiframe2video`` 的参数形态与这四种
+    差得远（不带 --model_version、图列表是逗号串、时长逐段给），单独在 ``_multiframe_args``。
     """
+    paths = ref_paths(clip)
+    if clip.operation == "multiframe2video":
+        # 这条 operation 与 common 一个参数都不共用（模型不可配、逐段时长、逗号串图列表）
+        return _multiframe_args(clip, paths)
     common = [
         f"--prompt={clip.prompt}",
         f"--duration={clip.duration}",
@@ -551,7 +622,6 @@ def build_submit_args(clip: VideoClip) -> list[str]:
         "--video_resolution=720p",
         "--poll=0",
     ]
-    paths = ref_paths(clip)
     if clip.operation == "image2video":
         return ["image2video", f"--image={paths[0]}", *common]
     if clip.operation == "frames2video":

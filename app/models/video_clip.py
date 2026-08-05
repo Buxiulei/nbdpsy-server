@@ -1,5 +1,5 @@
 """即梦(Dreamina)视频片段任务表：一条 text2video / image2video / multimodal2video /
-frames2video 生成任务。
+frames2video / multiframe2video 生成任务。
 
 设计 ``docs/design/2026-08-05-dreamina-clips-design.md``；需求契约
 ``NBDpsy/文档/2026-08-05-server需求-即梦视频生成服务化.md``。
@@ -25,6 +25,10 @@ frames2video 生成任务。
   排队中的任务无法取消，把查询侧抖动写进 ``error`` 会让运营误判任务已死而重发。
 - ``expires_at``：产物 MP4 落盘给免鉴权直链，到期由 ClipReaper 删目录并清 ``video_url``，
   但 ``status`` 保持 done、``credit_count`` 保留（积分对账要用）。
+- ``multiframe2video`` 的三列是**派生/占位值，不是调用方原话**：``model`` 由平台固定、CLI
+  不接受该参数（我们只能存请求里的默认档，故它对这条 operation 无意义，也别拿它去查单价）；
+  长式下 ``prompt`` 是逐段提示词连成的台账串、``duration`` 是各段时长之和（两列 NOT NULL，
+  要有意义的内容）。真正提交给 CLI 的逐段数据在 ``transitions_json``。
 
 宿主惯例：Mapped/mapped_column 声明式；一表一文件并在 ``app/models/__init__`` 注册，使
 Base.metadata 感知（init_db create_all 与 Alembic autogenerate 据此建表）。
@@ -73,6 +77,11 @@ class VideoClip(Base):
     # ``[首帧, 尾帧]`` 两元素。``image_path`` 的语义**不变**——新行同时写它=第一张，本列上线
     # 前的老行只有它，故读侧一律走 ``dreamina.ref_paths()``：本列优先、回落 image_path。
     image_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
+    # multiframe2video 的逐段转场：JSON 数组 ``[{"prompt": str, "duration": float|null}, …]``，
+    # **恰好 N-1 段**（N = image_paths_json 的图数），顺序即段序。``duration`` 全为 null 表示
+    # 调用方没指定逐段时长，提交时整个 ``--transition-duration`` flag 不出现，由 CLI 按它自己
+    # 的每段 3s 默认走。恰好 2 张的简写形态（走 prompt + duration）本列为空。
+    transitions_json: Mapped[str | None] = mapped_column(Text, default=None)
 
     # 生命周期：queued|submitting|submitted|querying|done|error
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)

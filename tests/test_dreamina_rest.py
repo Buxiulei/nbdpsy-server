@@ -910,3 +910,212 @@ async def test_batch_shots_carry_new_fields(tmp_path, monkeypatch):
     assert len(dreamina.ref_paths(rows[0])) == 3
     assert len(dreamina.ref_paths(rows[1])) == 2
     assert rows[1].operation == "frames2video"
+
+
+# ── 多帧故事 multiframe2video ────────────────────────────────────────────────
+def _mf(**kw) -> dict:
+    """multiframe2video 入参骨架（该 operation 不收 ratio / model 不可选，故都不给）。"""
+    base = {"operation": "multiframe2video"}
+    base.update(kw)
+    return base
+
+
+async def test_multiframe_shorthand_two_images(tmp_path, monkeypatch):
+    """恰好 2 张走简写：prompt + duration，CLI 参数是 --images 逗号串 + --prompt + --duration。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clips",
+                              json=_mf(images=images, prompt="空椅推向窗外", duration=5),
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    assert len(paths) == 2
+    args = dreamina.build_submit_args(clip)
+    assert args[0] == "multiframe2video"
+    assert f"--images={','.join(paths)}" in args
+    assert "--prompt=空椅推向窗外" in args and "--duration=5" in args
+    assert not any(a.startswith("--transition-") for a in args)
+
+
+async def test_multiframe_five_images_with_four_transitions(tmp_path, monkeypatch):
+    """5 张 + 4 段：逐段提示词与时长各 4 个；台账里 prompt/duration 落派生值。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 5, folder="mf")
+    prompts = ["一到二", "二到三", "三到四", "四到五"]
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_mf(images=images, transition_prompts=prompts,
+                     transition_durations=[2.0, 3.0, 4.0, 5.0]),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    args = dreamina.build_submit_args(clip)
+    assert len([a for a in args if a.startswith("--transition-prompt=")]) == 4
+    assert len([a for a in args if a.startswith("--transition-duration=")]) == 4
+    assert not any(a.startswith("--prompt=") or a.startswith("--duration=") for a in args)
+    # 台账两列是派生值（NOT NULL 列要有意义的内容）：逐段提示词连起来 + 总时长
+    assert all(p in clip.prompt for p in prompts)
+    assert clip.duration == 14
+
+
+async def test_multiframe_transitions_default_durations(tmp_path, monkeypatch):
+    """不给逐段时长：CLI 侧按每段 3s 默认，台账总时长按同一口径算（3 张 → 6s）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 3, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_mf(images=images, transition_prompts=["一到二", "二到三"]),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    assert clip.duration == 6
+    assert not any(a.startswith("--transition-duration")
+                   for a in dreamina.build_submit_args(clip))
+
+
+async def test_multiframe_validation_matrix(tmp_path, monkeypatch):
+    """multiframe 的组合闸：段数不匹配 / 张数越界 / 段时长越界 / 总时长不足 / 简写字段错位。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    imgs = _seed_uploads(tmp_path, 21, folder="mf")
+    five, two, three = imgs[:5], imgs[:2], imgs[:3]
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        bad = [
+            # 5 张只给 3 段（需要 4 段）
+            _mf(images=five, transition_prompts=["a", "b", "c"]),
+            _mf(images=imgs[:1], prompt="x", duration=5),          # 1 张不成故事
+            _mf(images=imgs, transition_prompts=["a"] * 20),        # 21 张越界
+            _mf(images=three, transition_prompts=["a", "b"],
+                transition_durations=[9.0, 3.0]),                   # 某段 9s 越界
+            _mf(images=three, transition_prompts=["a", "b"],
+                transition_durations=[0.5, 3.0]),                   # 某段 <1s
+            _mf(images=two, transition_prompts=["a"],
+                transition_durations=[1.5]),                        # 总时长 <2s
+            _mf(images=three, transition_prompts=["a", "b"], prompt="整片描述"),  # 长式不收 prompt
+            _mf(images=three, transition_prompts=["a", "b"], duration=6),        # 长式不收 duration
+            _mf(images=three, prompt="x", duration=5),              # 3 张必须逐段给
+            _mf(images=two, duration=5),                            # 简写缺 prompt
+            _mf(images=two, prompt="x", duration=1),                # 简写 1s → 总时长不足
+            _mf(images=two, prompt="x", duration=9),                # 简写超 8s
+            _mf(images=two, prompt="x", duration=5, ratio="9:16"),  # 画幅由首图推断
+            _mf(images=two, prompt="x", duration=5, image=two[0]),  # 不收 image
+            _mf(images=two, prompt="x", duration=5, first_image=two[0]),  # 不收首尾帧
+            _mf(prompt="x", duration=5),                            # 完全没给 images
+            _mf(images=two, prompt="x", duration=5,
+                transition_durations=[3.0]),                        # 只给时长不给提示词
+            # 非 multiframe 的 operation 不认这两个新字段
+            _shot(transition_prompts=["a"]),
+            _shot(transition_durations=[3.0]),
+        ]
+        for payload in bad:
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == 422, f"{payload} → {r.status_code} {r.text}"
+        assert await _clip_count() == 0
+
+        # 段数提示要说清"要几段"，不能只报一个光秃秃的越界
+        mismatch = await client.post(
+            "/api/video-clips",
+            json=_mf(images=five, transition_prompts=["a", "b", "c"]), headers=h)
+        assert "4" in mismatch.text
+
+
+async def test_multiframe_rejects_model_because_platform_fixed(tmp_path, monkeypatch):
+    """model 在这条 operation 上由平台固定：传了非默认值 **422 而不是静默忽略**。
+
+    静默忽略会让调用方以为自己选上了档（与 frames2video 拒绝 ratio 同一条纪律）。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_mf(images=two, prompt="x", duration=5, model="seedance2.0fast"),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+        assert "不可选" in r.text
+        assert await _clip_count() == 0
+
+
+async def test_multiframe_warns_price_is_unmeasured(tmp_path, monkeypatch):
+    """该模式单价未实测 → 提交时如实给出"估不出"的告警，别让运营以为余额够。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post("/api/video-clips",
+                              json=_mf(images=two, prompt="x", duration=5), headers=h)
+        assert r.status_code == 202, r.text
+        assert "未实测" in r.json().get("warning", "")
+
+        batch = await client.post(
+            "/api/video-clip-batches",
+            json={"shots": [_mf(images=two, prompt="x", duration=5, client_ref="mf-1")]},
+            headers=h)
+        assert batch.status_code == 202, batch.text
+        assert "未实测" in batch.json().get("warning", "")
+
+
+async def test_multiframe_credit_guard_still_hard_blocks(tmp_path, monkeypatch):
+    """估不出价 ≠ 不设防：余额连最便宜一镜都不够时照旧 409（保守拦截）。"""
+    _stub_credit(monkeypatch, credit=10)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clips",
+                              json=_mf(images=two, prompt="x", duration=5),
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 409, r.text
+        assert await _clip_count() == 0
+
+
+async def test_prompt_and_duration_stay_required_for_other_operations(tmp_path, monkeypatch):
+    """回归锁：为了 multiframe 放宽的 prompt / duration，在其余 operation 上仍是必填 + 老边界。
+
+    放宽字段界是为了让 multiframe 长式能不带这两个字段；一旦顺手把别的 operation 也放开，
+    text2video 少传 duration 就会一路跑到 CLI 才失败，那正是本层最想避免的结局。
+    """
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        for payload in ({"operation": "text2video", "duration": 5},        # 缺 prompt
+                        {"operation": "text2video", "prompt": "x"},        # 缺 duration
+                        _shot(duration=3),                                  # 老下限 4s 不变
+                        _shot(duration=0), _shot(duration=31)):
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == 422, f"{payload} → {r.status_code} {r.text}"
+        assert await _clip_count() == 0
+
+
+async def test_batch_carries_multiframe_shots(tmp_path, monkeypatch):
+    """批量 shots[] 同样吃 multiframe（25-30 镜的电影化只能走批量端点）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 3, folder="mf")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={"shots": [
+            _mf(images=images[:2], prompt="甲到乙", duration=4),
+            _mf(images=images, transition_prompts=["一到二", "二到三"],
+                transition_durations=[3.0, 4.0]),
+        ]}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert len(r.json()["clip_ids"]) == 2
+
+    async with db_module.async_session() as s:
+        rows = (await s.execute(
+            select(VideoClip).order_by(VideoClip.batch_index))).scalars().all()
+    assert all(r.operation == "multiframe2video" for r in rows)
+    assert len(dreamina.ref_paths(rows[1])) == 3
+    assert rows[1].duration == 7

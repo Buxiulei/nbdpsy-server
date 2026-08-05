@@ -54,7 +54,8 @@ _NAME_RE = re.compile(r"^clip(_[0-9]{1,2})?\.mp4$")
 # 批次号形态（GET batch 的入参闸，与 services.dreamina.new_batch_id 同形）
 _BATCH_ID_RE = re.compile(r"^vcb_[0-9a-f]{10}$")
 
-_OPERATIONS = Literal["text2video", "image2video", "multimodal2video", "frames2video"]
+_OPERATIONS = Literal["text2video", "image2video", "multimodal2video", "frames2video",
+                      "multiframe2video"]
 _MODELS = Literal["seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip",
                   "seedance2.0mini", "seedance2.5"]
 _RATIOS = Literal["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
@@ -94,36 +95,65 @@ _REF_NOTE = (
     "本服务只透传参考**图**，CLI 的 --video / --audio 输入面尚未开放。"
 )
 
+_MULTIFRAME_NOTE = (
+    "**multiframe2video = 多图连贯故事**（一次出一条多镜片子，镜间衔接由模型统一处理，"
+    "比 25-30 次单镜提交 + 本地拼接少很多风格漂移）。用 `images` 给 **2-20 张**，"
+    "N 张图 = **N-1 段转场**。两种形态不能混："
+    "①**长式**（任意 2-20 张）：`transition_prompts` 恰好 N-1 段，每段描述一帧如何演进到下一帧；"
+    "`transition_durations` 可选、给了也必须是 N-1 段（整个省略则 CLI 每段默认 3s）；"
+    "此形态下 **prompt / duration 传了就 422**（CLI 那两个参数是「恰好 2 张」专用简写，"
+    "我们收下也送不出去）。"
+    "②**简写**（恰好 2 张）：`prompt` + `duration` 两者必填，duration **2-8s**"
+    "（每段 1-8s 且总时长 ≥2s，2 张只有一段，那一段就是总时长）。"
+    "每段 1-8s、总时长 ≥2s，越界当场 422。"
+    "**`model` 传了就 422**：这条 operation 的模型由平台固定、CLI 不接受 --model_version；"
+    "GET 回显里的 model 只是占位，别拿它判档。**不接受 ratio**（画幅由第一张图推断）。"
+    "**单价从未实测**：提交必带一条「估不出」的 warning，低积分估算对它不可用"
+    "（服务端不瞎编价格），真实消耗等 success 后看 credit_count；"
+    "余额连最便宜一镜都不够时**照旧 409 硬拦**。"
+    "台账口径：长式的 GET `prompt` 是各段提示词连成的串、`duration` 是各段之和，"
+    "**都是服务端派生值不是你的原话**。"
+)
+
 MANIFEST_ENTRIES = [
     {
         "method": "POST", "path": "/api/video-clips",
         "summary": "提交一条即梦视频生成任务（异步入队，202 返回 clip_id）",
         "admin_only": False,
         "params": {
-            "operation": "body,str(text2video|image2video|multimodal2video|frames2video)",
-            "prompt": "body,str(1-2000 字)",
-            "duration": "body,int(4-30 整数秒；**仅 seedance2.5 到 30s**，其余模型 4-15)",
+            "operation": "body,str(text2video|image2video|multimodal2video|frames2video|"
+                         "multiframe2video)",
+            "prompt": "body,str(1-2000 字；**multiframe2video 长式不接受**，见 notes)",
+            "duration": "body,int(4-30 整数秒；**仅 seedance2.5 到 30s**，其余模型 4-15；"
+                        "**multiframe2video 简写是 2-8s、长式不接受**)",
             "model": "body,str(seedance2.0|seedance2.0fast|seedance2.0_vip|seedance2.0fast_vip|"
-                     "seedance2.0mini|seedance2.5，默认 seedance2.5)",
+                     "seedance2.0mini|seedance2.5，默认 seedance2.5；"
+                     "**multiframe2video 传了就 422**，那条 operation 的模型由平台固定)",
             "ratio": "body,str|None(1:1|3:4|4:3|9:16|16:9|21:9；**image2video / frames2video "
                      "传了就 422**，其画幅由输入图 / 首帧图推断)",
             "image": "body,str|None(图床直链 或 本服务 /uploads 路径；image2video 必填，"
                      "multimodal2video 与 images 二选一，text2video/frames2video 传了就 422。"
                      "不收 base64 大包)",
-            "images": "body,list[str]|None(多张参考图，**仅 multimodal2video**；顺序即传给 CLI "
-                      "的顺序；seedance2.5 最多 30 张、其余模型最多 9 张，超限 422)",
+            "images": "body,list[str]|None(多张图，顺序即传给 CLI 的顺序；multimodal2video 下是"
+                      "参考图，seedance2.5 最多 30 张、其余模型最多 9 张；multiframe2video 下是"
+                      "故事帧，**2-20 张**；超限 422)",
             "first_image": "body,str|None(首帧；**仅 frames2video**，与 last_image 必须成对)",
             "last_image": "body,str|None(尾帧；**仅 frames2video**，与 first_image 必须成对)",
+            "transition_prompts": "body,list[str]|None(逐段转场提示词，**仅 multiframe2video**；"
+                                  "N 张图恰好 N-1 段，段数不符 422)",
+            "transition_durations": "body,list[float]|None(逐段转场秒数，**仅 multiframe2video**；"
+                                    "同样 N-1 段，每段 1-8s、总时长 ≥2s；整个省略则 CLI 每段默认 3s)",
             "client_ref": "body,str|None(1-64，幂等键)",
         },
         "returns": "{clip_id, status(重放命中时带当前状态), warning?(低积分提示，不拦截)}",
-        "errors": "422=参数校验失败（含 image2video/frames2video+ratio、text2video+参考图、"
-                  "image 与 images 同给、多图超模型张数上限、frames2video 缺首帧或尾帧、"
-                  "duration 越界，**含「非 2.5 模型传了 >15s」**）；"
+        "errors": "422=参数校验失败（含 image2video/frames2video/multiframe2video+ratio、"
+                  "text2video+参考图、image 与 images 同给、多图超模型张数上限、"
+                  "frames2video 缺首帧或尾帧、multiframe2video 段数不符 / 传了 model / "
+                  "长式传了 prompt 或 duration、duration 越界，**含「非 2.5 模型传了 >15s」**）；"
                   "400=参考图下载失败或不是图片（**多张里坏一张即整镜失败**）；"
                   "409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
-        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _POLL_NOTE
+        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE + " " + _POLL_NOTE
                  + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
                  "零新建零扣分（幂等键按运营隔离，跨运营同 ref 互不影响）。"
                  "**重放不过登录闸/积分闸**：ref 命中时即使掉登录或余额见底也照回原 clip_id，"
@@ -160,9 +190,10 @@ MANIFEST_ENTRIES = [
                    "clip_ids[](与 shots **等长同序**，可直接按下标映射 shot-NN), warning?}",
         "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效；401=apikey 无效",
-        "notes": _MODEL_NOTE + " " + _REF_NOTE
+        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
                  + " **shots[] 与单镜入参逐字段同构**，多图 images / 首尾帧 first_image+"
-                 "last_image 在批量端点一样可用（电影化的 25-30 镜只能走这里）。"
+                 "last_image / 多帧故事 transition_prompts 在批量端点一样可用"
+                 "（电影化的 25-30 镜只能走这里）。"
                  " **逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
                  "零新增任务、积分零新增；整批全命中时**登录闸/积分闸都不挂**（掉登录或余额"
                  "见底也照回原 clip_ids，不把「早已在队里」报成提交失败）。"
@@ -216,8 +247,12 @@ class CreateClipRequest(BaseModel):
     """单镜入参。校验矩阵直接对应 CLI 的真实能力，宁可 422 也不静默丢字段。"""
 
     operation: _OPERATIONS
-    prompt: str = Field(min_length=1, max_length=2000)
-    duration: int = Field(ge=dreamina.DURATION_MIN, le=dreamina.DURATION_MAX)
+    # prompt / duration 的类型界为了 multiframe2video 的**长式**才放宽成可选（那里逐段提示词
+    # 走 transition_prompts、时长走 transition_durations，CLI 的 --prompt/--duration 是
+    # 「恰好 2 张」专用简写）。放宽的只是类型界：其余四种 operation 仍然必填、下限仍是
+    # DURATION_MIN，由 _check_required_fields 钉死。
+    prompt: str | None = Field(default=None, min_length=1, max_length=2000)
+    duration: int | None = Field(default=None, ge=1, le=dreamina.DURATION_MAX)
     ratio: _RATIOS | None = None
     model: _MODELS = dreamina.DEFAULT_MODEL
     # 单张参考图（老字段，语义不变）。多图参考用 images，**两者只能给一个**（见 _check_media_matrix）。
@@ -229,7 +264,33 @@ class CreateClipRequest(BaseModel):
     # 首尾帧（frames2video 专用，两者必须成对出现）
     first_image: str | None = None
     last_image: str | None = None
+    # 逐段转场（multiframe2video 专用）：N 张图恰好 N-1 段，两个列表各自与段序对齐。
+    # transition_durations 可整体省略（CLI 按每段 3s 默认）；给了就必须给满 N-1 个。
+    transition_prompts: list[str] | None = Field(
+        default=None, min_length=1, max_length=dreamina.MULTIFRAME_IMAGE_MAX - 1)
+    transition_durations: list[float] | None = Field(
+        default=None, min_length=1, max_length=dreamina.MULTIFRAME_IMAGE_MAX - 1)
     client_ref: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _check_required_fields(self) -> "CreateClipRequest":
+        """``prompt`` / ``duration`` 的必填与下限——**除 multiframe2video 外逐字保持老规矩**。
+
+        这两个字段的类型界放宽只是为了让 multiframe 的长式能合法地不带它们（见字段注释）。
+        规矩没放宽：别的 operation 少传一个照旧 422，否则 ``text2video`` 缺 duration 会一路
+        放行到 worker 才被 CLI 拒，留下一条要人回头清理的 error 行。
+        """
+        if self.operation == "multiframe2video":
+            return self               # 这条 operation 的必填规则全在 _check_multiframe
+        if not self.prompt:
+            raise ValueError("prompt 必填（1-2000 字）")
+        if self.duration is None:
+            raise ValueError(
+                f"duration 必填（{dreamina.DURATION_MIN}-{dreamina.DURATION_MAX} 整数秒）")
+        if self.duration < dreamina.DURATION_MIN:
+            raise ValueError(
+                f"duration={self.duration}s 低于下限：全家族最短 {dreamina.DURATION_MIN}s")
+        return self
 
     @model_validator(mode="after")
     def _check_duration_ceiling(self) -> "CreateClipRequest":
@@ -238,6 +299,8 @@ class CreateClipRequest(BaseModel):
         不在这里收紧的话，``seedance2.0fast + duration=20`` 会一路放行到 worker 才被 CLI 拒——
         那时任务行已建好、参考图已物化，结局是一条要人回头清理的 error 行，而不是当场 422。
         """
+        if self.duration is None:
+            return self               # multiframe 长式没有整片时长，逐段闸在 _check_multiframe
         ceiling = dreamina.max_duration(self.model)
         if self.duration > ceiling:
             raise ValueError(
@@ -253,6 +316,8 @@ class CreateClipRequest(BaseModel):
         理由与时长闸逐字相同：不在这里拦，``seedance2.0fast + 10 张`` 会先把 10 张图下载
         物化、把行建好，再由 CLI 拒掉——留下一条要人回头清理的 error 行外加十次白下载。
         """
+        if self.operation == "multiframe2video":
+            return self               # 它的 2-20 张不看模型档，见 _check_multiframe
         ceiling = dreamina.max_ref_images(self.model)
         if self.images and len(self.images) > ceiling:
             raise ValueError(
@@ -302,8 +367,104 @@ class CreateClipRequest(BaseModel):
             if self.ratio:
                 raise ValueError(
                     "frames2video 的画幅由**首帧图**推断，不接受 ratio（CLI 不收该参数）")
+        elif self.operation == "multiframe2video":
+            if self.image:
+                raise ValueError("multiframe2video 的多张图走 images，不接受单张 image")
+            if self.ratio:
+                raise ValueError(
+                    "multiframe2video 的画幅由**第一张图**推断，不接受 ratio（CLI 不收该参数）")
         elif not (self.image or self.images):
             raise ValueError("multimodal2video 必须提供 image 或 images")
+        return self
+
+    @model_validator(mode="after")
+    def _check_multiframe(self) -> "CreateClipRequest":
+        """multiframe2video（多图连贯故事）的全套闸，逐条对应 CLI help 原文。
+
+        两种合法形态，**不能混**：
+
+        - **长式**（任意 2-20 张）：逐段 ``transition_prompts``，恰好 N-1 段；可选
+          ``transition_durations`` 同样 N-1 段（省略则 CLI 每段默认 3s）。此时 ``prompt`` /
+          ``duration`` 传了就 422——CLI 的那两个 flag 是「恰好 2 张」专用简写，收下再丢弃
+          就是静默吞字段。
+        - **简写**（恰好 2 张）：``prompt`` + ``duration``，两者都必填。duration 的有效区间是
+          **2-8s 而不是 1-8s**：CLI 要求每段 1-8s **且总时长 ≥2s**，2 张只有一段，那一段就是
+          总时长。
+
+        ``model`` 传了非默认值一律 422："model_version is fixed and is not configurable on
+        this command"。静默忽略会让调用方以为自己选上了档（与 frames2video 拒绝 ratio 同一条
+        纪律）——但注意这一闸挡不住「显式传了默认档」，字段有默认值时两者在服务端无法区分。
+        """
+        if self.operation != "multiframe2video":
+            if self.transition_prompts or self.transition_durations:
+                raise ValueError(
+                    "transition_prompts / transition_durations 只属于 multiframe2video")
+            return self
+
+        count = len(self.images or [])
+        if not (dreamina.MULTIFRAME_IMAGE_MIN <= count <= dreamina.MULTIFRAME_IMAGE_MAX):
+            raise ValueError(
+                f"multiframe2video 需要 {dreamina.MULTIFRAME_IMAGE_MIN}-"
+                f"{dreamina.MULTIFRAME_IMAGE_MAX} 张 images（收到 {count} 张）")
+        if self.model != dreamina.DEFAULT_MODEL:
+            raise ValueError(
+                "multiframe2video 的模型由平台固定、**不可选**，传 model 无效"
+                "（CLI 在这条子命令上不收 --model_version）；请去掉该字段")
+        if self.transition_prompts:
+            return self._check_multiframe_segments(count)
+        if self.transition_durations:
+            raise ValueError(
+                "只给 transition_durations 不给 transition_prompts 不是合法形态："
+                "逐段时长要跟逐段提示词一一对应")
+        if count != 2:
+            raise ValueError(
+                f"{count} 张图必须逐段给 transition_prompts（{count - 1} 段）；"
+                "只有**恰好 2 张**才能走 prompt + duration 简写")
+        if not self.prompt:
+            raise ValueError("multiframe2video 恰好 2 张时必须提供 prompt（简写形态）")
+        if self.duration is None:
+            raise ValueError("multiframe2video 恰好 2 张时必须提供 duration（简写形态）")
+        if not (dreamina.MULTIFRAME_TOTAL_MIN <= self.duration
+                <= dreamina.MULTIFRAME_SEGMENT_MAX):
+            raise ValueError(
+                f"multiframe2video 简写的 duration 需在 {dreamina.MULTIFRAME_TOTAL_MIN:.0f}-"
+                f"{dreamina.MULTIFRAME_SEGMENT_MAX:.0f}s：每段 1-8s 且总时长 ≥2s，"
+                "2 张只有一段，那一段就是总时长")
+        return self
+
+    def _check_multiframe_segments(self, count: int) -> "CreateClipRequest":
+        """长式的逐段闸：段数对齐 N-1、每段 1-8s、总时长 ≥2s、不收简写字段。"""
+        need = count - 1
+        if len(self.transition_prompts) != need:
+            raise ValueError(
+                f"{count} 张图需要 {need} 段转场，收到 {len(self.transition_prompts)} 段"
+                "（CLI 口径：for N images, the transition count is N-1）")
+        if any(not p.strip() for p in self.transition_prompts):
+            raise ValueError("transition_prompts 里不能有空段（每段都要描述一次画面演进）")
+        if self.prompt or self.duration is not None:
+            raise ValueError(
+                "逐段转场形态下不接受 prompt / duration：CLI 的那两个参数是「恰好 2 张」"
+                "专用简写，这里收下也送不出去；整片描述请逐段写进 transition_prompts")
+        durations = self.transition_durations
+        if durations is None:
+            total = dreamina.MULTIFRAME_DEFAULT_SEGMENT * need   # CLI 每段默认 3s
+        else:
+            if len(durations) != need:
+                raise ValueError(
+                    f"{count} 张图需要 {need} 段 transition_durations，收到 {len(durations)} 段"
+                    "（要么给满，要么整个省略让 CLI 按每段 3s 默认走）")
+            for seconds in durations:
+                if not (dreamina.MULTIFRAME_SEGMENT_MIN <= seconds
+                        <= dreamina.MULTIFRAME_SEGMENT_MAX):
+                    raise ValueError(
+                        f"转场段时长 {seconds}s 越界：每段必须 "
+                        f"{dreamina.MULTIFRAME_SEGMENT_MIN:.0f}-"
+                        f"{dreamina.MULTIFRAME_SEGMENT_MAX:.0f}s")
+            total = sum(durations)
+        if total < dreamina.MULTIFRAME_TOTAL_MIN:
+            raise ValueError(
+                f"转场总时长 {total}s 不足：CLI 要求总时长 ≥ "
+                f"{dreamina.MULTIFRAME_TOTAL_MIN:.0f}s")
         return self
 
 
@@ -413,6 +574,20 @@ def _low_credit_warning(credit: int | None, estimate: int | None) -> str | None:
             "已照常入队；扣费在 success 时才结算，余额不足的镜可能失败")
 
 
+# multiframe2video 没有实测单价，估算给不出数。如实说「估不出」而不是沉默：沉默与
+# 「估过了，余额够」在调用方看来一模一样，而这条 operation 恰恰是最贵的那类长片。
+_UNPRICED_NOTE = (
+    "本次含 multiframe2video：该模式单价**从未实测**，消耗估算不可用（服务端不瞎编价格），"
+    "请自行留意余额；扣费在 success 时才结算，真实消耗由 credit_count 回填"
+)
+
+
+def _merge_warning(*parts: str | None) -> str | None:
+    """把若干条提示并成一条 warning（都为空则不带这个键）。"""
+    kept = [p for p in parts if p]
+    return " ".join(kept) if kept else None
+
+
 def _ref_specs(req: CreateClipRequest) -> list[tuple[str, str]]:
     """本镜要物化的 ``(来源, 副本名主干)`` 列表，**顺序即落库顺序**。
 
@@ -425,6 +600,44 @@ def _ref_specs(req: CreateClipRequest) -> list[tuple[str, str]]:
         return [(req.first_image, "first"), (req.last_image, "last")]
     sources = req.images or ([req.image] if req.image else [])
     return [(s, "ref" if i == 0 else f"ref_{i + 1}") for i, s in enumerate(sources)]
+
+
+def _segments_json(req: CreateClipRequest) -> str | None:
+    """multiframe 长式的逐段转场序列化成 ``transitions_json``；简写与其余 operation 为 None。
+
+    ``ensure_ascii=False`` 让中文提示词在库里可读（运营要直接看这一列排查）。
+    """
+    if req.operation != "multiframe2video" or not req.transition_prompts:
+        return None
+    durations = req.transition_durations
+    segments = [{"prompt": p, "duration": durations[i] if durations else None}
+                for i, p in enumerate(req.transition_prompts)]
+    return json.dumps(segments, ensure_ascii=False)
+
+
+def _stored_prompt(req: CreateClipRequest) -> str:
+    """落 ``prompt`` 列的值。multiframe 长式没有整片提示词，用逐段的连成台账串。
+
+    列是 NOT NULL 且要给运营看，空着或塞占位符都不如把真实内容连起来。**这是派生值**，
+    真正提交给 CLI 的是 ``transitions_json`` 里那几段。
+    """
+    if req.prompt:
+        return req.prompt
+    return " → ".join(req.transition_prompts or [])
+
+
+def _stored_duration(req: CreateClipRequest) -> int:
+    """落 ``duration`` 列的值。multiframe 长式没有整片时长，用各段之和（同样是派生值）。
+
+    省略 ``transition_durations`` 时按 CLI 的每段 3s 默认折算——只影响这一列的可读性，
+    提交参数里不会出现我们编的时长（见 services.dreamina._multiframe_args）。
+    """
+    if req.duration is not None:
+        return req.duration
+    segments = req.transition_durations
+    need = len(req.transition_prompts or [])
+    total = sum(segments) if segments else dreamina.MULTIFRAME_DEFAULT_SEGMENT * need
+    return round(total)
 
 
 def _first_ref_source(req: CreateClipRequest) -> str | None:
@@ -506,14 +719,16 @@ async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id
         batch_index=batch_index,
         client_ref=req.client_ref,
         operation=req.operation,
-        prompt=req.prompt,
+        # prompt / duration 对 multiframe 长式是派生值（见 _stored_prompt / _stored_duration）
+        prompt=_stored_prompt(req),
         model=req.model,
-        duration=req.duration,
+        duration=_stored_duration(req),
         ratio=req.ratio,
         image_source=_first_ref_source(req),
         # 两列都写：image_paths_json 是权威全集，image_path 存第一张（老读者与老行的回落口）
         image_path=image_paths[0] if image_paths else None,
         image_paths_json=json.dumps(image_paths) if image_paths else None,
+        transitions_json=_segments_json(req),
         status="error" if error else "queued",
         error=error,
         created_by=op.id,
@@ -567,8 +782,11 @@ async def create_video_clip(req: CreateClipRequest) -> dict:
         clip, _created = await _insert_clip(
             session, op, req, clip_id=clip_id, image_paths=image_paths)
         payload = {"clip_id": clip.clip_id}
-        warning = _low_credit_warning(
-            status.get("credit"), dreamina.estimate_credit(req.model, req.duration))
+        # 估价按**落库后的行**取（multiframe 长式的 duration 是派生值，请求里根本没有）
+        warning = _merge_warning(
+            _low_credit_warning(status.get("credit"), dreamina.estimate_credit(
+                clip.model, clip.duration, clip.operation)),
+            _UNPRICED_NOTE if clip.operation == "multiframe2video" else None)
         if warning:
             payload["warning"] = warning
         return payload
@@ -633,6 +851,7 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
     materialized = await asyncio.gather(
         *(_materialize(cid, shot) for cid, (_i, shot) in zip(new_ids, pending)))
     estimate = 0
+    unpriced = False
     async with get_session() as session:
         for clip_id, (index, shot), (image_paths, img_error) in zip(
                 new_ids, pending, materialized):
@@ -642,9 +861,13 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
             )
             clip_ids[index] = clip.clip_id
             if created and not img_error:
-                estimate += dreamina.estimate_credit(shot.model, shot.duration) or 0
+                estimate += dreamina.estimate_credit(
+                    clip.model, clip.duration, clip.operation) or 0
+                unpriced = unpriced or clip.operation == "multiframe2video"
     payload = {"batch_id": batch_id, "clip_ids": clip_ids}
-    warning = _low_credit_warning(status.get("credit"), estimate)
+    # 批里只要有一镜估不出价，整批的估算就是不完整的——必须说，别让人拿它当总账
+    warning = _merge_warning(_low_credit_warning(status.get("credit"), estimate),
+                             _UNPRICED_NOTE if unpriced else None)
     if warning:
         payload["warning"] = warning
     return payload
