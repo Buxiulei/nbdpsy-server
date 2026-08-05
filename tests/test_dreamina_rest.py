@@ -1119,3 +1119,184 @@ async def test_batch_carries_multiframe_shots(tmp_path, monkeypatch):
     assert all(r.operation == "multiframe2video" for r in rows)
     assert len(dreamina.ref_paths(rows[1])) == 3
     assert rows[1].duration == 7
+
+
+# ── 顺序即语义：多图不许去重 / 重排 / 合并 ─────────────────────────────────────
+async def test_reference_image_order_is_preserved_exactly(tmp_path, monkeypatch):
+    """多图的**数组顺序 = @图片N 编号顺序**，逐位比对，不只是「数量对」。
+
+    prompt 里「@图片1 锁人物、@图片2 定场景」是靠位置绑定语义的。顺序一乱不会报错，
+    只会默默出错图——这类 bug 线上最难查，故这里按位钉死到具体内容。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 3, folder="ordered")   # 内容各带序号，可反查是哪一张
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", images=images),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    # 副本内容按位对回请求数组：第 i 张必须是请求里的第 i 张
+    for i, path in enumerate(paths):
+        assert Path(path).read_bytes() == _PNG + str(i).encode(), f"第 {i + 1} 张错位了"
+    flags = [a for a in dreamina.build_submit_args(clip) if a.startswith("--image=")]
+    assert flags == [f"--image={p}" for p in paths], "CLI 参数顺序必须与数组顺序逐位一致"
+
+
+async def test_duplicate_image_urls_are_not_merged(tmp_path, monkeypatch):
+    """**同一个 URL 传两次 = 两个槽**，绝不去重合并。
+
+    URL 相同不代表语义相同：prompt 完全可以写「@图片1 锁人物、@图片2 定场景」而两者
+    指向同一张图。合并会让**后面所有编号前移**，prompt 的绑定全错位，且不报错。
+    这条锁防的是将来有人为省一次下载做「相同 URL 只物化一次」的优化——那时行为变了
+    测试却不红，线上默默出错图。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    first, second = _seed_uploads(tmp_path, 2, folder="dup")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", images=[first, first, second]),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    assert len(paths) == 3, "三个槽就要三条路径，去重就是错位"
+    assert len(set(paths)) == 3, "同 URL 的两个槽也要各自独立副本，不能共用一个文件"
+    assert all(Path(p).is_file() for p in paths)
+    # 顺序 A,A,B：前两张内容相同、第三张不同
+    assert Path(paths[0]).read_bytes() == Path(paths[1]).read_bytes() == _PNG + b"0"
+    assert Path(paths[2]).read_bytes() == _PNG + b"1"
+    flags = [a for a in dreamina.build_submit_args(clip) if a.startswith("--image=")]
+    assert flags == [f"--image={p}" for p in paths] and len(flags) == 3
+
+
+async def test_batch_shot_keeps_image_order(tmp_path, monkeypatch):
+    """批量端点与单镜共用同一条物化路径，这里只做顺序冒烟（同 URL 也不合并）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    first, second = _seed_uploads(tmp_path, 2, folder="bdup")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={"shots": [
+            _shot(operation="multimodal2video", images=[second, first, first]),
+        ]}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    assert len(paths) == 3 and len(set(paths)) == 3
+    assert Path(paths[0]).read_bytes() == _PNG + b"1"       # 第一个槽是 second
+    assert Path(paths[1]).read_bytes() == Path(paths[2]).read_bytes() == _PNG + b"0"
+
+
+async def test_multiframe_image_order_is_preserved(tmp_path, monkeypatch):
+    """多帧故事的图序就是**故事顺序**，同样逐位钉死（--images 逗号串按位对齐）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 4, folder="story")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_mf(images=images, transition_prompts=["一到二", "二到三", "三到四"]),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    for i, path in enumerate(paths):
+        assert Path(path).read_bytes() == _PNG + str(i).encode(), f"第 {i + 1} 帧错位了"
+    assert f"--images={','.join(paths)}" in dreamina.build_submit_args(clip)
+
+
+# ── multiframe 的 model 占位与逐段原话回显 ───────────────────────────────────
+async def test_multiframe_stores_placeholder_not_a_real_model(tmp_path, monkeypatch):
+    """multiframe 行**绝不存真实模型名**：那条 operation 的模型由平台固定，存 seedance2.5
+    等于在库里记一条我们明知不成立的事实，日后排查/统计/对账的人会被骗且毫无痕迹。
+
+    存一个明显不是档位名的占位符，下游一眼能看出「这列对这条 operation 不适用」。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="ph")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post("/api/video-clips",
+                              json=_mf(images=two, prompt="甲到乙", duration=5), headers=h)
+        assert r.status_code == 202, r.text
+        clip = await _only_clip()
+        assert clip.model == dreamina.MULTIFRAME_MODEL_PLACEHOLDER
+        assert clip.model not in ("seedance2.0", "seedance2.0fast", "seedance2.0_vip",
+                                  "seedance2.0fast_vip", "seedance2.0mini", "seedance2.5")
+        # 占位符也绝不能混进提交参数（CLI 在这条子命令上不收 --model_version）
+        assert not any(a.startswith("--model_version")
+                       for a in dreamina.build_submit_args(clip))
+        got = await client.get(f"/api/video-clips/{clip.clip_id}", headers=h)
+        assert got.json()["model"] == dreamina.MULTIFRAME_MODEL_PLACEHOLDER
+
+
+async def test_multiframe_rejects_explicit_model_but_not_the_default(tmp_path, monkeypatch):
+    """**显式传 model** 才 422；根本没传就走平台固定，不误伤默认值。
+
+    靠 pydantic 的 model_fields_set 区分「请求体里真的出现过这个键」与「用了字段默认值」，
+    因此这一闸连「显式传了恰好等于默认档的 seedance2.5」都能挡住。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="ph2")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        for model in ("seedance2.0fast", dreamina.DEFAULT_MODEL):
+            r = await client.post(
+                "/api/video-clips",
+                json=_mf(images=two, prompt="x", duration=5, model=model), headers=h)
+            assert r.status_code == 422, f"{model} → {r.text}"
+            assert "不可选" in r.text
+        assert await _clip_count() == 0
+
+        ok = await client.post("/api/video-clips",
+                               json=_mf(images=two, prompt="x", duration=5), headers=h)
+        assert ok.status_code == 202, ok.text
+
+
+async def test_multiframe_get_returns_raw_segments_not_only_derived(tmp_path, monkeypatch):
+    """GET 必须回**逐段原话**：台账里的 prompt 是连起来的派生串，调用方拿它还原不了
+    自己传了什么，事后查「我第 3 段写的什么」必须查得到原文。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 4, folder="raw")
+    prompts = ["空椅缓缓转向窗", "窗光漫过来访者侧脸", "镜头拉远收进整个诊室"]
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post(
+            "/api/video-clips",
+            json=_mf(images=images, transition_prompts=prompts,
+                     transition_durations=[3.0, 4.0, 5.0]),
+            headers=h)
+        assert r.status_code == 202, r.text
+        body = (await client.get(f"/api/video-clips/{r.json()['clip_id']}",
+                                 headers=h)).json()
+
+    assert [t["prompt"] for t in body["transitions"]] == prompts, "逐段原话要能原样取回"
+    assert [t["duration"] for t in body["transitions"]] == [3.0, 4.0, 5.0]
+    # 派生的 prompt / duration 只落库供人看台账，**本来就不在对外视图里**——
+    # 加上 transitions 之后，调用方能拿到的这条 operation 的入参就只有原话这一份。
+    clip = await _only_clip()
+    assert clip.prompt == " → ".join(prompts) and clip.duration == 12
+    assert "prompt" not in body and "duration" not in body
+
+
+async def test_non_multiframe_clip_has_null_transitions(tmp_path, monkeypatch):
+    """其余 operation 的 transitions 恒为 null（别让调用方对着空列表写分支）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post("/api/video-clips", json=_shot(), headers=h)
+        body = (await client.get(f"/api/video-clips/{r.json()['clip_id']}",
+                                 headers=h)).json()
+        assert body["transitions"] is None

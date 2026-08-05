@@ -677,3 +677,14 @@ def test_build_submit_args_multiframe_omits_durations_when_unset():
                          ' {"prompt": "乙推近丙", "duration": null}]'))
     assert len([a for a in args if a.startswith("--transition-prompt=")]) == 2
     assert not any(a.startswith("--transition-duration") for a in args)
+
+
+async def test_compliance_models_exclude_multiframe_rows(db_factory):
+    """合规观测列表**排除 multiframe 行**：那条 operation 的模型由平台固定，我们库里那个值
+    是占位符，混进「真出过片的模型」里就不是「近似」而是污染——读的人会当它是个真实档位。
+    """
+    await _seed_clip(db_factory, status="done", model="seedance2.0fast_vip")
+    await _seed_clip(db_factory, status="done", operation="multiframe2video",
+                     model=dreamina.MULTIFRAME_MODEL_PLACEHOLDER)
+    async with db_factory() as s:
+        assert await dreamina.compliance_confirmed_models(s) == ["seedance2.0fast_vip"]

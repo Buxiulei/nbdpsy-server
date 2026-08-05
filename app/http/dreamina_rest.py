@@ -106,13 +106,16 @@ _MULTIFRAME_NOTE = (
     "②**简写**（恰好 2 张）：`prompt` + `duration` 两者必填，duration **2-8s**"
     "（每段 1-8s 且总时长 ≥2s，2 张只有一段，那一段就是总时长）。"
     "每段 1-8s、总时长 ≥2s，越界当场 422。"
-    "**`model` 传了就 422**：这条 operation 的模型由平台固定、CLI 不接受 --model_version；"
-    "GET 回显里的 model 只是占位，别拿它判档。**不接受 ratio**（画幅由第一张图推断）。"
+    "**`model` 传了就 422**（判据是请求体里出现过这个键，传成默认档一样 422）："
+    "这条 operation 的模型由平台固定、CLI 不接受 --model_version，服务端也无从得知是哪档；"
+    "**GET 回显的 model 是占位符 `platform_fixed`**，那不是档位名，别拿它判档或查价。"
+    "**不接受 ratio**（画幅由第一张图推断）。"
     "**单价从未实测**：提交必带一条「估不出」的 warning，低积分估算对它不可用"
     "（服务端不瞎编价格），真实消耗等 success 后看 credit_count；"
     "余额连最便宜一镜都不够时**照旧 409 硬拦**。"
-    "台账口径：长式的 GET `prompt` 是各段提示词连成的串、`duration` 是各段之和，"
-    "**都是服务端派生值不是你的原话**。"
+    "**入参回显看 GET 的 `transitions`**（逐段原话，[{prompt, duration}]）——"
+    "库里那条行的 prompt / duration 是服务端为台账合成的派生值（各段连起来 / 各段之和），"
+    "本来就不在对外视图里，别去别处找你的原话。"
 )
 
 MANIFEST_ENTRIES = [
@@ -169,11 +172,17 @@ MANIFEST_ENTRIES = [
         "method": "GET", "path": "/api/video-clips/{clip_id}",
         "summary": "查单条片段任务状态 / 排队秒数 / 产物直链",
         "admin_only": False, "params": {"clip_id": "path,str(vc_ 开头)"},
-        "returns": "{clip_id, status, operation, model, submit_id, credit_count, video_url, "
-                   "error, last_poll_error, queued_seconds, expires_at, expired, batch_id, "
-                   "client_ref, created_at}",
+        "returns": "{clip_id, status, operation, model, transitions, submit_id, credit_count, "
+                   "video_url, error, last_poll_error, queued_seconds, expires_at, expired, "
+                   "batch_id, client_ref, created_at}",
         "errors": "403=非本人任务且非 admin；404=clip 不存在",
-        "notes": "status 五态 queued|submitted|querying|done|error。**error 与 last_poll_error "
+        "notes": "**transitions** 是 multiframe2video 的逐段**原话**回显"
+                 "（[{prompt, duration}]，duration 为 null 表示该段用 CLI 的 3s 默认），"
+                 "其余 operation 恒为 null——多帧故事的入参只有这一份能原样取回，"
+                 "事后查「我第 3 段写的什么」看它。**model 对 multiframe2video 是占位符 "
+                 "`platform_fixed`**（那条 operation 的模型由平台固定、CLI 不给查），"
+                 "**别拿它判档、也别拿它查价**。"
+                 "status 五态 queued|submitted|querying|done|error。**error 与 last_poll_error "
                  "语义不同**：前者是任务终态失败，后者只是查询接口瞬时故障（任务仍在排队，别据此重发）。"
                  f"done 后 video_url 是免鉴权直链，{settings.CLIP_TTL_DAYS} 天后按 expires_at 清理"
                  "（产物没了但 status 仍是 done、credit_count 保留供对账）。"
@@ -237,7 +246,9 @@ MANIFEST_ENTRIES = [
         "notes": f"CLI 路径 {settings.DREAMINA_BIN}（登录态文件在该 CLI 的 ~/.dreamina_cli/，"
                  "公司号一份，运营侧零登录；失效时管理员重扫码后把整目录 scp 到 server）。"
                  "compliance_confirmed_models 是**观测近似**——DB 里真出过片的模型列表，"
-                 "不在其中不代表未授权（CLI 无查询授权状态的接口）。",
+                 "不在其中不代表未授权（CLI 无查询授权状态的接口）。"
+                 "**不含 multiframe2video 的行**：那条 operation 的 model 是占位符，"
+                 "混进来就不是近似而是污染。",
     },
 ]
 
@@ -406,7 +417,10 @@ class CreateClipRequest(BaseModel):
             raise ValueError(
                 f"multiframe2video 需要 {dreamina.MULTIFRAME_IMAGE_MIN}-"
                 f"{dreamina.MULTIFRAME_IMAGE_MAX} 张 images（收到 {count} 张）")
-        if self.model != dreamina.DEFAULT_MODEL:
+        if "model" in self.model_fields_set:
+            # 判据是「请求体里真的出现过 model 这个键」而不是「值等于默认档」：后者分不清
+            # 「显式传了 seedance2.5」和「根本没传」，会放过一半的误解。用 model_fields_set
+            # 就不必为这条 operation 去动另三种的字段默认值契约。
             raise ValueError(
                 "multiframe2video 的模型由平台固定、**不可选**，传 model 无效"
                 "（CLI 在这条子命令上不收 --model_version）；请去掉该字段")
@@ -521,12 +535,19 @@ def _is_expired(clip: VideoClip) -> bool:
 
 
 def _clip_payload(clip: VideoClip) -> dict:
-    """对外单条视图（字段名与 skill 侧 K_* 常量逐字对齐）。"""
+    """对外单条视图（字段名与 skill 侧 K_* 常量逐字对齐）。
+
+    ``transitions`` 回的是 multiframe 长式的**逐段原话**（``[{prompt, duration}]``），
+    不能只给 ``prompt`` 那个连起来的派生串：调用方拿派生串还原不出自己传了什么，
+    事后查「我第 3 段写的什么」就没了出处。其余 operation 为 null。
+    """
+    segments = dreamina.transitions(clip)
     return {
         "clip_id": clip.clip_id,
         "status": _public_status(clip),
         "operation": clip.operation,
         "model": clip.model,
+        "transitions": segments or None,
         "submit_id": clip.submit_id,
         "credit_count": clip.credit_count,
         "video_url": clip.video_url,
@@ -613,6 +634,19 @@ def _segments_json(req: CreateClipRequest) -> str | None:
     segments = [{"prompt": p, "duration": durations[i] if durations else None}
                 for i, p in enumerate(req.transition_prompts)]
     return json.dumps(segments, ensure_ascii=False)
+
+
+def _stored_model(req: CreateClipRequest) -> str:
+    """落 ``model`` 列的值。multiframe 存占位符——**绝不把一个我们不知道真假的档位名写进库**。
+
+    那条 operation 的模型由平台固定、CLI 不接受 --model_version，请求里那个 seedance2.5
+    只是字段默认值。存它等于记一条我们明知不成立的事实，而且骗得毫无痕迹（见
+    ``dreamina.MULTIFRAME_MODEL_PLACEHOLDER``）。占位符不会进提交参数：multiframe 的参数
+    组装根本不带 --model_version。
+    """
+    if req.operation == "multiframe2video":
+        return dreamina.MULTIFRAME_MODEL_PLACEHOLDER
+    return req.model
 
 
 def _stored_prompt(req: CreateClipRequest) -> str:
@@ -721,7 +755,7 @@ async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id
         operation=req.operation,
         # prompt / duration 对 multiframe 长式是派生值（见 _stored_prompt / _stored_duration）
         prompt=_stored_prompt(req),
-        model=req.model,
+        model=_stored_model(req),
         duration=_stored_duration(req),
         ratio=req.ratio,
         image_source=_first_ref_source(req),

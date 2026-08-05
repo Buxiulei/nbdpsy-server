@@ -92,6 +92,12 @@ MULTIFRAME_TOTAL_MIN = 2.0
 # CLI 省略 --transition-duration 时每段的默认秒数。只用来**估算台账里的总时长**，
 # 提交时绝不把它拼成显式参数——那会把 CLI 将来可能改的默认值钉死在我们这边。
 MULTIFRAME_DEFAULT_SEGMENT = 3.0
+# multiframe 行的 ``model`` 列存这个占位符，**绝不存真实档位名**。这条子命令的模型由平台
+# 按 TCC 下发、CLI 不接受 --model_version，我们无从得知它到底用了哪档；写 seedance2.5 进去
+# 就是在库里记一条**我们明知不成立**的事实，日后排查 / 统计 / 对账的人会被骗且毫无痕迹。
+# 故意取一个不像档位名的值：下游一眼能看出「这列对这条 operation 不适用」，而 NULL 会被
+# 当成「老行 / 漏写」。真实档位要等跑一条真任务读 list_task 的 benefit_type 才能确知。
+MULTIFRAME_MODEL_PLACEHOLDER = "platform_fixed"
 
 # 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
 # seedance2.5 = 130（2026-08-05 生产实测 vc_3e1260f8ce，credit_count 与余额扣减对账精确；
@@ -713,9 +719,16 @@ async def compliance_confirmed_models(session) -> list[str]:
 
     CLI 没有「查某模型是否已授权」的接口，能确证的只有「这个模型真出过片」。故这是下界：
     没出现的模型不代表未授权，只代表本服务还没成功用它出过片。
+
+    **排除 multiframe2video 行**：它们的 model 列是 ``MULTIFRAME_MODEL_PLACEHOLDER`` 占位符
+    （模型由平台固定，我们不知道是哪档）。「近似」和「报一个我们明知不成立的档位」是两回事
+    ——后者是污染，读的人会把占位符当成一个真实模型。
     """
     rows = (await session.execute(
-        select(VideoClip.model).where(VideoClip.status == "done").distinct()
+        select(VideoClip.model)
+        .where(VideoClip.status == "done")
+        .where(VideoClip.operation != "multiframe2video")
+        .distinct()
     )).scalars().all()
     return sorted(m for m in rows if m)
 
