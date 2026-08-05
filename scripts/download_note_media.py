@@ -12,7 +12,8 @@
     python scripts/download_note_media.py --note 6a707e9f...          # 单篇
     python scripts/download_note_media.py --account 1 --out /path/dir # 指定目录
 
-默认落 ``data/media/{account_id}/{note_id}/{序号}_{file_id}.jpg``;已存在的跳过(幂等)。
+默认落 ``data/media/{account_id}/{note_id}/{序号}_{file_id}.{jpg|mp4}``(按 kind);
+已存在的跳过(幂等)。
 """
 
 import argparse
@@ -83,7 +84,9 @@ def main() -> int:
         media = json.loads(row["media_json"] or "[]")
         note_dir = args.out / str(row["account_id"]) / row["note_id"]
         for item in media:
-            ext = ".jpg"
+            # 扩展名按 kind 定:视频清单里的是裸 mp4(编辑页 <video> 给的),
+            # 一律 .jpg 会存出打不开的"图片"
+            ext = ".mp4" if item.get("kind") == "video" else ".jpg"
             name = f"{item['ordinal']:02d}_{item['file_id']}{ext}"
             ok, msg = download_one(item["url"], note_dir / name)
             if ok:
