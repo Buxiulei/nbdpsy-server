@@ -24,6 +24,7 @@
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -133,7 +134,8 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
             body = resp.json()
         except Exception:  # noqa: BLE001 — 读不到就不记,绝不让监听器抛异常
             return
-        api.append({"url": url, "status": getattr(resp, "status", 200), "body": body})
+        api.append({"url": url, "status": getattr(resp, "status", 200),
+                    "ts": round(time.monotonic(), 3), "body": body})
 
     client = SyncClient(account_id, cookies)
     try:
@@ -226,11 +228,15 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
                     nc._close_quote_modal(page, human)
             dom = base
         else:
+            extra["editor_ready_ts"] = round(time.monotonic(), 3)
             entry = page.query_selector(nc._QUOTE_CONTAINER)
             if entry is None:
                 raise RuntimeError("没找到引用笔记入口")
+            extra["responses_before_click"] = len(api)
+            extra["modal_click_ts"] = round(time.monotonic(), 3)
             human.click(entry, reason="打开引用笔记弹窗(只读采集)")
             human.wait(2.0, 3.0, context="等弹窗与候选渲染")
+            extra["responses_after_wait"] = len(api)
             dom = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
         snapshot = {
             "scene": scene,
