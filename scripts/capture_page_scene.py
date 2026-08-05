@@ -251,6 +251,25 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
         client.stop()
 
 
+def _inflight_jobs(account_id: int) -> list:
+    """只读查 browser_jobs:该账号 running/queued 的行(跨进程唯一共享真相)。"""
+    import sqlite3
+
+    from app.services import browser_jobs_repo
+
+    con = sqlite3.connect(
+        f"file:{browser_jobs_repo.current_db_path()}?mode=ro", uri=True
+    )
+    try:
+        return con.execute(
+            "SELECT id, kind, status FROM browser_jobs "
+            "WHERE account_id = ? AND status IN ('running', 'queued')",
+            (account_id,),
+        ).fetchall()
+    finally:
+        con.close()
+
+
 async def main() -> None:
     if len(sys.argv) < 4:
         print(__doc__)
@@ -263,6 +282,19 @@ async def main() -> None:
     if not cookies:
         print(f"账号 {account_id} 无可用 cookie")
         sys.exit(1)
+    # 跨进程撞车门禁(2026-08-05 两起事故:上午 04072ab7、下午 9bc7d3b6 都是本脚本
+    # kill_orphans 杀了 worker 子进程在同号上的浏览器)。account_locks 是**进程内**单例,
+    # 拦不住别的进程 —— 唯一共享真相是 browser_jobs 台账,起浏览器前必须查它。
+    # --force 仅限确认过 worker 已停/任务确已死时用。
+    if "--force" not in sys.argv:
+        blockers = _inflight_jobs(account_id)
+        if blockers:
+            print(
+                f"账号 {account_id} 有在飞浏览器任务,采集会与其互杀会话,拒绝启动:\n  "
+                + "\n  ".join(f"{j_id[:8]} {kind} ({status})" for j_id, kind, status in blockers)
+                + "\n等它们终态后再跑;确认无风险可加 --force 覆盖。"
+            )
+            sys.exit(3)
     async with account_locks.get(account_id):
         async with browser_slot():
             snapshot = await asyncio.to_thread(capture, scene, account_id, note_id, cookies)
