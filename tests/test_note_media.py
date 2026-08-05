@@ -90,38 +90,58 @@ def test_unknown_segment_is_kept_with_warning(caplog):
     assert got["url"].endswith("/brandnewseg/1040g34oNEWID000000000")
 
 
+_EDITOR_URL = (
+    "https://sns-na-i4.xhscdn.com/spectrum/1040g0k0323fjic5k74005noda2v08d26hqqevio"
+    "?sign=11d6b94d5bd684f802433f82b8d81dfc&t=6"
+)
+
+
+def test_editor_page_url_normalizes_same_as_detail_page():
+    """编辑页 URL(另一个域 + query 签名)归一化结果同构。
+
+    实测:归一化后取回 375254B,与该图在详情页那条路取回的**逐字节同尺寸** ——
+    同一张原图,两条路殊途同归。query 签名被 urlsplit 天然剥掉。
+    """
+    got = nm.normalize_media_url(_EDITOR_URL)
+    assert got == {
+        "file_id": "1040g0k0323fjic5k74005noda2v08d26hqqevio",
+        "segment": "spectrum",
+        "url": "https://sns-img-qc.xhscdn.com/spectrum/"
+               "1040g0k0323fjic5k74005noda2v08d26hqqevio",
+    }
+
+
 def test_fetch_note_media_isolates_single_failure(monkeypatch):
     """单篇抓取炸了只记该篇 error,其余篇照常(与正文回填同一纪律)。"""
     class _Page:
         def __init__(self):
-            self.visited = []
+            self.opened = []
 
         def evaluate(self, _js):
-            if len(self.visited) == 2:      # 第二篇读 DOM 时炸
+            if len(self.opened) == 2:      # 第二篇读 DOM 时炸
                 raise RuntimeError("页面没了")
-            return [_SIGNED_SPECTRUM, _AVATAR]
+            return [_EDITOR_URL]
 
     class _Human:
         def __init__(self, page):
             self.page = page
-
-        def navigate(self, url):
-            self.page.visited.append(url)
 
         def wait(self, *_a, **_kw):
             pass
 
     monkeypatch.setattr(nm, "SyncHumanActions", _Human)
     page = _Page()
+    monkeypatch.setattr(
+        nm, "open_update_page",
+        lambda p, account_id, note_id: p.opened.append((account_id, note_id)),
+    )
     out = nm.fetch_note_media(page, 1, [
-        {"note_id": "n1", "xsec_token": "t1"},
-        {"note_id": "n2", "xsec_token": "t2"},
-        {"note_id": "n3", "xsec_token": "t3"},
+        {"note_id": "n1"}, {"note_id": "n2"}, {"note_id": "n3"},
     ])
     assert len(out["n1"]["media"]) == 1
     assert "media_fetch_failed" in out["n2"]["error"]
     assert len(out["n3"]["media"]) == 1        # 第二篇失败没影响第三篇
-    assert "xsec_token=t3" in page.visited[-1]
+    assert page.opened[-1] == (1, "n3")        # 走编辑页深链(不需要 xsec_token)
 
 
 # ---------------- 夹具(照抄 test_note_purpose.wired_db:monkeypatch 全局会话工厂) ----------------
@@ -151,7 +171,8 @@ async def wired_db(tmp_path, monkeypatch):
 
 
 async def test_pick_targets_skips_fetched_private_and_tokenless(wired_db):
-    """挑篇过滤:已抓过/私密/无 token/无 note_id 一律不挑(每条都对应一次会话成本)。"""
+    """挑篇过滤:已抓过/私密/可见性未知/别的账号一律不挑(每条都对应一次会话成本);
+    **没有 xsec_token 的篇要挑上** —— 编辑页深链不需要它。"""
     import app.core.db as db_module
     from datetime import datetime
 
@@ -165,6 +186,7 @@ async def test_pick_targets_skips_fetched_private_and_tokenless(wired_db):
                           media_fetched_at=datetime.utcnow()),      # 抓过
             PublishedNote(account_id=1, note_id="priv", xsec_token="t", permission_code=1),
             PublishedNote(account_id=1, note_id="unknown_vis", xsec_token="t"),  # 可见性未知
+            # 编辑页深链不要 token:没 token 的篇现在**应该**被挑上(改前会被漏掉)
             PublishedNote(account_id=1, note_id="notoken", permission_code=0),
             PublishedNote(account_id=2, note_id="other", xsec_token="t", permission_code=0),
         ])
@@ -172,7 +194,7 @@ async def test_pick_targets_skips_fetched_private_and_tokenless(wired_db):
 
     async with db_module.async_session() as s:
         picked = await svc.pick_targets(s, 1, None, 10)
-    assert [p["note_id"] for p in picked] == ["ok1"]
+    assert sorted(p["note_id"] for p in picked) == ["notoken", "ok1"]
 
 
 async def test_execute_writes_manifest_and_marks_fetched(wired_db, monkeypatch):

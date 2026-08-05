@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from loguru import logger
 
+from app.browser.note_components import open_update_page
 from app.browser.sync_human_actions import SyncHumanActions
 
 # 永久取图域(实测唯一可用的无签名域)
@@ -101,22 +102,30 @@ def collect_media(raw_urls: List[str]) -> List[Dict[str, Any]]:
     return out
 
 
-# 详情页只读取图:取笔记正文区的 img(排除头像等),按 DOM 顺序
-_COLLECT_JS = r"""
-() => [...document.querySelectorAll('img')]
+# 编辑页图片区:**容器精确 + 一次拿全**(2026-08-05 取证定案,见下方 fetch_note_media)
+_EDITOR_IMG_JS = r"""
+() => [...document.querySelectorAll('.img-upload-area .img-container img')]
     .map(i => i.currentSrc || i.src)
     .filter(s => s && s.includes('xhscdn.com'))
 """
 
 
 def fetch_note_media(page, account_id: int, notes: List[Dict[str, str]]) -> Dict[str, dict]:
-    """同一会话内逐篇打开详情页,只读取媒体清单;返回 ``{note_id: {...}}``。
+    """同一会话内逐篇打开**编辑页**,只读取媒体清单;返回 ``{note_id: {...}}``。
 
-    ``notes`` 每项 ``{note_id, xsec_token, xsec_source}``(深链要 token,台账里有)。
-    单篇失败(笔记被删/token 过期)只记该篇的 ``error``,**不影响其余篇** —— 与
-    ``note_purpose.fetch_note_contents`` 同一纪律。
+    **为什么用编辑页而不是详情页**(2026-08-05 两轮取证的结论,改前必读):
 
-    纯只读:导航 + 读 DOM,不点任何按钮、不改任何状态。
+    - 详情页那条路**两个硬伤**:①右侧推荐流也是 ``img.xhscdn``,一篇 10 图的笔记页面上
+      有 92 张图、其中 43 张是别人笔记的封面(实测账号 9 首轮抓出 444 项垃圾就是这么来的);
+      ②笔记图在 swiper 轮播里**懒加载**,只渲染可见的 2-3 张,不滑动拿不全;
+    - 编辑页 ``.img-upload-area .img-container img`` **容器精确且一次渲染全部**
+      (12 图夹具为证),URL 形如 ``sns-na-i4.xhscdn.com/{段}/{file_id}?sign=..&t=..``,
+      归一化后与详情页同一张原图(实测两者取回体积逐字节相同 375254B)。
+
+    ``notes`` 每项只需 ``{note_id}``(编辑页深链不要 xsec_token)。单篇失败(笔记被删)
+    只记该篇 ``error``,**不影响其余篇** —— 与 ``note_purpose.fetch_note_contents`` 同纪律。
+
+    纯只读:进页面 + 读 DOM,不点任何按钮、不提交、不改任何状态。
     """
     human = SyncHumanActions(page)
     results: Dict[str, dict] = {}
@@ -127,20 +136,14 @@ def fetch_note_media(page, account_id: int, notes: List[Dict[str, str]]) -> Dict
         if index:
             human.wait(2.0, 5.0, context="看完一篇,歇一下再看下一篇")
         try:
-            token = note.get("xsec_token") or ""
-            source = note.get("xsec_source") or "pc_creatormng"
-            url = (
-                f"https://www.xiaohongshu.com/explore/{note_id}"
-                f"?xsec_token={token}&xsec_source={source}"
-            )
-            human.navigate(url)
-            human.wait(*_MEDIA_WAIT_S, context="详情页渲染")
-            raw = page.evaluate(_COLLECT_JS) or []
+            open_update_page(page, account_id, note_id)
+            human.wait(*_MEDIA_WAIT_S, context="编辑页图片区渲染")
+            raw = page.evaluate(_EDITOR_IMG_JS) or []
             media = collect_media(raw)
             results[note_id] = {"media": media, "raw_count": len(raw)}
             logger.info(
                 f"[note_media] 账号{account_id} {note_id}: 收 {len(media)} 项"
-                f"(页面 xhscdn img {len(raw)} 个)"
+                f"(图片区 img {len(raw)} 个)"
             )
         except Exception as exc:  # noqa: BLE001 — 单篇失败不拖垮整批
             logger.warning(f"[note_media] 账号{account_id} {note_id} 抓取失败: {exc}")

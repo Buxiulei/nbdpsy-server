@@ -51,17 +51,18 @@ def start_sync(account_id: int, note_id: str | None = None, limit: int | None = 
 
 
 async def pick_targets(session, account_id: int, note_id: str | None, limit: int) -> list[dict]:
-    """挑这一轮要抓的篇:有 note_id + 有 xsec_token + 公开 + 还没抓过,按发布时间倒序。
+    """挑这一轮要抓的篇:有 note_id + 公开 + 还没抓过,按发布时间倒序。
 
-    ``note_id`` 显式指定时只放宽"还没抓过"(点名重抓某篇理应能重来),公开性与
-    token 两条仍照旧 —— 那是可行性约束不是偏好。
+    不要求 xsec_token:媒体走**编辑页**(深链只要 note_id),token 是详情页那条废弃路
+    才需要的东西 —— 要求它会把台账里没同步到 token 的篇白白漏掉。
+
+    ``note_id`` 显式指定时只放宽"还没抓过"(点名重抓某篇理应能重来),公开性仍照旧
+    —— 那是可行性约束不是偏好。
     """
     stmt = select(PublishedNote).where(
         PublishedNote.account_id == account_id,
         PublishedNote.note_id.is_not(None),
         PublishedNote.note_id != "",
-        PublishedNote.xsec_token.is_not(None),
-        PublishedNote.xsec_token != "",
         PublishedNote.permission_code == 0,
     )
     if note_id:
