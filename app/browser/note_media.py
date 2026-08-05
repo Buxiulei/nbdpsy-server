@@ -41,6 +41,10 @@ _KNOWN_SEGMENTS = ("notes_pre_post", "spectrum", "notes_uhdr")
 _FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,}$")
 # 签名 hash(32 位 hex):出现在倒数第二段时说明这条 URL **没有**路径段
 _SIGN_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+# 视频:编辑页 <video> 直接给**裸 mp4**(无签名),实测强制 https 即可直下
+# (2MB 那条 200/video/mp4)。详情页那边是 blob: MSE,拿不到源地址——这也是
+# 视频必须走编辑页的第二个理由。
+_VIDEO_HOST_MARK = "sns-video"
 # 头像/表情等非笔记内容的域或段
 _EXCLUDE_HOST_MARKS = ("sns-avatar", "picasso-static", "fe-video-qc")
 
@@ -58,7 +62,16 @@ def normalize_media_url(url: str) -> Optional[Dict[str, str]]:
         return None
     if any(mark in url for mark in _EXCLUDE_HOST_MARKS):
         return None
-    path = urlsplit(url).path
+    split = urlsplit(url)
+    # 视频:裸 mp4 已经是永久形态,只把 http 抬成 https、剥掉 query 签名即可
+    if _VIDEO_HOST_MARK in split.netloc and split.path.endswith(".mp4"):
+        return {
+            "kind": "video",
+            "file_id": split.path.rsplit("/", 1)[-1].removesuffix(".mp4"),
+            "segment": "",
+            "url": f"https://{split.netloc}{split.path}",
+        }
+    path = split.path
     parts = [p for p in path.split("/") if p]
     if not parts:
         return None
@@ -81,6 +94,7 @@ def normalize_media_url(url: str) -> Optional[Dict[str, str]]:
             "照常收录,请人工核一次归一化是否仍成立"
         )
     return {
+        "kind": "image",
         "file_id": file_id,
         "segment": segment or "",
         "url": (
@@ -105,7 +119,7 @@ def collect_media(raw_urls: List[str]) -> List[Dict[str, Any]]:
         seen.add(item["file_id"])
         out.append({
             "ordinal": len(out) + 1,
-            "kind": "image",
+            "kind": item["kind"],
             "file_id": item["file_id"],
             "segment": item["segment"],
             "url": item["url"],
@@ -115,9 +129,16 @@ def collect_media(raw_urls: List[str]) -> List[Dict[str, Any]]:
 
 # 编辑页图片区:**容器精确 + 一次拿全**(2026-08-05 取证定案,见下方 fetch_note_media)
 _EDITOR_IMG_JS = r"""
-() => [...document.querySelectorAll('.img-upload-area .img-container img')]
-    .map(i => i.currentSrc || i.src)
-    .filter(s => s && s.includes('xhscdn.com'))
+() => {
+    const imgs = [...document.querySelectorAll('.img-upload-area .img-container img')]
+        .map(i => i.currentSrc || i.src);
+    // 视频笔记的图片区是空的,视频在 <video> 上(编辑页给裸 mp4;blob: 是详情页
+    // 那条 MSE 路子的产物,拿到也没用,过滤掉)
+    const vids = [...document.querySelectorAll('video')]
+        .map(v => v.currentSrc || v.src)
+        .filter(s => s && !s.startsWith('blob:'));
+    return [...imgs, ...vids].filter(s => s && s.includes('xhscdn.com'));
+}
 """
 
 

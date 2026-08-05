@@ -35,6 +35,7 @@ def test_signed_url_normalizes_to_permanent_form():
     """
     got = nm.normalize_media_url(_SIGNED_SPECTRUM)
     assert got == {
+        "kind": "image",
         "file_id": "1040g34o3236vrj0bn2005noda2v08d26gtgrf08",
         "segment": "spectrum",
         "url": "https://sns-img-qc.xhscdn.com/spectrum/"
@@ -104,6 +105,7 @@ def test_editor_page_url_normalizes_same_as_detail_page():
     """
     got = nm.normalize_media_url(_EDITOR_URL)
     assert got == {
+        "kind": "image",
         "file_id": "1040g0k0323fjic5k74005noda2v08d26hqqevio",
         "segment": "spectrum",
         "url": "https://sns-img-qc.xhscdn.com/spectrum/"
@@ -309,6 +311,7 @@ def test_segmentless_url_normalizes_without_path_segment():
     """
     got = nm.normalize_media_url(_SEGMENTLESS)
     assert got == {
+        "kind": "image",
         "file_id": "1040g0083210md5hunk6g5pm1humiu9lg9e51400",
         "segment": "",
         "url": "https://sns-img-qc.xhscdn.com/1040g0083210md5hunk6g5pm1humiu9lg9e51400",
@@ -332,3 +335,38 @@ def test_collect_mixes_segment_and_segmentless():
     assert [m["segment"] for m in got] == ["", "spectrum"]
     assert got[0]["url"].count("/") == 3        # https://host/file_id
     assert got[1]["url"].count("/") == 4        # https://host/seg/file_id
+
+
+# ---------------- 视频(2026-08-05 取证:编辑页 <video> 给裸 mp4) ----------------
+
+_VIDEO_URL = (
+    "http://sns-video-default.xhscdn.com/stream/79/110/258/"
+    "01ea1e64bb3f2a2c4f0370019e8700e9db_258.mp4"
+)
+
+
+def test_video_url_normalizes_to_https_without_query():
+    """视频裸 mp4 已是永久形态:只把 http 抬成 https、剥掉 query 签名。
+
+    实测:该 URL 直下 200 / 2095021B / video/mp4,http 与 https 同尺寸。
+    详情页那边 <video> 是 blob:(MSE),拿不到源地址——这是视频必须走编辑页的理由。
+    """
+    got = nm.normalize_media_url(_VIDEO_URL + "?sign=abc&t=1")
+    assert got["kind"] == "video"
+    assert got["url"] == (
+        "https://sns-video-default.xhscdn.com/stream/79/110/258/"
+        "01ea1e64bb3f2a2c4f0370019e8700e9db_258.mp4"
+    )
+    assert got["file_id"] == "01ea1e64bb3f2a2c4f0370019e8700e9db_258"
+
+
+def test_blob_url_is_rejected():
+    """blob: 是详情页 MSE 的产物,拿到也下不了 → 不收录。"""
+    assert nm.normalize_media_url("blob:https://www.xiaohongshu.com/d337058b") is None
+
+
+def test_collect_mixes_images_and_video_with_kind():
+    """同一篇里图与视频混排:各带自己的 kind,序号连续,视频去重。"""
+    got = nm.collect_media([_SIGNED_SPECTRUM, _VIDEO_URL, _VIDEO_URL, _SEGMENTLESS])
+    assert [m["kind"] for m in got] == ["image", "video", "image"]
+    assert [m["ordinal"] for m in got] == [1, 2, 3]
