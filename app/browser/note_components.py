@@ -1193,6 +1193,61 @@ def _wait_activity_flip(page, name: str) -> bool:
 # ---------------- 编辑器内设置(发布 / 更新共用) ----------------
 
 
+# ── 原创声明(发布链无条件开;夹具 tests/fixtures/pages/content_settings.json 实证)──
+_ORIGINAL_ROW = ".original-wrapper"
+_ORIGINAL_SWITCH = ".original-wrapper .d-switch"
+_ORIGINAL_MODAL_CLOSE = "[class*='d-modal-close']"
+_ORIGINAL_CHECKED_JS = (
+    "() => { const b = document.querySelector('.original-wrapper .d-switch input');"
+    " return b ? b.checked : null; }"
+)
+_ORIGINAL_TOGGLE_TRIES = 2
+
+
+def apply_original_declaration(page, human: SyncHumanActions) -> Dict[str, Any]:
+    """打开「原创声明」开关 → ``{"status": "done"|"skipped"|"error", ...}``。
+
+    夹具实证(2026-08-05 真号采集 content_settings.json):
+    - 开关 ``.original-wrapper .d-switch``,状态在隐藏 ``input.checked``(class 不翻转,
+      不能拿 class 判态);
+    - 首次点开会弹**无底栏**说明弹窗(``d-modal-no-footer``,只有右上 X,没有确认按钮),
+      弹窗必须关掉——弹窗不关会盖住发布按钮(2026-08-02 事故同型);
+    - 已是开态 → ``skipped`` 零点击(判「现在是什么状态」不判「变了没有」,幂等重跑安全)。
+
+    X 关弹窗后 checked 是否保持**没有**直接夹具证据(采集时是二次点开关恢复的),故防御:
+    关弹窗后回读,不是开态就再点一轮,封顶 ``_ORIGINAL_TOGGLE_TRIES``;终判一律以回读
+    checked 为准——这条产品线的失败是静默的,"没报错"不算数。
+    """
+    if page.query_selector(_ORIGINAL_ROW) is None:
+        return {"status": "error",
+                "reason": "original_entry_not_found: 页面没有「原创声明」入口"}
+    if page.evaluate(_ORIGINAL_CHECKED_JS) is True:
+        return {"status": "skipped", "observed": "already_on"}
+    for _ in range(_ORIGINAL_TOGGLE_TRIES):
+        toggle = page.query_selector(_ORIGINAL_SWITCH)
+        if toggle is None:
+            return {"status": "error",
+                    "reason": "original_switch_not_found: 原创声明行里没有开关"}
+        try:
+            toggle.scroll_into_view_if_needed()
+        except Exception:  # noqa: BLE001 — 滚动失败不挡点击
+            pass
+        human.click(toggle, reason="打开原创声明开关")
+        human.wait(0.8, 1.5, context="等原创声明开关/弹窗反应")
+        close = page.query_selector(_ORIGINAL_MODAL_CLOSE)
+        if close is not None:
+            try:
+                human.click(close, reason="关掉原创声明说明弹窗(无底栏仅 X)")
+                human.wait(0.5, 1.0, context="等弹窗关闭")
+            except Exception:  # noqa: BLE001 — 残留隐藏节点点不动就算了,以回读为准
+                pass
+        if page.evaluate(_ORIGINAL_CHECKED_JS) is True:
+            return {"status": "done", "observed": "checked_on"}
+    return {"status": "error",
+            "reason": f"original_not_applied: 点了 {_ORIGINAL_TOGGLE_TRIES} 轮开关,"
+                      "回读 checked 仍不是开态"}
+
+
 def apply_components(
     page,
     human: SyncHumanActions,

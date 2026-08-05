@@ -1,0 +1,1965 @@
+{
+  "scene": "content_settings",
+  "captured_at": "2026-08-05T02:09:54.485285+00:00",
+  "account_id": 1,
+  "source_note_id": "6a707e9f0000000008012876",
+  "url": "https://creator.xiaohongshu.com/publish/update?id=6a707e9f0000000008012876&noteType=normal",
+  "dom": {
+    "[class*='setting']": [
+      {
+        "text": "内容设置 收起",
+        "attrs": {
+          "data-v-7a28df78": "",
+          "data-v-74e5df5a-s": "",
+          "class": "publish-page-content-setting-header"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 816,
+          "width": 816,
+          "height": 24
+        }
+      },
+      {
+        "text": "加入合集 汇集系列视频，有利于连续性观看 咨询师简介 原创声明 添加内容类型声明",
+        "attrs": {
+          "data-v-7a28df78": "",
+          "data-v-74e5df5a-s": "",
+          "class": "publish-page-content-setting-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 856,
+          "width": 816,
+          "height": 188
+        }
+      },
+      {
+        "text": "引用笔记",
+        "attrs": {
+          "data-v-09759943": "",
+          "data-v-043a3324": "",
+          "class": "setting-card-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1168,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "引用笔记",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1168,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "引用笔记",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 1180,
+          "width": 75,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 1182,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "引用笔记",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 1180,
+          "width": 51,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-action"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1110,
+          "y": 1182,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "标记地点或标记朋友",
+        "attrs": {
+          "data-v-09759943": "",
+          "data-v-4e4215f6": "",
+          "class": "setting-card-wrapper",
+          "data-impression": "{\"event\":{\"type\":\"Event\",\"value\":{\"action\":{\"type\":\"NormalizedAction\",\"value\":\"impression\"},\"pointId\":31259}},\"page\":{\"type\":\"Page\",\"value\":{\"pageInstance\":{\"type\":\"PageInstance\",\"value\":\"creator_service_platform\"}}}}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1168,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "标记地点或标记朋友",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1168,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "标记地点或标记朋友",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1174,
+          "y": 1180,
+          "width": 150,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1174,
+          "y": 1182,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "标记地点或标记朋友",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1198,
+          "y": 1180,
+          "width": 126,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-action"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1526,
+          "y": 1182,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "添加路线",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1228,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "添加路线",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1228,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "添加路线",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 1240,
+          "width": 75,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 1242,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "添加路线",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 1240,
+          "width": 51,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-action"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1110,
+          "y": 1242,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "data-v-245e136a": "",
+          "class": "setting-card-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1228,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1228,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1174,
+          "y": 1240,
+          "width": 80,
+          "height": 21
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1174,
+          "y": 1242,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text has-tips"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1198,
+          "y": 1240,
+          "width": 56,
+          "height": 21
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-action"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1526,
+          "y": 1242,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "更多设置 收起 允许合拍 允许正文复制 公开可见",
+        "attrs": {
+          "data-v-7a28df78": "",
+          "data-v-74e5df5a-s": "",
+          "class": "publish-page-content-settings"
+        },
+        "visible": true,
+        "rect": {
+          "x": 718,
+          "y": 1616,
+          "width": 864,
+          "height": 192
+        }
+      },
+      {
+        "text": "更多设置 收起",
+        "attrs": {
+          "data-v-7a28df78": "",
+          "data-v-74e5df5a-s": "",
+          "class": "publish-page-content-settings-header"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1640,
+          "width": 816,
+          "height": 24
+        }
+      },
+      {
+        "text": "允许合拍 允许正文复制 公开可见",
+        "attrs": {
+          "data-v-7a28df78": "",
+          "data-v-74e5df5a-s": "",
+          "class": "publish-page-content-settings-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1680,
+          "width": 816,
+          "height": 104
+        }
+      }
+    ],
+    "[class*='original']": [
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-0cb8c711": "",
+          "class": "original-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 940,
+          "width": 400,
+          "height": 44
+        }
+      }
+    ],
+    "[class*='statement']": [],
+    "[class*='declare']": [],
+    "[class*='switch']": [
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "data-v-0cb8c711": "",
+          "class": "custom-switch-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 940,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 940,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 954,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 952,
+          "width": 304,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-desc"
+        },
+        "visible": false,
+        "rect": {
+          "x": 782,
+          "y": 972,
+          "width": 304,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-switch"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "d-switch d-clickable d-switch-default d-inline-block"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-box"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-top"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-simulator unchecked --color-bg-fill"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-indicator"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1088,
+          "y": 952,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "允许合拍",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "data-v-1c2d5a96": "",
+          "class": "custom-switch-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1680,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "允许合拍",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1680,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 1694,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "允许合拍",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 1692,
+          "width": 304,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-desc"
+        },
+        "visible": false,
+        "rect": {
+          "x": 782,
+          "y": 1712,
+          "width": 304,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-switch"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "d-switch d-clickable d-switch-default d-inline-block"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-box"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-top"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-simulator checked --color-bg-primary"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1086,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-indicator"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1104,
+          "y": 1692,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "允许正文复制",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "data-v-21f52e2c": "",
+          "class": "custom-switch-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1680,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "允许正文复制",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1158,
+          "y": 1680,
+          "width": 400,
+          "height": 44
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1174,
+          "y": 1694,
+          "width": 16,
+          "height": 16
+        }
+      },
+      {
+        "text": "允许正文复制",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1198,
+          "y": 1692,
+          "width": 304,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-text-desc"
+        },
+        "visible": false,
+        "rect": {
+          "x": 1198,
+          "y": 1712,
+          "width": 304,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "custom-switch-switch"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1502,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "d-switch d-clickable d-switch-default d-inline-block"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1502,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-box"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1502,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-top"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1502,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-simulator checked --color-bg-primary"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1502,
+          "y": 1690,
+          "width": 40,
+          "height": 24
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-switch-indicator"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1520,
+          "y": 1692,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "笔记预览 封面预览",
+        "attrs": {
+          "data-v-0b0e63a0": "",
+          "data-v-1ad5614c": "",
+          "data-v-74e5df5a-s": "",
+          "data-v-7a28df78-s": "",
+          "class": "button-switch-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1642,
+          "y": 64,
+          "width": 409,
+          "height": 40
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-0b0e63a0": "",
+          "class": "button-switch-slider",
+          "style": "transform: translateX(4px); width: 199px;"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1646,
+          "y": 68,
+          "width": 199,
+          "height": 32
+        }
+      },
+      {
+        "text": "笔记预览",
+        "attrs": {
+          "data-v-0b0e63a0": "",
+          "class": "button-switch-item active"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1646,
+          "y": 68,
+          "width": 199,
+          "height": 32
+        }
+      },
+      {
+        "text": "封面预览",
+        "attrs": {
+          "data-v-0b0e63a0": "",
+          "class": "button-switch-item"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1848,
+          "y": 68,
+          "width": 199,
+          "height": 32
+        }
+      }
+    ],
+    "button[role='switch']": [],
+    "[class*='collection-plugin']": [
+      {
+        "text": "加入合集 汇集系列视频，有利于连续性观看 咨询师简介",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-wrapper"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 856,
+          "width": 816,
+          "height": 68
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-icon"
+        },
+        "visible": true,
+        "rect": {
+          "x": 758,
+          "y": 878,
+          "width": 24,
+          "height": 24
+        }
+      },
+      {
+        "text": "加入合集 汇集系列视频，有利于连续性观看",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-content"
+        },
+        "visible": true,
+        "rect": {
+          "x": 790,
+          "y": 868,
+          "width": 626,
+          "height": 44
+        }
+      },
+      {
+        "text": "加入合集",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-content-title"
+        },
+        "visible": true,
+        "rect": {
+          "x": 790,
+          "y": 868,
+          "width": 56,
+          "height": 22
+        }
+      },
+      {
+        "text": "汇集系列视频，有利于连续性观看",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-content-description"
+        },
+        "visible": true,
+        "rect": {
+          "x": 790,
+          "y": 892,
+          "width": 181,
+          "height": 20
+        }
+      },
+      {
+        "text": "咨询师简介",
+        "attrs": {
+          "data-v-24805c76": "",
+          "class": "collection-plugin-choose"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1423,
+          "y": 879,
+          "width": 118,
+          "height": 22
+        }
+      }
+    ]
+  },
+  "extra": {
+    "original_row": {
+      "row": {
+        "tag": "DIV",
+        "text": "原创声明",
+        "attrs": {
+          "data-v-0cb8c711": "",
+          "class": "original-wrapper"
+        },
+        "rect": {
+          "x": 742,
+          "y": 940,
+          "width": 400,
+          "height": 44
+        }
+      },
+      "switch_el": {
+        "tag": "DIV",
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "d-switch d-clickable d-switch-default d-inline-block"
+        },
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      "checkbox_checked": false,
+      "descendants": [
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "data-v-0cb8c711": "",
+            "class": "custom-switch-wrapper"
+          },
+          "rect": {
+            "x": 742,
+            "y": 940,
+            "width": 400,
+            "height": 44
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-card"
+          },
+          "rect": {
+            "x": 742,
+            "y": 940,
+            "width": 400,
+            "height": 44
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-icon"
+          },
+          "rect": {
+            "x": 758,
+            "y": 954,
+            "width": 16,
+            "height": 16
+          }
+        },
+        {
+          "tag": "svg",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "width": "16",
+            "height": "16",
+            "viewBox": "0 0 16 16",
+            "fill": "none",
+            "style": "transform: scaleX(1) scaleY(1);",
+            "xmlns": "http://www.w3.org/2000/svg"
+          },
+          "rect": {
+            "x": 758,
+            "y": 954,
+            "width": 16,
+            "height": 16
+          }
+        },
+        {
+          "tag": "path",
+          "text": "",
+          "attrs": {
+            "d": "M2.66699 8.5464V4.55449C2.66699 4.08567 2.95331 3.6644 3.38922 3.49185L7.5797 1.83312C7.84992 1.72616 8.15073 1.72616 8.42095 1.83312L12.6114 3.49185C13.0473 3.6644 13.3337 4.08567 13.3337 4.55449V8.5464C13.3337 9.89109 12.7457 11.1726 11.6873 12.0021C10.3499 13.0502 8.59188 14.3333 8.00033 14.3333C7.40877 14.3333 5.65078 13.0502 4.31336 12.0021C3.25498 11.1726 2.66699 9.89109 2.66699 8.5464Z",
+            "stroke": "currentColor",
+            "stroke-width": "1.2",
+            "stroke-linejoin": "round"
+          },
+          "rect": {
+            "x": 759,
+            "y": 955,
+            "width": 12,
+            "height": 14
+          }
+        },
+        {
+          "tag": "path",
+          "text": "",
+          "attrs": {
+            "d": "M6 7.71429L7.47858 9.19287C7.60876 9.32305 7.81981 9.32305 7.94999 9.19287L10.4762 6.66663",
+            "stroke": "currentColor",
+            "stroke-width": "1.2",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round"
+          },
+          "rect": {
+            "x": 763,
+            "y": 960,
+            "width": 6,
+            "height": 4
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-text-content"
+          },
+          "rect": {
+            "x": 782,
+            "y": 952,
+            "width": 304,
+            "height": 20
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "has-tips"
+          },
+          "rect": {
+            "x": 782,
+            "y": 953,
+            "width": 54,
+            "height": 20
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-text-desc"
+          },
+          "rect": {
+            "x": 782,
+            "y": 972,
+            "width": 304,
+            "height": 0
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-switch"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "d-switch d-clickable d-switch-default d-inline-block"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-box"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-top"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-simulator unchecked --color-bg-fill"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "INPUT",
+          "text": "",
+          "attrs": {
+            "type": "checkbox",
+            "value": "true"
+          },
+          "rect": {
+            "x": 1088,
+            "y": 962,
+            "width": 0,
+            "height": 0
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-indicator"
+          },
+          "rect": {
+            "x": 1088,
+            "y": 952,
+            "width": 20,
+            "height": 20
+          }
+        }
+      ]
+    },
+    "after_toggle_on": {
+      "row": {
+        "row": {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-0cb8c711": "",
+            "class": "original-wrapper"
+          },
+          "rect": {
+            "x": 742,
+            "y": 940,
+            "width": 400,
+            "height": 44
+          }
+        },
+        "switch_el": {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "d-switch d-clickable d-switch-default d-inline-block"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        "checkbox_checked": true,
+        "descendants": [
+          {
+            "tag": "DIV",
+            "text": "原创声明",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "data-v-0cb8c711": "",
+              "class": "custom-switch-wrapper"
+            },
+            "rect": {
+              "x": 742,
+              "y": 940,
+              "width": 400,
+              "height": 44
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "原创声明",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "custom-switch-card"
+            },
+            "rect": {
+              "x": 742,
+              "y": 940,
+              "width": 400,
+              "height": 44
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "custom-switch-icon"
+            },
+            "rect": {
+              "x": 758,
+              "y": 954,
+              "width": 16,
+              "height": 16
+            }
+          },
+          {
+            "tag": "svg",
+            "text": "",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "width": "16",
+              "height": "16",
+              "viewBox": "0 0 16 16",
+              "fill": "none",
+              "style": "transform: scaleX(1) scaleY(1);",
+              "xmlns": "http://www.w3.org/2000/svg"
+            },
+            "rect": {
+              "x": 758,
+              "y": 954,
+              "width": 16,
+              "height": 16
+            }
+          },
+          {
+            "tag": "path",
+            "text": "",
+            "attrs": {
+              "d": "M2.66699 8.5464V4.55449C2.66699 4.08567 2.95331 3.6644 3.38922 3.49185L7.5797 1.83312C7.84992 1.72616 8.15073 1.72616 8.42095 1.83312L12.6114 3.49185C13.0473 3.6644 13.3337 4.08567 13.3337 4.55449V8.5464C13.3337 9.89109 12.7457 11.1726 11.6873 12.0021C10.3499 13.0502 8.59188 14.3333 8.00033 14.3333C7.40877 14.3333 5.65078 13.0502 4.31336 12.0021C3.25498 11.1726 2.66699 9.89109 2.66699 8.5464Z",
+              "stroke": "currentColor",
+              "stroke-width": "1.2",
+              "stroke-linejoin": "round"
+            },
+            "rect": {
+              "x": 759,
+              "y": 955,
+              "width": 12,
+              "height": 14
+            }
+          },
+          {
+            "tag": "path",
+            "text": "",
+            "attrs": {
+              "d": "M6 7.71429L7.47858 9.19287C7.60876 9.32305 7.81981 9.32305 7.94999 9.19287L10.4762 6.66663",
+              "stroke": "currentColor",
+              "stroke-width": "1.2",
+              "stroke-linecap": "round",
+              "stroke-linejoin": "round"
+            },
+            "rect": {
+              "x": 763,
+              "y": 960,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "原创声明",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "custom-switch-text-content"
+            },
+            "rect": {
+              "x": 782,
+              "y": 952,
+              "width": 304,
+              "height": 20
+            }
+          },
+          {
+            "tag": "SPAN",
+            "text": "原创声明",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "has-tips"
+            },
+            "rect": {
+              "x": 782,
+              "y": 953,
+              "width": 54,
+              "height": 20
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "custom-switch-text-desc"
+            },
+            "rect": {
+              "x": 782,
+              "y": 972,
+              "width": 304,
+              "height": 0
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "custom-switch-switch"
+            },
+            "rect": {
+              "x": 1086,
+              "y": 950,
+              "width": 40,
+              "height": 24
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "data-v-298c3e02": "",
+              "class": "d-switch d-clickable d-switch-default d-inline-block"
+            },
+            "rect": {
+              "x": 1086,
+              "y": 950,
+              "width": 40,
+              "height": 24
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "class": "d-switch-box"
+            },
+            "rect": {
+              "x": 1086,
+              "y": 950,
+              "width": 40,
+              "height": 24
+            }
+          },
+          {
+            "tag": "DIV",
+            "text": "",
+            "attrs": {
+              "class": "d-switch-top"
+            },
+            "rect": {
+              "x": 1086,
+              "y": 950,
+              "width": 40,
+              "height": 24
+            }
+          },
+          {
+            "tag": "SPAN",
+            "text": "",
+            "attrs": {
+              "class": "d-switch-simulator checked --color-bg-primary"
+            },
+            "rect": {
+              "x": 1086,
+              "y": 950,
+              "width": 40,
+              "height": 24
+            }
+          },
+          {
+            "tag": "INPUT",
+            "text": "",
+            "attrs": {
+              "type": "checkbox",
+              "value": "true",
+              "checked": ""
+            },
+            "rect": {
+              "x": 1088,
+              "y": 962,
+              "width": 16,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SPAN",
+            "text": "",
+            "attrs": {
+              "class": "d-switch-indicator"
+            },
+            "rect": {
+              "x": 1104,
+              "y": 952,
+              "width": 20,
+              "height": 20
+            }
+          }
+        ]
+      },
+      "dialogs": {
+        "[class*='dialog']": [
+          {
+            "text": "",
+            "attrs": {
+              "class": "el-overlay el-modal-dialog",
+              "style": "z-index: 2001; display: none;"
+            },
+            "visible": false,
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "text": "",
+            "attrs": {
+              "role": "dialog",
+              "aria-modal": "true",
+              "aria-label": "图片编辑",
+              "aria-describedby": "el-id-4780-1",
+              "class": "el-overlay-dialog"
+            },
+            "visible": false,
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "[class*='modal']": [
+          {
+            "text": "",
+            "attrs": {
+              "class": "el-overlay el-modal-dialog",
+              "style": "z-index: 2001; display: none;"
+            },
+            "visible": false,
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+            "attrs": {
+              "class": "d-modal-mask",
+              "style": "z-index: 999; background: rgba(0, 0, 0, 0.4);"
+            },
+            "visible": true,
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 2560,
+              "height": 1266
+            }
+          },
+          {
+            "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+            "attrs": {
+              "class": "d-modal d-modal-centered d-modal-no-footer creator-modal-style",
+              "style": "width: 716px; z-index: 999;"
+            },
+            "visible": true,
+            "rect": {
+              "x": 922,
+              "y": 536,
+              "width": 716,
+              "height": 194
+            }
+          },
+          {
+            "text": "笔记完成原创声明后，将获得以下权益",
+            "attrs": {
+              "class": "d-space d-space-horizontal d-space-small d-space-align-center d-modal-header"
+            },
+            "visible": true,
+            "rect": {
+              "x": 922,
+              "y": 536,
+              "width": 716,
+              "height": 56
+            }
+          },
+          {
+            "text": "",
+            "attrs": {
+              "class": "d-icon --color-current --color-static --size-icon-default d-modal-close d-clickable"
+            },
+            "visible": true,
+            "rect": {
+              "x": 1598,
+              "y": 556,
+              "width": 16,
+              "height": 16
+            }
+          },
+          {
+            "text": "1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+            "attrs": {
+              "class": "d-modal-content"
+            },
+            "visible": true,
+            "rect": {
+              "x": 922,
+              "y": 592,
+              "width": 716,
+              "height": 138
+            }
+          }
+        ],
+        "[class*='agreement']": [],
+        "[class*='confirm']": []
+      }
+    },
+    "after_restore": {
+      "row": {
+        "tag": "DIV",
+        "text": "原创声明",
+        "attrs": {
+          "data-v-0cb8c711": "",
+          "class": "original-wrapper"
+        },
+        "rect": {
+          "x": 742,
+          "y": 940,
+          "width": 400,
+          "height": 44
+        }
+      },
+      "switch_el": {
+        "tag": "DIV",
+        "text": "",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "d-switch d-clickable d-switch-default d-inline-block"
+        },
+        "rect": {
+          "x": 1086,
+          "y": 950,
+          "width": 40,
+          "height": 24
+        }
+      },
+      "checkbox_checked": false,
+      "descendants": [
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "data-v-0cb8c711": "",
+            "class": "custom-switch-wrapper"
+          },
+          "rect": {
+            "x": 742,
+            "y": 940,
+            "width": 400,
+            "height": 44
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-card"
+          },
+          "rect": {
+            "x": 742,
+            "y": 940,
+            "width": 400,
+            "height": 44
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-icon"
+          },
+          "rect": {
+            "x": 758,
+            "y": 954,
+            "width": 16,
+            "height": 16
+          }
+        },
+        {
+          "tag": "svg",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "width": "16",
+            "height": "16",
+            "viewBox": "0 0 16 16",
+            "fill": "none",
+            "style": "transform: scaleX(1) scaleY(1);",
+            "xmlns": "http://www.w3.org/2000/svg"
+          },
+          "rect": {
+            "x": 758,
+            "y": 954,
+            "width": 16,
+            "height": 16
+          }
+        },
+        {
+          "tag": "path",
+          "text": "",
+          "attrs": {
+            "d": "M2.66699 8.5464V4.55449C2.66699 4.08567 2.95331 3.6644 3.38922 3.49185L7.5797 1.83312C7.84992 1.72616 8.15073 1.72616 8.42095 1.83312L12.6114 3.49185C13.0473 3.6644 13.3337 4.08567 13.3337 4.55449V8.5464C13.3337 9.89109 12.7457 11.1726 11.6873 12.0021C10.3499 13.0502 8.59188 14.3333 8.00033 14.3333C7.40877 14.3333 5.65078 13.0502 4.31336 12.0021C3.25498 11.1726 2.66699 9.89109 2.66699 8.5464Z",
+            "stroke": "currentColor",
+            "stroke-width": "1.2",
+            "stroke-linejoin": "round"
+          },
+          "rect": {
+            "x": 759,
+            "y": 955,
+            "width": 12,
+            "height": 14
+          }
+        },
+        {
+          "tag": "path",
+          "text": "",
+          "attrs": {
+            "d": "M6 7.71429L7.47858 9.19287C7.60876 9.32305 7.81981 9.32305 7.94999 9.19287L10.4762 6.66663",
+            "stroke": "currentColor",
+            "stroke-width": "1.2",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round"
+          },
+          "rect": {
+            "x": 763,
+            "y": 960,
+            "width": 6,
+            "height": 4
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-text-content"
+          },
+          "rect": {
+            "x": 782,
+            "y": 952,
+            "width": 304,
+            "height": 20
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "原创声明",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "has-tips"
+          },
+          "rect": {
+            "x": 782,
+            "y": 953,
+            "width": 54,
+            "height": 20
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-text-desc"
+          },
+          "rect": {
+            "x": 782,
+            "y": 972,
+            "width": 304,
+            "height": 0
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "custom-switch-switch"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "data-v-298c3e02": "",
+            "class": "d-switch d-clickable d-switch-default d-inline-block"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-box"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "DIV",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-top"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-simulator hover unchecked --color-bg-fill"
+          },
+          "rect": {
+            "x": 1086,
+            "y": 950,
+            "width": 40,
+            "height": 24
+          }
+        },
+        {
+          "tag": "INPUT",
+          "text": "",
+          "attrs": {
+            "type": "checkbox",
+            "value": "true"
+          },
+          "rect": {
+            "x": 1088,
+            "y": 962,
+            "width": 0,
+            "height": 0
+          }
+        },
+        {
+          "tag": "SPAN",
+          "text": "",
+          "attrs": {
+            "class": "d-switch-indicator"
+          },
+          "rect": {
+            "x": 1088,
+            "y": 952,
+            "width": 20,
+            "height": 20
+          }
+        }
+      ]
+    }
+  },
+  "api": [],
+  "note": "真号只读采集;xsec_token 已抹除。**不要手改本文件** —— 它是证据,改它去迁就代码等于自欺,要更新只能重新采集。"
+}

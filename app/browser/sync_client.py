@@ -35,7 +35,11 @@ from app.browser.login_detector import (
     classify_wall_text,
     is_wall_url,
 )
-from app.browser.note_components import ComponentResponses, apply_components
+from app.browser.note_components import (
+    ComponentResponses,
+    apply_components,
+    apply_original_declaration,
+)
 from app.browser.profile_guard import (
     clean_locks,
     delete_cookies_db,
@@ -669,6 +673,22 @@ class SyncClient:
 
             # step6.5 三组件(设计 3.1:step6 之后、step7 之前);失败仅告警,不阻断发布
             component_result = self._apply_components(atomic, responses, components)
+
+            # step6.6 原创声明:**每次发布无条件打开**(运营裁定 2026-08-05);
+            # 失败仅告警不阻断——辅助声明不值得废掉一篇图都传完的笔记。
+            component_result = dict(component_result or {})
+            try:
+                component_result["original_declaration"] = apply_original_declaration(
+                    atomic.page, SyncHumanActions(atomic.page)
+                )
+            except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
+                component_result["original_declaration"] = {
+                    "status": "error", "reason": f"original_exception: {exc}"}
+            if component_result["original_declaration"].get("status") == "error":
+                logger.warning(
+                    f"[SyncClient] 原创声明未开成(不阻断发布): "
+                    f"{component_result['original_declaration'].get('reason')}"
+                )
 
             # step7 点击发布并等待
             r = atomic.step7_click_publish_and_wait(max_wait=30)
