@@ -128,6 +128,7 @@ class Editor:
         other_notes=(),
     ):
         self.permission = permission
+        self.row_band_probes = []  # 防遮挡带探测记录(选择器)
         self.collection = collection
         self.collections = list(collections)
         self.activities = [
@@ -364,6 +365,10 @@ class _FakePage:
             return {"x": 100.0, "y": 500.0, "w": 120.0, "h": 40.0, "ih": 900.0}
         if "innerWidth" in js:
             return {"iw": 1920, "ih": 900, "dpr": 1}
+        if "row-band-probe" in js:
+            # 默认行就在中带(不触发滚动),流程测试因此真实走过防遮挡探测路径
+            self.editor.row_band_probes.append(_arg)
+            return {"cy": 450, "ih": 900}
         return None
 
 
@@ -1243,3 +1248,75 @@ def test_other_tab_empty_search_reason_is_actionable(monkeypatch, wired):
     assert "检索返回空" in reason                        # 空 id 单独定性
     assert "job_id" in reason                            # 指路:带 job_id 复现取证
     assert "显式传本账号" in reason                      # 指路:短期规避
+
+
+# ---------------- 设置行防遮挡滚动(底部发布钮 closed-shadow 吞点击的根因锁)----------------
+
+
+class _BandPage:
+    """只回答 row-band-probe 的假页面:按预置序列给出行中心位置。"""
+
+    def __init__(self, seq):
+        self.seq = list(seq)
+
+    def evaluate(self, js, _arg=None):
+        assert "row-band-probe" in js
+        return self.seq.pop(0) if self.seq else None
+
+
+class _BandHuman:
+    def __init__(self):
+        self.scrolls = []
+
+    def scroll(self, direction="down", distance=None):
+        self.scrolls.append(direction)
+
+    def wait(self, *_a, **_kw):
+        pass
+
+
+def test_row_in_bottom_band_scrolls_down_until_mid():
+    """行在底带(0.94)→ 滚轮向下一次进中带即停。
+
+    根因(quote_probe 夹具 2026-08-05):底部发布钮 XHS-PUBLISH-BTN 透明命中区盖住底带,
+    行在带内点了被吞——标本 6a707e9f 七连零反应、quote_candidates_unavailable 11 例。
+    """
+    page = _BandPage([{"cy": 1190, "ih": 1266}, {"cy": 633, "ih": 1266}])
+    human = _BandHuman()
+    bnc._scroll_row_to_mid_viewport(page, human, ".quote-note-container")
+    assert human.scrolls == ["down"]
+
+
+def test_row_in_top_band_scrolls_up():
+    """行在顶带 → 向上滚(只会向下的写法遇到被顶到上方的 E8 情形会越滚越远)。"""
+    page = _BandPage([{"cy": 100, "ih": 1266}, {"cy": 500, "ih": 1266}])
+    human = _BandHuman()
+    bnc._scroll_row_to_mid_viewport(page, human, "x")
+    assert human.scrolls == ["up"]
+
+
+def test_row_already_mid_band_zero_scroll():
+    """行已在中带 → 一次滚动都不发生。"""
+    page = _BandPage([{"cy": 633, "ih": 1266}])
+    human = _BandHuman()
+    bnc._scroll_row_to_mid_viewport(page, human, "x")
+    assert human.scrolls == []
+
+
+def test_row_never_reaches_band_gives_up_bounded():
+    """滚满上限仍不在带内 → 告警放行(内容短滚不动的页面不误杀),滚动次数有界。"""
+    page = _BandPage([{"cy": 1200, "ih": 1266}] * 10)
+    human = _BandHuman()
+    bnc._scroll_row_to_mid_viewport(page, human, "x")
+    assert human.scrolls == ["down"] * bnc._ROW_BAND_TRIES
+
+
+def test_quote_flow_probes_band_before_modal_click(monkeypatch, wired):
+    """引用流程在点入口前必须做防遮挡探测(接线锁,防止日后有人把这步删了)。"""
+    editor = Editor(notes=(("n-quote", "要引用的那篇"),))
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done"
+    assert bnc._QUOTE_CONTAINER in editor.row_band_probes

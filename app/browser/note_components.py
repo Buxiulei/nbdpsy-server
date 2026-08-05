@@ -657,6 +657,8 @@ def _set_collection(
         return {"status": "error", "reason": "collection_entry_not_found: 页面没有合集入口"}
 
     seen = responses.count(_COLLECTION_API_MARK)  # 基线必须在点击**之前**取
+    _scroll_row_to_mid_viewport(page, human, _COLLECTION_BUTTON)
+    btn = page.query_selector(_COLLECTION_BUTTON) or btn
     human.click(btn, reason="打开合集弹层")
     # 弹层打开才会发 list_v2(设计 2.9);等响应与等 DOM 各等一次,谁先到都不影响
     body = _wait_body(page, responses, _COLLECTION_API_MARK, _POPOVER_TIMEOUT_S, seen)
@@ -725,6 +727,48 @@ def _wait_collection_item(page, name: str):
     return None
 
 
+# ── 设置行防遮挡滚动(2026-08-05 quote_probe 夹具实锤的根因修复)──
+# 底部悬浮发布按钮 XHS-PUBLISH-BTN 是 closed-shadow 自定义元素,透明命中区远大于
+# 红色可见钮;设置行落在视口底带时 elementFromPoint 命中它,行上的所有点击被静默吞掉
+# ——quote_candidates_unavailable 11 例(跨3账号)与标本 6a707e9f 七连零反应全由此来。
+# scroll_into_view_if_needed 帮不上忙:行"技术上可见"就不滚,而它恰好可见于底带;
+# 855 高视口上它还会把视口外的行正好滚到底边=滚进遮挡带。
+_ROW_BAND = (0.25, 0.65)   # 行中心要落进视口高度的这个带(底部发布钮带之外)
+_ROW_BAND_TRIES = 4
+_ROW_BAND_JS = (
+    "(sel) => { const el = document.querySelector(sel); /* row-band-probe */"
+    " if (!el) return null; const r = el.getBoundingClientRect();"
+    " return {cy: r.y + r.height / 2, ih: window.innerHeight}; }"
+)
+
+
+def _scroll_row_to_mid_viewport(page, human: SyncHumanActions, selector: str) -> None:
+    """把设置区某行拟人滚到视口中带(尽力而为,滚不进只告警不拒绝)。
+
+    与 E8「每个编辑步前重新滚进视口」同族,判据从"在视口内"收紧为"在中带内"
+    (``_ROW_BAND``)——底部悬浮发布钮的透明命中区盖住底带,行在带外点了也是白点。
+    尽力而为的取舍:内容比视口短的页面滚不动,硬拒绝会把本来能点的场景误杀;
+    点击后本就有"没反应"的显式报错兜底,这里只负责把命中率从看运气变成确定。
+    """
+    for _ in range(_ROW_BAND_TRIES):
+        band = None
+        try:
+            band = page.evaluate(_ROW_BAND_JS, selector)
+        except Exception:  # noqa: BLE001 — 读不出位置就不滚,按原路径点
+            return
+        if not band:
+            return
+        ratio = band["cy"] / max(band["ih"], 1)
+        if _ROW_BAND[0] <= ratio <= _ROW_BAND[1]:
+            return
+        human.scroll("down" if ratio > _ROW_BAND[1] else "up")
+        human.wait(0.3, 0.7, context="把设置行滚出底部发布钮遮挡带")
+    logger.warning(
+        f"[note_components] 设置行 {selector} 滚 {_ROW_BAND_TRIES} 次仍不在视口中带,"
+        "按当前位置点击(点击无反应会由后续显式报错兜底)"
+    )
+
+
 def _set_quote(
     page, human: SyncHumanActions, responses: ComponentResponses, quoted_note_id: str
 ) -> Dict[str, Any]:
@@ -748,6 +792,9 @@ def _set_quote(
     if container is None:
         return {"status": "error", "reason": "quote_entry_not_found: 页面没有引用笔记入口"}
 
+    # 先滚出底部发布钮遮挡带,再重新定位(滚动会换 rect)——根因见 _scroll_row_to_mid_viewport
+    _scroll_row_to_mid_viewport(page, human, _QUOTE_CONTAINER)
+    container = page.query_selector(_QUOTE_CONTAINER) or container
     seen = responses.count(_POSTED_API_MARK)  # 基线必须在点击**之前**取
     human.click(container, reason="打开引用笔记弹窗")
     try:
@@ -1228,10 +1275,10 @@ def apply_original_declaration(page, human: SyncHumanActions) -> Dict[str, Any]:
         if toggle is None:
             return {"status": "error",
                     "reason": "original_switch_not_found: 原创声明行里没有开关"}
-        try:
-            toggle.scroll_into_view_if_needed()
-        except Exception:  # noqa: BLE001 — 滚动失败不挡点击
-            pass
+        # 不用 scroll_into_view_if_needed:视口外的行会被它滚到底边=正好滚进
+        # 发布钮遮挡带(根因见 _scroll_row_to_mid_viewport)
+        _scroll_row_to_mid_viewport(page, human, _ORIGINAL_SWITCH)
+        toggle = page.query_selector(_ORIGINAL_SWITCH) or toggle
         human.click(toggle, reason="打开原创声明开关")
         human.wait(0.8, 1.5, context="等原创声明开关/弹窗反应")
         close = page.query_selector(_ORIGINAL_MODAL_CLOSE)
