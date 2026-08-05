@@ -1945,9 +1945,15 @@ def _compose(
     """
     steps = {**outcomes, **(edit_outcomes or {})}
     applied = {k: verified.get(k) for k in steps}
+    # 回读兜底文案区分两态(前缀 *_not_verified 不变,运营按前缀匹配的代码不破;
+    # 运营 08-05 需求 §五-1:None=状态未知先核对,False=确认没生效,处置完全不同):
     failed = [
-        {"component": k, "reason": (steps[k].get("reason")
-                                    or f"{k}_not_verified: 提交后回读未确认生效")}
+        {"component": k, "reason": (steps[k].get("reason") or (
+            f"{k}_not_verified: 提交后回读确认没生效"
+            if applied.get(k) is False
+            else f"{k}_not_verified: 提交后没能回读(状态未知——先用 "
+                 "note-component-reads 核对当前状态再决定,别盲目重跑)"
+        ))}
         for k in steps if applied.get(k) is not True
     ]
     appended = appended_part(body_before, body_after)

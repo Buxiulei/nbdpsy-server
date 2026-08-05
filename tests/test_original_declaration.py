@@ -59,6 +59,9 @@ class _Page:
         return None
 
     def evaluate(self, js, *_a):
+        if "row-band-probe" in js:
+            self.band_probes = getattr(self, "band_probes", 0) + 1
+            return {"cx": 942, "cy": 500, "ih": 1266}   # 中带,不触发滚动
         if "original-wrapper" in js:
             return self.checked
         return None
@@ -96,6 +99,7 @@ def test_off_toggles_on_closes_modal_and_confirms():
     assert result["status"] == "done"
     assert page.toggles == 1
     assert page.modal_open is False   # 弹窗必须关掉(不关会盖住发布按钮)
+    assert getattr(page, "band_probes", 0) >= 1   # 点开关前做过防遮挡探测(接线锁)
 
 
 def test_close_reverting_gets_second_toggle():

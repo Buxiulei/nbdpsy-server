@@ -320,6 +320,9 @@ def test_readback_mismatch_is_false_not_done(monkeypatch):
     }
     # 弃提交是另一种终态:这次是真提交了、只是没生效,调用方**不能**盲目重试
     assert result["aborted_before_submit"] is False and result["submitted"] is True
+    # False 态兜底文案 = "确认没生效"(与 None 态"状态未知"处置不同,运营 §五-1)
+    reasons = {f["component"]: f["reason"] for f in result["failed"]}
+    assert "确认没生效" in reasons["title"]
 
 
 def test_unreadable_readback_is_none_not_false(monkeypatch):
@@ -332,6 +335,9 @@ def test_unreadable_readback_is_none_not_false(monkeypatch):
         "image_remove": None, "image_add": None, "title": None, "content": None,
     }
     assert result["read_back"] == {"title": None, "content": None}
+    # None 态兜底文案 = "状态未知,先核对再决定"(绝不误导成"没生效")
+    reasons = {f["component"]: f["reason"] for f in result["failed"]}
+    assert "状态未知" in reasons["title"] and "别盲目重跑" in reasons["title"]
 
 
 # ---------------- 纯编辑 / 纯组件 ----------------

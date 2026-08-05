@@ -1327,3 +1327,14 @@ def test_quote_flow_probes_band_before_modal_click(monkeypatch, wired):
 
     assert result["status"] == "done"
     assert bnc._QUOTE_CONTAINER in editor.row_band_probes
+
+
+def test_collection_flow_probes_band_before_click(monkeypatch, wired):
+    """合集流程点入口前同样必须做防遮挡探测(接线锁)。"""
+    editor = Editor()
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, collection_id="c1")
+
+    assert result["status"] == "done"
+    assert bnc._COLLECTION_BUTTON in editor.row_band_probes
