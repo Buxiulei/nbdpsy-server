@@ -275,6 +275,161 @@ async def test_backoff_actually_sleeps_with_exponential_delays(tmp_path, monkeyp
     assert slept == sorted(slept), "退避必须递增(指数),不能是常量"
 
 
+# ---------------- ③.5 上游超时重试(2026-08-05 生图超时加固) ----------------
+
+
+def _timeout_exc() -> Exception:
+    """构造真实 openai.APITimeoutError(生产里那句 "Request timed out." 的来源)。"""
+    import httpx
+    from openai import APITimeoutError
+
+    return APITimeoutError(request=httpx.Request("POST", "https://api.openai.com/v1/images/edits"))
+
+
+async def test_timeout_retried_then_succeeds_and_reports_attempts(tmp_path, monkeypatch):
+    """上游超时 → 退避重试后成功;该页 metadata 带 upstream_attempts=2。
+
+    生产实证:失败耗时 18/20.7/33s **短于**成功耗时 43-76s,即挂的是瞬时网络抖动
+    而非"生成太慢";重试跨过抖动窗口即可救回,原先超时直接判死是白丢一页。
+    """
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 0.01)
+    calls = {"n": 0}
+
+    async def handler(prompt: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _timeout_exc()
+        return _FakeResponse(prompt)
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert results[0].success, results[0].error
+    assert calls["n"] == 2
+    assert results[0].metadata["upstream_attempts"] == 2
+
+
+async def test_timeout_exhausted_keeps_error_prefix_and_attempts(tmp_path, monkeypatch):
+    """一直超时 → 重试耗尽后落失败位,error 前缀保持 openai_image_edit_failed。
+
+    前缀是运营侧的匹配依据(skill 按前缀分流),重试改造不得把它改掉。
+    """
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT_RETRIES", 2)
+    calls = {"n": 0}
+
+    async def handler(prompt: str):
+        calls["n"] += 1
+        raise RuntimeError("Request timed out.")   # 中转把结构化异常拍扁成纯文案
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert not results[0].success
+    assert results[0].error.startswith("openai_image_edit_failed")
+    assert calls["n"] == 3                          # 1 次原始 + 2 次超时重试
+    assert results[0].metadata["upstream_attempts"] == 3
+
+
+async def test_generate_timeout_keeps_call_failed_prefix(tmp_path, monkeypatch):
+    """generate 路径超时耗尽 → 前缀 openai_image_call_failed(同为运营匹配依据)。"""
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT_RETRIES", 2)
+    calls = {"n": 0}
+
+    async def handler(prompt: str):
+        calls["n"] += 1
+        raise _timeout_exc()
+
+    p = _provider(tmp_path, handler)
+    result = await p.generate("page-0")
+
+    assert not result.success
+    assert result.error.startswith("openai_image_call_failed")
+    assert calls["n"] == 3
+    assert result.metadata["upstream_attempts"] == 3
+
+
+async def test_local_wait_for_timeout_is_also_retried(tmp_path, monkeypatch):
+    """本地 asyncio.wait_for 超时(裸 TimeoutError,文案为空)同样走超时重试分支。
+
+    钉住"靠 isinstance 判定"而非只靠文案关键词——裸 TimeoutError 的 str 是空串。
+    """
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT_RETRIES", 2)
+    calls = {"n": 0}
+
+    async def handler(prompt: str):
+        calls["n"] += 1
+        raise asyncio.TimeoutError()
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert not results[0].success
+    assert calls["n"] == 3
+
+
+async def test_timeout_backoff_base_differs_from_rate_limit(tmp_path, monkeypatch):
+    """超时退避真的更长(5s/15s),与 429 的 2s/4s/8s 是两套基数、两套预算。
+
+    照 test_backoff_actually_sleeps_with_exponential_delays 的手法捕获 sleep 实参:
+    只断次数会让"把 await sleep 删掉"照样绿。
+    """
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 5.0)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT_RETRIES", 2)
+    slept: list[float] = []
+
+    async def fake_sleep(d):
+        slept.append(d)
+
+    monkeypatch.setattr(openai_image.asyncio, "sleep", fake_sleep)
+
+    async def handler(prompt: str):
+        raise _timeout_exc()
+
+    p = _provider(tmp_path, handler)
+    await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert len(slept) == 2, f"超时重试次数应为 2,实际睡了 {len(slept)} 次"
+    for i, d in enumerate(slept):
+        base = 5.0 * (openai_image._TIMEOUT_BACKOFF_FACTOR ** i)   # 5s / 15s
+        assert base <= d < base * 1.5, f"第{i + 1}次超时退避 {d} 不在 [{base}, {base * 1.5}) 内"
+    # 与 429 基数(2.0)明确不同:超时首退避必须显著更长,才跨得过抖动窗口
+    assert slept[0] > openai_image._RATE_LIMIT_BACKOFF_BASE * 2
+
+
+async def test_timeout_and_rate_limit_have_separate_budgets(tmp_path, monkeypatch):
+    """429 与超时各计各的预算:先撞几次限流不会把超时重试额度花光。"""
+    monkeypatch.setattr(openai_image, "_RATE_LIMIT_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(openai_image, "_TIMEOUT_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT_RETRIES", 2)
+    calls = {"n": 0}
+
+    async def handler(prompt: str):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise RuntimeError("rate limit exceeded")   # 用掉全部 3 次 429 预算
+        if calls["n"] <= 5:
+            raise _timeout_exc()                        # 再用掉 2 次超时预算
+        return _FakeResponse(prompt)
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert results[0].success, results[0].error
+    assert calls["n"] == 6
+    assert results[0].metadata["upstream_attempts"] == 6
+
+
+def test_timeout_settings_defaults():
+    """新增配置项必须带默认值(缺省即可用,不依赖 .env)。"""
+    from app.core.config import Settings
+
+    assert Settings.model_fields["OPENAI_IMAGE_CONNECT_TIMEOUT"].default == 30
+    assert Settings.model_fields["OPENAI_IMAGE_TIMEOUT_RETRIES"].default == 2
+
+
 def test_is_rate_limit_error_structured_and_text():
     """限流判定双层:结构化(status_code/code)+ 中转拍扁后的纯文案。"""
 
@@ -492,3 +647,125 @@ async def test_global_gate_released_during_backoff(tmp_path, monkeypatch):
             f"退避期间未归还全局名额(顺序 {order})")
     finally:
         image_gate._reset_for_test()
+
+
+# ── 锚点图压缩(2026-08-05:1.4MB 原图上传更容易踩抖动超时)──────────────────
+
+def _png_bytes(width: int, height: int, mode: str = "RGB") -> bytes:
+    """造一张指定尺寸的 PNG(内容是随机噪点,避免纯色被 PNG 压到几百字节)。"""
+    import io
+    import os
+
+    from PIL import Image
+
+    im = Image.frombytes(mode, (width, height),
+                         os.urandom(width * height * len(mode)))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_compress_anchor_shrinks_oversized_image():
+    """长边 > 1536 → 等比缩到 1536 + 转 JPEG,文件名/mime 同步改成 jpeg。"""
+    import io
+
+    from PIL import Image
+
+    raw = _png_bytes(1152, 3072)          # 长边 3072,原图约数 MB
+    name, data, mime = openai_image._compress_anchor(raw)   # SDK file tuple 顺序
+
+    assert name.endswith(".jpg") and mime == "image/jpeg"
+    assert len(data) < len(raw)
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.size == (576, 1536)     # 等比:1152 * 1536/3072 = 576
+
+
+def test_compress_anchor_converts_rgba_before_jpeg():
+    """RGBA 必须先转 RGB —— JPEG 不支持 alpha,不转会直接抛。"""
+    import io
+
+    from PIL import Image
+
+    name, data, mime = openai_image._compress_anchor(_png_bytes(2048, 2048, mode="RGBA"))
+
+    assert mime == "image/jpeg"
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.mode == "RGB" and max(im.size) == 1536
+
+
+def test_compress_anchor_leaves_small_image_untouched():
+    """长边 <= 1536(含 gpt-image 原生 1024x1536)原样返回,不做多余重编码。"""
+    raw = _png_bytes(1024, 1536)
+    assert openai_image._compress_anchor(raw) == ("anchor.png", raw, "image/png")
+
+
+def test_compress_anchor_falls_back_on_pil_failure():
+    """PIL 认不出的字节 → 回退原字节,绝不因为压缩把生图搞挂。"""
+    raw = b"not-an-image-at-all"
+    assert openai_image._compress_anchor(raw) == ("anchor.png", raw, "image/png")
+
+
+async def test_oversized_anchor_is_compressed_before_upstream(tmp_path, monkeypatch):
+    """generate_batch 真的把压缩后的锚点喂给 images.edit(不是读了原字节直发)。"""
+    anchor = tmp_path / "big.png"
+    raw = _png_bytes(1152, 3072)
+    anchor.write_bytes(raw)
+
+    async def handler(prompt: str):
+        return _FakeResponse(prompt)
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=str(anchor))
+
+    assert results[0].success, results[0].error
+    name, data, mime = p._client.images.edit_calls[0]["image"]
+    assert (name, mime) == ("anchor.jpg", "image/jpeg")
+    assert len(data) < len(raw)
+
+
+async def test_unreadable_anchor_bytes_still_sent_as_is(tmp_path, monkeypatch):
+    """锚点压不动(非图片字节)时原样上传,行为与改造前一致。"""
+    async def handler(prompt: str):
+        return _FakeResponse(prompt)
+
+    p = _provider(tmp_path, handler)
+    results = await p.generate_batch(["page-0"], anchor_path=_anchor(tmp_path))
+
+    assert results[0].success, results[0].error
+    assert p._client.images.edit_calls[0]["image"] == (
+        "anchor.png", b"anchor-bytes", "image/png")
+
+
+# ── 客户端显式超时(2026-08-05 根因:SDK 默认 connect 只有 5s)───────────────────
+
+def test_client_sets_explicit_timeouts_and_caps_sdk_retries(tmp_path, monkeypatch):
+    """AsyncOpenAI 必须拿到分项 httpx 超时 + max_retries=1(重试节奏归本模块管)。
+
+    根因锚:此前不传 timeout → SDK 默认 connect=5s,抖动期毫无缓冲,加上 SDK 自身
+    三次快速重试(约 16s)跨不过抖动窗口,于是"失败比成功还快"。
+    """
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_API_KEY", "sk-test")
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_PROXY", "")
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_CONNECT_TIMEOUT", 30)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT", 300)
+
+    client = OpenAIImageProvider(str(tmp_path / "out")).client
+
+    assert client is not None
+    assert client.max_retries == 1, "SDK 自身重试必须压到 1,否则与本模块重试相乘"
+    t = client.timeout
+    assert (t.connect, t.read, t.write) == (30.0, 300.0, 120.0)
+
+
+def test_proxy_branch_also_gets_explicit_timeouts(tmp_path, monkeypatch):
+    """走 HTTP 代理那支同样挂上分项超时——两支分支不能只改一支。"""
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_API_KEY", "sk-test")
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_CONNECT_TIMEOUT", 30)
+    monkeypatch.setattr(settings, "OPENAI_IMAGE_TIMEOUT", 300)
+
+    client = OpenAIImageProvider(str(tmp_path / "out")).client
+
+    assert client is not None and client.max_retries == 1
+    inner = client._client.timeout           # 自带 httpx.AsyncClient 上的超时
+    assert (inner.connect, inner.read, inner.write) == (30.0, 300.0, 120.0)

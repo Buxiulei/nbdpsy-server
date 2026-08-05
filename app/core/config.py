@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     OPENAI_IMAGE_QUALITY: str = "medium"
     # 单张生图调用超时(秒):gpt-image 单张常 30-120s,留足余量
     OPENAI_IMAGE_TIMEOUT: int = 300
+    # 建连超时(秒):openai SDK 默认 connect 仅 5s,网络瞬时抖动时毫无缓冲就抛
+    # APITimeoutError("Request timed out.")。2026-08-05 实测四次失败耗时 18/20.7/33s,
+    # **短于**成功耗时 43-76s ——挂的是抖动窗口不是"生成太慢",故要调的是建连而非整体。
+    OPENAI_IMAGE_CONNECT_TIMEOUT: int = 30
+    # 超时重试次数(本模块层,与 429 预算分开计):跨过抖动窗口即可救回该页。
+    # SDK 自身 max_retries 已显式压到 1,总尝试数才可控可解释。
+    OPENAI_IMAGE_TIMEOUT_RETRIES: int = 2
     OPENAI_IMAGE_PROXY: str = ""
     # 单批次内并发路数(有界):锚点法各页互不依赖。此值决定**一篇要跑几波**——
     # 9 页 5 路要 2 波(约 100s),10 路 1 波(约 50s),故取 10 覆盖常见 6-9 页一波出完。

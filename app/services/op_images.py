@@ -20,6 +20,8 @@
 - **去水印失败 = 该页失败**:``urls[i]=""`` + ``errors[i]`` 写明去水印失败。绝不拿带
   水印的原图冒充默认交付(旧的"只剥元数据"兜底已删,理由见 imagegen/postprocess.py),
   运营按需用 --pages 重出该页,或直接取 ``orig_urls[i]`` 自行处置;
+- ``result.attempts``(2026-08-05 新增)与 prompts **同样等长、下标对齐**:该页打到上游的
+  实际尝试次数(含 429/超时重试;没打到上游的位为 0)。运营据此判断慢/抖动是不是常态;
 - ``anchor_url``(P1 闸门):非空时解析回本地 uploads 文件让全部页锚定它(不再重画
   P1);解析不到 → 整批失败位 + errors,不静默降级;
 - execute(payload) 为契约执行函数(不碰 browser_jobs 台账):正常返回
@@ -111,8 +113,8 @@ def get_images_job(session_id: str, job_id: int) -> dict | None:
 async def execute(payload: dict) -> dict:
     """执行一次锚点法批量生图(契约函数,不碰 browser_jobs 台账)。
 
-    正常(含额度错/单页失败/锚点解析失败)返回 {"urls","errors","orig_urls"}(三者
-    等长且与 prompts 下标对齐);任务级意外崩溃返回 {"error": str},不抛出。
+    正常(含额度错/单页失败/锚点解析失败)返回 {"urls","errors","orig_urls","attempts"}
+    (四者等长且与 prompts 下标对齐);任务级意外崩溃返回 {"error": str},不抛出。
     """
     prompts: List[str] = (payload or {}).get("prompts") or []
     anchor_url: Optional[str] = (payload or {}).get("anchor_url")
@@ -129,6 +131,7 @@ async def execute(payload: dict) -> dict:
                     "urls": ["" for _ in prompts],
                     "errors": [msg for _ in prompts],
                     "orig_urls": ["" for _ in prompts],
+                    "attempts": [0 for _ in prompts],
                 }
 
         # job 专属产物目录:不可猜 token 目录名即访问控制(/uploads 免鉴权直链)。
@@ -147,7 +150,11 @@ async def execute(payload: dict) -> dict:
         urls: List[str] = []
         errors: List[str] = []
         orig_urls: List[str] = []
+        attempts: List[int] = []
         for i, r in enumerate(results):
+            # 上游实际尝试次数(含重试),与另三条数组等长同序;没打到上游的位为 0。
+            meta = getattr(r, "metadata", None) or {}
+            attempts.append(int(meta.get("upstream_attempts", 0) or 0))
             if not (r.success and r.path):
                 urls.append("")
                 errors.append(r.error or "unknown")
@@ -189,10 +196,15 @@ async def execute(payload: dict) -> dict:
             urls.append("")
             errors.append("result_missing")
             orig_urls.append("")
+            attempts.append(0)
 
         ok = sum(1 for u in urls if u)
-        logger.info(f"[op_images] job 完成: {ok}/{len(prompts)} 成功")
-        return {"urls": urls, "errors": errors, "orig_urls": orig_urls}
+        retried = sum(1 for n in attempts if n > 1)
+        logger.info(
+            f"[op_images] job 完成: {ok}/{len(prompts)} 成功"
+            + (f",{retried} 页经上游重试" if retried else ""))
+        return {"urls": urls, "errors": errors, "orig_urls": orig_urls,
+                "attempts": attempts}
     except Exception as exc:  # noqa: BLE001 — 任务级意外崩溃才 failed
         logger.exception("[op_images] job 崩溃")
         return {"error": str(exc)}

@@ -349,3 +349,47 @@ def test_aspect_ratio_reaches_provider(tmp_path, monkeypatch):
     seen.clear()
     asyncio.run(op_images.execute({"prompts": ["p1"]}))  # 老台账无该键
     assert seen["aspect_ratio"] == "3:4", "缺省必须回落 3:4，保小红书轮播不变"
+
+
+# ── 重试可见性:attempts 第四个等长数组(2026-08-05 生图超时加固)──────────────
+
+async def test_attempts_array_aligned_with_urls(tmp_path, monkeypatch):
+    """result.attempts 与 urls/errors/orig_urls 等长同序,失败页也占位不移位。
+
+    运营据此判断"慢/抖动是不是常态"(需求文档四条验收之一);下标对齐是硬约束,
+    新增数组只能"再加一条等长的",不许改动原三条的语义。
+    """
+    _patch_uploads(tmp_path, monkeypatch)
+
+    def mapper(i, prompt, anchor):
+        if i == 1:  # 第 2 页超时重试耗尽(3 次尝试)
+            return ImageGenResult(
+                success=False, error="openai_image_edit_failed: Request timed out.",
+                metadata={"upstream_attempts": 3})
+        p = tmp_path / f"raw{i}.png"
+        p.write_bytes(b"\x89PNGraw-original-" + str(i).encode())
+        return ImageGenResult(success=True, path=str(p),
+                              metadata={"upstream_attempts": 2 if i == 0 else 1})
+
+    monkeypatch.setattr(
+        "app.imagegen.openai_image.OpenAIImageProvider.generate_batch",
+        _fake_batch(mapper),
+    )
+    monkeypatch.setattr("app.services.op_images.dewatermark", _fake_dewatermark_ok)
+
+    res = await op_images.execute({"prompts": ["p1", "p2", "p3"]})
+
+    assert len(res["attempts"]) == len(res["urls"]) == len(res["errors"]) == 3
+    assert res["attempts"] == [2, 3, 1]
+    assert res["urls"][1] == "" and "timed out" in res["errors"][1]
+
+
+async def test_attempts_defaults_to_zero_without_upstream_call(tmp_path, monkeypatch):
+    """没打到上游的失败(锚点解析失败/provider 没给计数)→ attempts 占位 0,长度照样对齐。"""
+    _patch_uploads(tmp_path, monkeypatch)
+
+    res = await op_images.execute(
+        {"prompts": ["p1", "p2"], "anchor_url": "/uploads/nope/does-not-exist.png"})
+
+    assert res["attempts"] == [0, 0]
+    assert res["urls"] == ["", ""] and len(res["errors"]) == 2

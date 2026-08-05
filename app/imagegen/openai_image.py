@@ -58,9 +58,37 @@ _RATE_LIMIT_KEYWORDS = (
 )
 
 # 429 退避重试:最多重试 3 次,基数 2s 指数退避(2s/4s/8s)+ 抖动。
-# 只对 429 重试——moderation 是 prompt 本身的问题,重试纯烧钱。
+# moderation 是 prompt 本身的问题,重试纯烧钱,一律不重试。
 _RATE_LIMIT_MAX_RETRIES = 3
 _RATE_LIMIT_BACKOFF_BASE = 2.0
+
+# 超时的兜底文案关键词,同 429/moderation 的双层判定理由:中转会把结构化异常拍扁成
+# 纯文本("Request timed out." 是 openai SDK APITimeoutError 的硬编码文案)。
+_TIMEOUT_KEYWORDS = (
+    "timed out",
+    "timeout",
+    "超时",
+)
+
+# 超时退避:基数 5s、倍数 3(5s/15s),**比 429 慢得多**且预算与 429 分开计。
+# 依据(2026-08-05 实测):失败耗时 18/20.7/33s 短于成功耗时 43-76s,说明挂的是瞬时
+# 网络抖动而非"生成太慢";SDK 内建的三次快速重试(合计约 16s)跨不过抖动窗口,退避
+# 必须显著更长才有意义。次数由 settings.OPENAI_IMAGE_TIMEOUT_RETRIES 控制。
+_TIMEOUT_BACKOFF_BASE = 5.0
+_TIMEOUT_BACKOFF_FACTOR = 3
+
+# 交给 openai SDK 的自身重试次数:显式压到 1。SDK 默认 2 次,与本模块的重试相乘会让
+# 单页最坏尝试次数膨胀且无法解释;重试节奏统一由 _call_with_backoff 掌握。
+_SDK_MAX_RETRIES = 1
+# httpx 超时分项:connect 由 settings 控制,read 复用 OPENAI_IMAGE_TIMEOUT,
+# write 给锚点图上传留足(默认 5s 对 1MB+ 载荷偏紧),pool 为等连接池名额的上限。
+_WRITE_TIMEOUT = 120.0
+_POOL_TIMEOUT = 30.0
+
+# 锚点图喂上游前的瘦身阈值:长边超过即等比缩到该值并转 JPEG。锚点只用于风格锚定,
+# 不需要原始像素;而 1.4MB 原图的上传窗口更长,抖动期更容易踩超时(需求文档第 2 条)。
+_ANCHOR_MAX_SIDE = 1536
+_ANCHOR_JPEG_QUALITY = 90
 
 
 @dataclass
@@ -71,6 +99,13 @@ class ImageGenResult:
     path: Optional[str] = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _Attempts:
+    """上游尝试次数计数盒(可变):重试耗尽抛异常时,调用方仍能读到真实尝试次数。"""
+
+    n: int = 0
 
 
 def _is_moderation_error(exc: Exception) -> bool:
@@ -104,6 +139,65 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return any(kw in msg for kw in _RATE_LIMIT_KEYWORDS)
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    """判定异常是否为上游超时(结构化类型优先,再兜底中转拍扁后的纯文案)。
+
+    结构化覆盖三层:openai 的 APITimeoutError、httpx 的 TimeoutException(自带
+    http_client 时直接冒出)、以及本模块 asyncio.wait_for 抛的裸 TimeoutError
+    (str 为空串,只靠文案关键词判不出来)。
+    """
+    try:
+        from openai import APITimeoutError
+
+        if isinstance(exc, APITimeoutError):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    msg = str(exc).lower()
+    return any(kw in msg for kw in _TIMEOUT_KEYWORDS)
+
+
+def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
+    """锚点图瘦身:长边超阈值则等比缩到 _ANCHOR_MAX_SIDE + 转 JPEG q90。
+
+    返回 ``(文件名, bytes, mime)`` 三元组,即 images.edit 的 image 载荷形状(顺序是
+    SDK 约定的 file tuple,别写反)。长边未超阈值原样返回(gpt-image 原生 1024x1536
+    走这条,不做多余重编码)。
+    **任何失败一律回退原字节**:压缩只是给上传瘦身,绝不能因为它把一次生图搞挂。
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as im:
+            if max(im.size) <= _ANCHOR_MAX_SIDE:
+                return "anchor.png", raw, "image/png"
+            ratio = _ANCHOR_MAX_SIDE / max(im.size)
+            new_size = (max(1, round(im.width * ratio)), max(1, round(im.height * ratio)))
+            # JPEG 不支持 alpha:RGBA/P 等模式必须先转 RGB,否则 save 直接抛
+            resized = im.convert("RGB").resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=_ANCHOR_JPEG_QUALITY)
+        data = buf.getvalue()
+        logger.info(
+            f"[openai_image] 锚点压缩: {len(raw) / 1024:.0f}KB → {len(data) / 1024:.0f}KB "
+            f"{new_size}")
+        return "anchor.jpg", data, "image/jpeg"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[openai_image] 锚点压缩失败,回退原字节: {exc}")
+        return "anchor.png", raw, "image/png"
+
+
 def _ratelimit_headers(exc: Exception) -> str:
     """从 429 异常里摘出 OpenAI 的 x-ratelimit-* 响应头,拼成日志后缀(取不到返回空串)。
 
@@ -122,13 +216,21 @@ def _ratelimit_headers(exc: Exception) -> str:
         return ""
 
 
-async def _call_with_backoff(make_call, *, tag: str):
-    """执行一次上游图像调用(带超时),仅对 429 做指数退避重试。
+async def _call_with_backoff(make_call, *, tag: str, counter: Optional[_Attempts] = None):
+    """执行一次上游图像调用(带超时),对 429 与上游超时分别做退避重试。
 
     ``make_call`` 是零参协程工厂(每次重试重新发起请求)。moderation 与其它异常
-    一律原样抛出交由调用方分层;重试耗尽也抛出最后一次异常。
+    一律原样抛出交由调用方分层;重试耗尽也抛出最后一次异常。``counter`` 非空时累计
+    实际尝试次数(成功与抛出两条路都已写入,供结果里透出 upstream_attempts)。
+
+    **429 与超时各计各的预算**:成因不同(限流是配额、超时是网络抖动),共用一个预算
+    会让先撞几次限流的页把超时重试额度提前花光。退避基数也不同,理由见 _TIMEOUT_* 常量。
     """
-    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+    rate_limit_retries = 0
+    timeout_retries = 0
+    while True:
+        if counter is not None:
+            counter.n += 1
         try:
             # 进程级闸只包住**真正在飞的那次请求**:退避 sleep 期间名额归还给别的任务
             # (被限流时占着名额干等纯属浪费吞吐)。获取顺序恒为 页级 sem → 本闸,
@@ -137,16 +239,30 @@ async def _call_with_backoff(make_call, *, tag: str):
                 return await asyncio.wait_for(
                     make_call(), timeout=settings.OPENAI_IMAGE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
-            retryable = _is_rate_limit_error(exc) and not _is_moderation_error(exc)
-            if not retryable or attempt >= _RATE_LIMIT_MAX_RETRIES:
+            if _is_moderation_error(exc):
                 raise
-            # 抖动:并发多路同时撞限额时错开重试,避免整齐撞回同一秒再次 429
-            delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
-            delay += random.uniform(0, delay / 2)
-            logger.warning(
-                f"[openai_image] 限流 429 {tag},{delay:.1f}s 后重试"
-                f"({attempt + 1}/{_RATE_LIMIT_MAX_RETRIES}): {exc}{_ratelimit_headers(exc)}")
-            await asyncio.sleep(delay)
+            if _is_rate_limit_error(exc):
+                if rate_limit_retries >= _RATE_LIMIT_MAX_RETRIES:
+                    raise
+                delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** rate_limit_retries)
+                rate_limit_retries += 1
+                logger.warning(
+                    f"[openai_image] 限流 429 {tag},{delay:.1f}s 后重试"
+                    f"({rate_limit_retries}/{_RATE_LIMIT_MAX_RETRIES}): {exc}"
+                    f"{_ratelimit_headers(exc)}")
+            elif _is_timeout_error(exc):
+                budget = max(0, settings.OPENAI_IMAGE_TIMEOUT_RETRIES)
+                if timeout_retries >= budget:
+                    raise
+                delay = _TIMEOUT_BACKOFF_BASE * (_TIMEOUT_BACKOFF_FACTOR ** timeout_retries)
+                timeout_retries += 1
+                logger.warning(
+                    f"[openai_image] 上游超时 {tag},{delay:.1f}s 后重试"
+                    f"({timeout_retries}/{budget}): {exc}")
+            else:
+                raise
+            # 抖动:并发多路同时失败时错开重试,避免整齐撞回同一秒再次一起挂
+            await asyncio.sleep(delay + random.uniform(0, delay / 2))
 
 
 def _log_usage(response: Any, *, kind: str, index: int) -> None:
@@ -184,23 +300,33 @@ class OpenAIImageProvider:
         """延迟初始化 AsyncOpenAI(自定义 base_url + 可选 HTTP 代理)。"""
         if self._client is None:
             try:
+                import httpx
                 from openai import AsyncOpenAI
 
                 if not settings.OPENAI_IMAGE_API_KEY:
                     logger.warning("[openai_image] OPENAI_IMAGE_API_KEY 未配置,gpt-image 不可用")
                     return None
+                # 显式分项超时:SDK 默认 connect 只有 5s,抖动期毫无缓冲直接判死
+                # (给 httpx.AsyncClient 传标量 timeout 也是一样的坑——四项一起被设成
+                # 300s 或 5s,都不是我们要的)。两支分支都必须挂上,别只改一支。
+                timeout = httpx.Timeout(
+                    connect=float(settings.OPENAI_IMAGE_CONNECT_TIMEOUT),
+                    read=float(settings.OPENAI_IMAGE_TIMEOUT),
+                    write=_WRITE_TIMEOUT,
+                    pool=_POOL_TIMEOUT,
+                )
                 http_client = None
                 if settings.OPENAI_IMAGE_PROXY:
-                    import httpx
-
                     http_client = httpx.AsyncClient(
                         proxy=settings.OPENAI_IMAGE_PROXY,
-                        timeout=settings.OPENAI_IMAGE_TIMEOUT,
+                        timeout=timeout,
                     )
                 self._client = AsyncOpenAI(
                     api_key=settings.OPENAI_IMAGE_API_KEY,
                     base_url=settings.OPENAI_IMAGE_BASE_URL,
                     http_client=http_client,
+                    timeout=timeout,
+                    max_retries=_SDK_MAX_RETRIES,
                 )
             except ImportError:
                 logger.error("[openai_image] openai SDK 未安装,gpt-image 不可用")
@@ -234,6 +360,7 @@ class OpenAIImageProvider:
         if not client:
             return ImageGenResult(success=False, error="openai_image_client_unavailable")
         size = ASPECT_RATIO_TO_OPENAI_SIZE.get(aspect_ratio, "1024x1024")
+        counter = _Attempts()
         try:
             response = await _call_with_backoff(
                 lambda: client.images.generate(
@@ -244,20 +371,27 @@ class OpenAIImageProvider:
                     n=1,
                 ),
                 tag="generate",
+                counter=counter,
             )
         except Exception as exc:  # noqa: BLE001
             # 错误分层:安全审查拦截是"prompt 本身有问题"的业务信号;其余是系统级失败。
+            # 失败结果同样带尝试次数——调用方要据此判断"慢/抖动是不是常态"。
+            meta = {"upstream_attempts": counter.n}
             if _is_moderation_error(exc):
                 logger.warning(f"[openai_image] 内容审查拦截: {exc}")
-                return ImageGenResult(success=False, error=f"moderation_blocked: {exc}")
-            logger.error(f"[openai_image] 生成失败: {exc}")
-            return ImageGenResult(success=False, error=f"openai_image_call_failed: {exc}")
+                return ImageGenResult(
+                    success=False, error=f"moderation_blocked: {exc}", metadata=meta)
+            logger.error(f"[openai_image] 生成失败(尝试 {counter.n} 次): {exc}")
+            return ImageGenResult(
+                success=False, error=f"openai_image_call_failed: {exc}", metadata=meta)
         _log_usage(response, kind="generate", index=0)
         if not response.data:
-            return ImageGenResult(success=False, error="empty_response")
+            return ImageGenResult(success=False, error="empty_response",
+                                  metadata={"upstream_attempts": counter.n})
         result = self._save(response.data[0].b64_json, save_prefix)
         if result.success:
             result.metadata = {"size": size, "aspect_ratio": aspect_ratio}
+        result.metadata["upstream_attempts"] = counter.n
         return result
 
     async def generate_batch(
@@ -341,13 +475,14 @@ class OpenAIImageProvider:
             anchor_bytes = Path(anchor_result.path).read_bytes()
             edit_start = 1
 
-        # anchor bytes 只读一次,所有 edit 复用同一载荷(每张都锚同一张 P1)。
+        # anchor bytes 只读一次并压一次,所有 edit 复用同一载荷(每张都锚同一张 P1)。
         # 是不可变 bytes 三元组而非文件句柄,并发复用不存在读游标竞争。
-        anchor_file = ("anchor.png", anchor_bytes, "image/png")
+        anchor_file = _compress_anchor(anchor_bytes)
 
         async def _edit_one(i: int) -> ImageGenResult:
             """第 i 张 edit;失败就地转成失败结果返回,保证该下标位不塌陷。"""
             async with sem:
+                counter = _Attempts()
                 try:
                     response = await _call_with_backoff(
                         lambda: client.images.edit(
@@ -359,21 +494,25 @@ class OpenAIImageProvider:
                             n=1,
                         ),
                         tag=f"edit[{i}]",
+                        counter=counter,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    meta = {"upstream_attempts": counter.n}
                     if _is_moderation_error(exc):
                         logger.warning(f"[openai_image] edit 内容审查拦截[{i}]: {exc}")
                         return ImageGenResult(
-                            success=False, error=f"moderation_blocked: {exc}")
-                    logger.error(f"[openai_image] edit 失败[{i}]: {exc}")
+                            success=False, error=f"moderation_blocked: {exc}", metadata=meta)
+                    logger.error(f"[openai_image] edit 失败[{i}](尝试 {counter.n} 次): {exc}")
                     return ImageGenResult(
-                        success=False, error=f"openai_image_edit_failed: {exc}")
+                        success=False, error=f"openai_image_edit_failed: {exc}", metadata=meta)
                 _log_usage(response, kind="edit", index=i)
                 if not response.data:
-                    return ImageGenResult(success=False, error="empty_response")
+                    return ImageGenResult(success=False, error="empty_response",
+                                          metadata={"upstream_attempts": counter.n})
                 r = self._save(response.data[0].b64_json, save_prefix)
                 if r.success:
                     r.metadata = {"size": size, "consistency": "anchor"}
+                r.metadata["upstream_attempts"] = counter.n
                 return r
 
         # gather 保序:edits[k] 恒对应 prompts[edit_start + k]。return_exceptions 兜住
