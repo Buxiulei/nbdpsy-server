@@ -738,7 +738,8 @@ _ROW_BAND_TRIES = 4
 _ROW_BAND_JS = (
     "(sel) => { const el = document.querySelector(sel); /* row-band-probe */"
     " if (!el) return null; const r = el.getBoundingClientRect();"
-    " return {cy: r.y + r.height / 2, ih: window.innerHeight}; }"
+    " return {cx: r.x + r.width / 2, cy: r.y + r.height / 2,"
+    " ih: window.innerHeight}; }"
 )
 
 
@@ -750,6 +751,7 @@ def _scroll_row_to_mid_viewport(page, human: SyncHumanActions, selector: str) ->
     尽力而为的取舍:内容比视口短的页面滚不动,硬拒绝会把本来能点的场景误杀;
     点击后本就有"没反应"的显式报错兜底,这里只负责把命中率从看运气变成确定。
     """
+    hovered = False
     for _ in range(_ROW_BAND_TRIES):
         band = None
         try:
@@ -761,6 +763,14 @@ def _scroll_row_to_mid_viewport(page, human: SyncHumanActions, selector: str) ->
         ratio = band["cy"] / max(band["ih"], 1)
         if _ROW_BAND[0] <= ratio <= _ROW_BAND[1]:
             return
+        if not hovered:
+            # mouse.wheel 打在鼠标当前位置,而创作中心滚的是**内层容器**不是窗口
+            # (2026-05 踩坑存档:拟人滚动前必须 hover 到可滚区)——先把鼠标移进内容列
+            # 中部(行的 x 中线、视口 45% 高:在可滚容器内、也在发布钮遮挡带外)再滚。
+            human.hover(
+                (band["cx"], band["ih"] * 0.45), reason="移进内容列中部准备滚动"
+            )
+            hovered = True
         human.scroll("down" if ratio > _ROW_BAND[1] else "up")
         human.wait(0.3, 0.7, context="把设置行滚出底部发布钮遮挡带")
     logger.warning(

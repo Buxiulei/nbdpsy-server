@@ -1267,9 +1267,13 @@ class _BandPage:
 class _BandHuman:
     def __init__(self):
         self.scrolls = []
+        self.hovers = []
 
     def scroll(self, direction="down", distance=None):
         self.scrolls.append(direction)
+
+    def hover(self, target, *, reason=""):
+        self.hovers.append(target)
 
     def wait(self, *_a, **_kw):
         pass
@@ -1281,15 +1285,18 @@ def test_row_in_bottom_band_scrolls_down_until_mid():
     根因(quote_probe 夹具 2026-08-05):底部发布钮 XHS-PUBLISH-BTN 透明命中区盖住底带,
     行在带内点了被吞——标本 6a707e9f 七连零反应、quote_candidates_unavailable 11 例。
     """
-    page = _BandPage([{"cy": 1190, "ih": 1266}, {"cy": 633, "ih": 1266}])
+    page = _BandPage([{"cx": 942, "cy": 1190, "ih": 1266}, {"cx": 942, "cy": 633, "ih": 1266}])
     human = _BandHuman()
     bnc._scroll_row_to_mid_viewport(page, human, ".quote-note-container")
     assert human.scrolls == ["down"]
+    # 滚前必须先把鼠标移进内容列(mouse.wheel 打在鼠标位置,创作中心滚的是内层容器):
+    # hover 点 = 行 x 中线、视口 45% 高
+    assert human.hovers == [(942, 1266 * 0.45)]
 
 
 def test_row_in_top_band_scrolls_up():
     """行在顶带 → 向上滚(只会向下的写法遇到被顶到上方的 E8 情形会越滚越远)。"""
-    page = _BandPage([{"cy": 100, "ih": 1266}, {"cy": 500, "ih": 1266}])
+    page = _BandPage([{"cx": 942, "cy": 100, "ih": 1266}, {"cx": 942, "cy": 500, "ih": 1266}])
     human = _BandHuman()
     bnc._scroll_row_to_mid_viewport(page, human, "x")
     assert human.scrolls == ["up"]
@@ -1297,7 +1304,7 @@ def test_row_in_top_band_scrolls_up():
 
 def test_row_already_mid_band_zero_scroll():
     """行已在中带 → 一次滚动都不发生。"""
-    page = _BandPage([{"cy": 633, "ih": 1266}])
+    page = _BandPage([{"cx": 942, "cy": 633, "ih": 1266}])
     human = _BandHuman()
     bnc._scroll_row_to_mid_viewport(page, human, "x")
     assert human.scrolls == []
@@ -1305,7 +1312,7 @@ def test_row_already_mid_band_zero_scroll():
 
 def test_row_never_reaches_band_gives_up_bounded():
     """滚满上限仍不在带内 → 告警放行(内容短滚不动的页面不误杀),滚动次数有界。"""
-    page = _BandPage([{"cy": 1200, "ih": 1266}] * 10)
+    page = _BandPage([{"cx": 942, "cy": 1200, "ih": 1266}] * 10)
     human = _BandHuman()
     bnc._scroll_row_to_mid_viewport(page, human, "x")
     assert human.scrolls == ["down"] * bnc._ROW_BAND_TRIES
