@@ -61,6 +61,22 @@ _SCENES = {
         ],
         "api_marks": [],
     },
+    # 内容设置区发现(原创声明开关接入前的 E-gate 取证):dump 设置区各候选选择器 →
+    # 定位「原创声明」行 → 受控点开开关观察(弹窗?即时生效?)→ 恢复原态。全程不提交,
+    # 弃编辑器离开即丢,笔记原样。
+    "content_settings": {
+        "flow": "content_settings",
+        "dom": [
+            "[class*='setting']",
+            "[class*='original']",
+            "[class*='statement']",
+            "[class*='declare']",
+            "[class*='switch']",
+            "button[role='switch']",
+            "[class*='collection-plugin']",
+        ],
+        "api_marks": [],
+    },
     "quote_modal": {
         "flow": "quote_modal",
         "dom": [
@@ -133,7 +149,63 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
 
         flow = _SCENES[scene].get("flow", "quote_modal")
         extra: dict = {}
-        if flow == "update_editor":
+        if flow == "content_settings":
+            # ① 基态广撒网 dump(发现选择器用,夹具过滤器保证可读)
+            base = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
+            # ② 定位「原创声明」所在行,dump 行内全部后代的形态
+            _ROW_JS = r"""
+            () => {
+                const all = [...document.querySelectorAll('div,span,p,label')];
+                const hit = all.find(el => (el.innerText || '').trim() === '原创声明');
+                if (!hit) return null;
+                let row = hit;
+                for (let i = 0; i < 4 && row.parentElement; i++) row = row.parentElement;
+                const dump = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const attrs = {};
+                    for (const a of el.attributes) attrs[a.name] = a.value;
+                    return {tag: el.tagName, text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+                            attrs, rect: {x: Math.round(r.x), y: Math.round(r.y),
+                                          width: Math.round(r.width), height: Math.round(r.height)}};
+                };
+                return {row: dump(row), descendants: [...row.querySelectorAll('*')].slice(0, 60).map(dump)};
+            }
+            """
+            extra["original_row"] = page.evaluate(_ROW_JS)
+            # ③ 受控点开开关观察反应(弹窗/即时翻转),再恢复原态。找不到开关就只留基态证据。
+            toggle = page.evaluate_handle(
+                r"""() => {
+                    const all = [...document.querySelectorAll('div,span,p,label')];
+                    const hit = all.find(el => (el.innerText || '').trim() === '原创声明');
+                    if (!hit) return null;
+                    let row = hit;
+                    for (let i = 0; i < 4 && row.parentElement; i++) row = row.parentElement;
+                    return row.querySelector("[class*='switch'],button[role='switch'],input[type='checkbox']");
+                }"""
+            ).as_element()
+            if toggle is not None:
+                human.click(toggle, reason="点开原创声明开关(取证:观察弹窗/即时生效)")
+                human.wait(1.2, 2.0, context="等开关反应渲染")
+                extra["after_toggle_on"] = {
+                    "row": page.evaluate(_ROW_JS),
+                    "dialogs": {sel: page.evaluate(_DUMP_JS, sel) for sel in (
+                        "[class*='dialog']", "[class*='modal']", "[class*='agreement']",
+                        "[class*='confirm']",
+                    )},
+                }
+                # 弹窗里若有「取消/关闭」按钮先点掉;没有弹窗则再点一次开关恢复原态
+                cancel = page.evaluate_handle(
+                    r"""() => [...document.querySelectorAll('button')]
+                        .find(b => ['取消','关闭','我再想想'].includes((b.innerText || '').trim())) || null"""
+                ).as_element()
+                if cancel is not None:
+                    human.click(cancel, reason="关掉原创声明确认弹窗(恢复原态)")
+                else:
+                    human.click(toggle, reason="再点一次开关恢复原态(取证收尾)")
+                human.wait(0.6, 1.2, context="等恢复渲染")
+                extra["after_restore"] = page.evaluate(_ROW_JS)
+            dom = base
+        elif flow == "update_editor":
             # ① 基态 dump(图片区/文本区/file input/提示文案)
             base = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
             # ② hover 首图让 hoverShow 的 close-btn 显形,再 dump 一次(E2 只读部分:
