@@ -261,11 +261,25 @@ def _inflight_jobs(account_id: int) -> list:
         f"file:{browser_jobs_repo.current_db_path()}?mode=ro", uri=True
     )
     try:
-        return con.execute(
+        rows = con.execute(
             "SELECT id, kind, status FROM browser_jobs "
             "WHERE account_id = ? AND status IN ('running', 'queued')",
             (account_id,),
         ).fetchall()
+        # 发布任务在独立台账(fable 审查指出的缺口):publishing 是全系统代价最高的
+        # 撞车对象(图都传完了被杀还烧配额);pending 且已到期/15 分钟内到期 = 随时开跑,
+        # 同样拦。远期定时的 pending 不算在飞。
+        rows += [
+            (str(r[0]), f"publish:{r[1]}", r[2])
+            for r in con.execute(
+                "SELECT id, title, status FROM publish_jobs "
+                "WHERE account_id = ? AND (status = 'publishing' OR "
+                "(status = 'pending' AND (schedule_time IS NULL "
+                "OR schedule_time <= datetime('now', '+15 minutes'))))",
+                (account_id,),
+            ).fetchall()
+        ]
+        return rows
     finally:
         con.close()
 
