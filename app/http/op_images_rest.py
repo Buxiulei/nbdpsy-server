@@ -33,7 +33,10 @@ MANIFEST_ENTRIES = [
                  "(P1)当锚点、其余页各自锚定它;非空则全部页锚定该已确认 P1(不重画 P1)。"
                  "产物自动过去水印工作流(非整数缩小 0.855 + PNG 重编码,同时丢弃 C2PA/EXIF);"
                  "该步失败即判该页失败(不返回带水印图),原图仍可从 orig_urls 取。"
-                 "批量出图耗时约每页 30-60s,8 页 medium 质量约 $0.7。",
+                 "锚点图喂上游前会自动瘦身(长边 >1536 等比缩 + 转 JPEG q90),调用方无需自己压。"
+                 "批量出图耗时约每页 30-60s,8 页 medium 质量约 $0.7;遇上游超时服务端会内部"
+                 "重试(单页最多 3 次尝试,退避 5s/15s),个别页因此可能拖到数分钟——**轮询窗口"
+                 "建议给到 600s**。",
     },
     {
         "method": "GET", "path": "/api/op/drafts/{session_id}/jobs/{job_id}",
@@ -42,11 +45,17 @@ MANIFEST_ENTRIES = [
         "params": {"session_id": "path,str", "job_id": "path,int"},
         "returns": '{"status": "queued|running|done|failed", "result": {...}}',
         "errors": "404=任务不存在或已过期",
-        "notes": "done 时 result.urls / result.errors / result.orig_urls 三者等长且与提交 "
+        "notes": "done 时 result.urls / result.errors / result.orig_urls / result.attempts "
+                 "四者等长且与提交 "
                  "prompts 按下标对齐(urls 失败位空串、errors 成功位空串);**额度错表现为 "
                  "done+errors 有值**(不是整任务 failed),需逐页读 errors 判定。"
                  "**去水印失败也算该页失败**(urls 空 + errors 写明),绝不返回带水印的图。"
                  "orig_urls 是去水印前的 provider 原图(NN.orig.png),即便该页去水印失败也可取。"
+                 "attempts[i] 是该页打到上游的**实际尝试次数**(含 429/超时重试;没打到上游的位为 0),"
+                 "1 表示一次过、>1 表示上游当时不稳——据此判断慢是不是常态、失败页值不值得人工重跑。"
+                 "**计费口径**:上游超时抛的是 SDK APITimeoutError,即我们没拿到响应,这类请求"
+                 "一般不计费,但服务端拿不到 usage、**无法从代码层证实**;故不提供 billed 字段"
+                 "(证实不了的事不给字段,给了就是假承诺),请以 OpenAI 账单为准。"
                  "urls/orig_urls 都是相对 /uploads/… 路径,拼 base 即公网直链(免鉴权,"
                  "不可猜目录名即访问控制)。进程内存台账,重启即丢(404 时重新发起);"
                  "终态留存 2 小时。",
