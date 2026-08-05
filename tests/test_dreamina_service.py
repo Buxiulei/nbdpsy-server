@@ -535,3 +535,78 @@ async def test_reap_removes_orphan_dirs_but_spares_fresh_ones(db_factory, tmp_pa
     assert not stale_orphan.exists()
     assert fresh_orphan.exists(), "刚建的孤儿目录可能正在物化，绝不能删"
     assert live_dir.exists(), "有 DB 行的目录不是孤儿"
+
+
+# ── 多图参考 / 首尾帧（CLI 能力面开放）──────────────────────────────────────
+def test_max_ref_images_is_per_model():
+    """参考图张数上限**按模型分档**：2.5 是 30，2.0 家族/mini 只有 9。
+
+    网上流传的「Seedance 最多 9 张」是 **2.0** 的数字（CLI help 原文：seedance2.5 ->
+    image<=30；seedance2.0 family/seedance2.0mini -> image<=9），套到 2.5 上会白白砍掉
+    我们锁人物一致性最需要的那 21 个槽。未知模型按 9 判——宁窄不宽。
+    """
+    assert dreamina.max_ref_images("seedance2.5") == 30
+    for model in ("seedance2.0", "seedance2.0fast", "seedance2.0_vip",
+                  "seedance2.0fast_vip", "seedance2.0mini", "未来某档"):
+        assert dreamina.max_ref_images(model) == 9
+
+
+def test_ref_paths_prefers_json_and_falls_back_to_legacy_column():
+    """读参考图一律走 ref_paths：新行看 image_paths_json，多图列上线前的老行回落 image_path。"""
+    legacy = _clip(operation="multimodal2video", image_path="/tmp/ref.png")
+    assert dreamina.ref_paths(legacy) == ["/tmp/ref.png"]
+
+    multi = _clip(operation="multimodal2video", image_path="/tmp/a.png",
+                  image_paths_json='["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]')
+    assert dreamina.ref_paths(multi) == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]
+
+    assert dreamina.ref_paths(_clip()) == []
+    # JSON 坏了不炸：回落单列（这列只承载路径，坏值不该让一条已建好的任务提不出去）
+    broken = _clip(image_path="/tmp/ref.png", image_paths_json="{不是 JSON")
+    assert dreamina.ref_paths(broken) == ["/tmp/ref.png"]
+
+
+def test_build_submit_args_multi_image():
+    """multimodal2video 多图：每张一个 --image（CLI 的 --image 是 stringArray，可重复）。"""
+    args = dreamina.build_submit_args(_clip(
+        operation="multimodal2video", image_path="/tmp/a.png",
+        image_paths_json='["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]'))
+    assert args[0] == "multimodal2video"
+    assert [a for a in args if a.startswith("--image=")] == [
+        "--image=/tmp/a.png", "--image=/tmp/b.png", "--image=/tmp/c.png"]
+    assert "--ratio=9:16" in args
+
+
+def test_build_submit_args_frames2video():
+    """首尾帧：--first/--last 取 image_paths_json 的 [首, 尾]，**绝不带 --ratio**。
+
+    CLI help 原文 "ratio is inferred from the first frame image size"——传了会被严格校验拒收。
+    """
+    args = dreamina.build_submit_args(_clip(
+        operation="frames2video", ratio=None, model="seedance2.5", duration=8,
+        image_path="/tmp/first.png",
+        image_paths_json='["/tmp/first.png", "/tmp/last.png"]'))
+    assert args[0] == "frames2video"
+    assert "--first=/tmp/first.png" in args and "--last=/tmp/last.png" in args
+    assert not any(a.startswith("--ratio") for a in args)
+    assert "--video_resolution=720p" in args and "--poll=0" in args
+    assert "--duration=8" in args and "--model_version=seedance2.5" in args
+    assert not any(a.startswith("--image=") for a in args)
+
+
+async def test_materialize_writes_distinct_copies_per_stem(tmp_path, monkeypatch):
+    """多张参考图各自落成**独立副本**：文件名由 stem 区分，后一张不许盖掉前一张。"""
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    src = tmp_path / "uploads" / "refs"
+    src.mkdir(parents=True)
+    (src / "01.png").write_bytes(_PNG)
+    (src / "02.png").write_bytes(_PNG + b"second")
+    workdir = tmp_path / "w"
+
+    first = await dreamina.materialize_ref_image("/uploads/refs/01.png", workdir)
+    second = await dreamina.materialize_ref_image(
+        "/uploads/refs/02.png", workdir, stem="ref_2")
+
+    assert first.name == "ref.png", "单张默认名不变（老行为逐字节保持）"
+    assert second.name == "ref_2.png"
+    assert first.read_bytes() == _PNG and second.read_bytes() == _PNG + b"second"

@@ -1,4 +1,5 @@
-"""即梦(Dreamina)视频片段任务表：一条 text2video / image2video / multimodal2video 生成任务。
+"""即梦(Dreamina)视频片段任务表：一条 text2video / image2video / multimodal2video /
+frames2video 生成任务。
 
 设计 ``docs/design/2026-08-05-dreamina-clips-design.md``；需求契约
 ``NBDpsy/文档/2026-08-05-server需求-即梦视频生成服务化.md``。
@@ -67,6 +68,11 @@ class VideoClip(Base):
     image_source: Mapped[str | None] = mapped_column(Text, default=None)
     # 参考图物化后的本地文件（clip 工作目录内的独立副本，脱离图床 7 天清理）
     image_path: Mapped[str | None] = mapped_column(Text, default=None)
+    # 参考图本地副本路径的 JSON 数组，**顺序即语义**：multimodal2video 是多张参考图的传入序
+    # （CLI 的 --image 可重复，2.5 收 30 张 / 2.0 家族收 9 张），frames2video 恒为
+    # ``[首帧, 尾帧]`` 两元素。``image_path`` 的语义**不变**——新行同时写它=第一张，本列上线
+    # 前的老行只有它，故读侧一律走 ``dreamina.ref_paths()``：本列优先、回落 image_path。
+    image_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
 
     # 生命周期：queued|submitting|submitted|querying|done|error
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)

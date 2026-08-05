@@ -52,7 +52,7 @@ from app.core.config import settings
 from app.models.video_clip import VideoClip
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
-# 默认档（六档模型 / 六种画幅 / 三种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）。
+# 默认档（六档模型 / 六种画幅 / 四种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）。
 # 2026-08-05 CLI 升级后模型面从四档扩到六档（新增 seedance2.0mini / seedance2.5，2.5 **没有**
 # fast / vip 变体），默认档同时切到 seedance2.5。
 DEFAULT_MODEL = "seedance2.5"
@@ -65,6 +65,16 @@ DURATION_MIN = 4
 DURATION_MAX = 30
 _DURATION_MAX_DEFAULT = 15
 _DURATION_MAX_BY_MODEL = {"seedance2.5": 30}
+
+# multimodal2video 的参考图张数上限，同样**按模型分档**（CLI help 原文：
+# ``seedance2.5 -> image<=30``；``seedance2.0 family/seedance2.0mini -> image<=9``）。
+# 网上流传的「Seedance 最多 9 张」是 **2.0** 的数字，套到 2.5 上会白砍掉 21 个图槽——
+# 那些槽正是跨镜锁人物一致性（本镜场景图 + 全片人物定妆图 + 关键道具图）要用的。
+# server 侧只支持 --image 一种输入（不接 --video / --audio），故「总输入 ≤50/≤12」的闸
+# 由张数闸自然覆盖，不另设。
+REF_IMAGE_MAX = 30
+_REF_IMAGE_MAX_DEFAULT = 9
+_REF_IMAGE_MAX_BY_MODEL = {"seedance2.5": REF_IMAGE_MAX}
 
 # 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
 # seedance2.5 = 130（2026-08-05 生产实测 vc_3e1260f8ce，credit_count 与余额扣减对账精确；
@@ -334,6 +344,12 @@ def max_duration(model: str) -> int:
     return _DURATION_MAX_BY_MODEL.get(model, _DURATION_MAX_DEFAULT)
 
 
+def max_ref_images(model: str) -> int:
+    """该模型 multimodal2video 的参考图张数上限。未知模型按家族默认 9 判——宁可窄不宜宽，
+    放宽等于让一条 CLI 必拒的任务先物化 N 张图、建行、再失败。"""
+    return _REF_IMAGE_MAX_BY_MODEL.get(model, _REF_IMAGE_MAX_DEFAULT)
+
+
 def estimate_credit(model: str, duration: int) -> int | None:
     """按 5s 档粗估一镜积分；未知模型返回 None（不估、不给 warning）。
 
@@ -449,8 +465,12 @@ async def _fetch_remote_image(source: str) -> bytes:
     return b"".join(chunks)
 
 
-async def materialize_ref_image(source: str, workdir: Path) -> Path:
+async def materialize_ref_image(source: str, workdir: Path, *, stem: str = "ref") -> Path:
     """把参考图落成 clip 工作目录内的**独立副本**，返回本地路径；非法来源抛 ValueError。
+
+    ``stem`` 是副本的文件名主干（扩展名按内容判）。一条 clip 可能有多张参考图（多图参考
+    30 张 / 首尾帧两张），共用一个名字会让后一张盖掉前一张，故由调用方给互不相同的 stem
+    （多图 ``ref``/``ref_2``…、首尾帧 ``first``/``last``）。默认值让单图调用一字不变。
 
     两种来源（与 note-components ``add_images`` 同款约定，**不收 base64 大包**——524 教训），
     **判据是 scheme 而不是 path 形状**：
@@ -477,7 +497,7 @@ async def materialize_ref_image(source: str, workdir: Path) -> Path:
         ext = _sniff_ext(data)
         if ext is None:
             raise ValueError(f"参考图不是有效图片（按内容判定，非扩展名）：{source}")
-        target = workdir / f"ref{ext}"
+        target = workdir / f"{stem}{ext}"
         target.write_bytes(data)
         return target
     if source.startswith("/uploads/"):
@@ -487,7 +507,7 @@ async def materialize_ref_image(source: str, workdir: Path) -> Path:
             raise ValueError(
                 f"参考图在本服务图床里找不到（可能已过期清理或路径越界）：{source[:120]}")
         ext = local.suffix.lower() or ".jpg"
-        target = workdir / f"ref{ext}"
+        target = workdir / f"{stem}{ext}"
         shutil.copyfile(local, target)
         return target
     raise ValueError(
@@ -496,6 +516,24 @@ async def materialize_ref_image(source: str, workdir: Path) -> Path:
 
 
 # ── 提交参数组装 ────────────────────────────────────────────────────────────
+def ref_paths(clip: VideoClip) -> list[str]:
+    """这条 clip 的参考图本地副本路径（**顺序即语义**，见 VideoClip.image_paths_json）。
+
+    新行两列都写：``image_paths_json`` 是权威全集，``image_path`` 存第一张。多图列上线
+    **之前**建的行只有 ``image_path``，故这里 json 优先、回落单列——老行的参数组装因此
+    与改前逐字节一致。json 坏掉时同样回落：这列只装路径，一个坏值不该让一条已建好的
+    任务永远提交不出去。
+    """
+    if clip.image_paths_json:
+        try:
+            paths = json.loads(clip.image_paths_json)
+        except json.JSONDecodeError:
+            paths = None
+        if isinstance(paths, list) and paths:
+            return [str(p) for p in paths]
+    return [clip.image_path] if clip.image_path else []
+
+
 def build_submit_args(clip: VideoClip) -> list[str]:
     """按 operation 组装 dreamina 生成子命令参数（与 skill 侧本地实现逐字同形）。
 
@@ -503,7 +541,8 @@ def build_submit_args(clip: VideoClip) -> list[str]:
     poll 阶段。``--video_resolution=720p``：CLI 升级后该参数**必填且严格校验**，各档支持的
     分辨率并不一致（2.5 只有 480p/720p、2.0_vip 到 4k、其余只有 720p），**720p 是唯一对全家族
     都合法的一档**，故继续统一传它。``image2video`` **一律不带 --ratio**（画幅由输入图推断，
-    CLI 不收该参数）。
+    CLI 不收该参数）；``frames2video`` 同理——CLI help 原文 "ratio is inferred from the first
+    frame image size"，显式传会被严格校验拒收。
     """
     common = [
         f"--prompt={clip.prompt}",
@@ -512,10 +551,17 @@ def build_submit_args(clip: VideoClip) -> list[str]:
         "--video_resolution=720p",
         "--poll=0",
     ]
+    paths = ref_paths(clip)
     if clip.operation == "image2video":
-        return ["image2video", f"--image={clip.image_path}", *common]
+        return ["image2video", f"--image={paths[0]}", *common]
+    if clip.operation == "frames2video":
+        # image_paths_json 恒为 [首帧, 尾帧]（REST 层的组合闸保证两张都在），顺序不可换：
+        # 换了就是让镜头倒着走，而且 ratio 也会按错的那张图推断。
+        return ["frames2video", f"--first={paths[0]}", f"--last={paths[1]}", *common]
     if clip.operation == "multimodal2video":
-        args = ["multimodal2video", f"--image={clip.image_path}", *common]
+        # --image 是 stringArray（CLI help：repeat for each local input image path），
+        # 每张一个 flag；张数闸在 REST 层按模型分档拦过（2.5≤30 / 2.0 家族≤9）。
+        args = ["multimodal2video", *(f"--image={p}" for p in paths), *common]
         if clip.ratio:
             args.append(f"--ratio={clip.ratio}")
         return args

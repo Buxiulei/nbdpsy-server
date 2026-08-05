@@ -88,6 +88,9 @@ async def test_validation_matrix(tmp_path, monkeypatch):
             _shot(prompt=""), _shot(prompt="x" * 2001),                     # 提示词长度
             _shot(ratio="2:3"),                                             # 画幅越界
             _shot(client_ref="x" * 65),                                     # 幂等键过长
+            _shot(operation="image2video", ratio=None,                      # image2video 只收单张
+                  images=["/uploads/b/01.png", "/uploads/b/02.png"]),
+            _shot(operation="multimodal2video", ratio=None, images=[]),     # images 不许空数组
         ]
         for payload in bad:
             r = await client.post("/api/video-clips", json=payload, headers=h)
@@ -510,14 +513,14 @@ async def test_batch_materializes_remote_images_concurrently(tmp_path, monkeypat
     started = 0
     gate = asyncio.Event()
 
-    async def _fake_materialize(source, workdir):
+    async def _fake_materialize(source, workdir, *, stem="ref"):
         nonlocal started
         started += 1
         if started == 3:
             gate.set()
         await asyncio.wait_for(gate.wait(), timeout=5)
         workdir.mkdir(parents=True, exist_ok=True)
-        target = workdir / "ref.png"
+        target = workdir / f"{stem}.png"
         target.write_bytes(_PNG)
         return target
 
@@ -705,3 +708,205 @@ async def test_serve_clip_product_rejects_traversal(tmp_path, monkeypatch):
         with pytest.raises(HTTPException) as exc:
             await dreamina_rest.serve_clip_product(token_dir, name)
         assert exc.value.status_code == 404
+
+
+# ── 多图参考 / 首尾帧（CLI 能力面开放）──────────────────────────────────────
+def _seed_uploads(tmp_path, count: int, folder: str = "refs") -> list[str]:
+    """在本服务图床里放 count 张真 PNG，返回它们的 /uploads 路径（顺序即返回序）。"""
+    d = tmp_path / "uploads" / folder
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(count):
+        (d / f"{i:02d}.png").write_bytes(_PNG + str(i).encode())
+        out.append(f"/uploads/{folder}/{i:02d}.png")
+    return out
+
+
+async def _only_clip() -> VideoClip:
+    async with db_module.async_session() as s:
+        return (await s.execute(select(VideoClip))).scalars().one()
+
+
+async def test_multi_reference_images_reach_cli_as_repeated_flags(tmp_path, monkeypatch):
+    """多图参考：3 张（场景 + 人物定妆 + 道具）各自物化成独立副本，CLI 收到 3 个 --image。
+
+    跨镜人物一致性是这条产线最大的质量风险——只有一个图槽时身份只能靠出图阶段锚，
+    视频生成阶段照样漂。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 3)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", images=images),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    assert len(paths) == 3 and len(set(paths)) == 3, "三张要是三个独立副本，不能互相覆盖"
+    for p in paths:
+        assert Path(p).is_file() and dreamina.clip_token_dir(clip.clip_id) in p
+    assert [a for a in dreamina.build_submit_args(clip) if a.startswith("--image=")] == [
+        f"--image={p}" for p in paths]
+
+
+async def test_ref_image_count_ceiling_is_per_model(tmp_path, monkeypatch):
+    """张数上限按模型分档，超限**当场 422**（白跑一次提交就是白烧一次积分）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 31)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        over25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", images=images),
+            headers=h)
+        assert over25.status_code == 422, over25.text
+
+        over20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images[:10]),
+            headers=h)
+        assert over20.status_code == 422, over20.text
+        assert "9" in over20.text, "文案要说清 2.0 家族的档位，不能只报一个光秃秃的越界"
+
+        ok20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images[:9]),
+            headers=h)
+        assert ok20.status_code == 202, ok20.text
+        ok25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       images=images[:30]),
+            headers=h)
+        assert ok25.status_code == 202, ok25.text
+    assert await _clip_count() == 2, "两条 422 都不许留下任务行"
+
+
+async def test_image_and_images_together_is_422(tmp_path, monkeypatch):
+    """``image`` 与 ``images`` 同给 → 422：本层的规矩是宁可 422 也不静默丢字段。
+
+    静默取其一时调用方无从发现另一半没生效，而这里每一次提交都在花钱。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", image=images[0], images=images),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+        assert await _clip_count() == 0
+
+
+async def test_single_image_call_is_byte_identical(tmp_path, monkeypatch):
+    """回归锁：老的单 ``image`` 调用一切照旧——image_path 仍是那一张，CLI 参数仍是单个 --image。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", image=images[0]),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    assert clip.image_source == images[0]
+    assert clip.image_path.endswith("ref.png")
+    assert dreamina.ref_paths(clip) == [clip.image_path]
+    args = dreamina.build_submit_args(clip)
+    assert [a for a in args if a.startswith("--image=")] == [f"--image={clip.image_path}"]
+
+
+async def test_frames2video_first_and_last(tmp_path, monkeypatch):
+    """首尾帧：两张图物化成 [首, 尾] 两元素，CLI 收到 --first/--last。
+
+    这是分镜级运动控制的入口——指定一个镜头从哪一帧开始、到哪一帧结束，中间交给模型。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    first, last = _seed_uploads(tmp_path, 2, folder="frames")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="frames2video", ratio=None, model="seedance2.5",
+                       duration=8, first_image=first, last_image=last),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        got = await client.get(f"/api/video-clips/{r.json()['clip_id']}",
+                               headers=bearer(ADMIN_KEY))
+        assert got.json()["operation"] == "frames2video"
+
+    clip = await _only_clip()
+    paths = dreamina.ref_paths(clip)
+    assert len(paths) == 2 and paths[0] != paths[1]
+    assert Path(paths[0]).read_bytes() == _PNG + b"0"      # [0] 必须是首帧，顺序不许错
+    assert Path(paths[1]).read_bytes() == _PNG + b"1"
+    args = dreamina.build_submit_args(clip)
+    assert args[0] == "frames2video"
+    assert f"--first={paths[0]}" in args and f"--last={paths[1]}" in args
+
+
+async def test_frames2video_validation_matrix(tmp_path, monkeypatch):
+    """首尾帧的组合闸：缺一帧 / 传 ratio / 传 image(s) / 时长越界，一律 422 不建行。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    first, last = _seed_uploads(tmp_path, 2, folder="frames")
+    frames = dict(operation="frames2video", ratio=None, model="seedance2.5",
+                  first_image=first, last_image=last)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        bad = [
+            _shot(**{**frames, "last_image": None}),          # 缺尾帧
+            _shot(**{**frames, "first_image": None}),         # 缺首帧
+            _shot(**{**frames, "ratio": "9:16"}),             # ratio 由首帧推断，传了就 422
+            _shot(**{**frames, "image": first}),              # 首尾帧模式不收 image
+            _shot(**{**frames, "images": [first, last]}),     # 也不收 images
+            _shot(**{**frames, "model": "seedance2.0fast", "duration": 16}),  # 该档只到 15s
+            _shot(operation="image2video", ratio=None, image=first,
+                  first_image=first),                          # 首尾帧字段只属于 frames2video
+            _shot(first_image=first, last_image=last),         # text2video 也不收
+        ]
+        for payload in bad:
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == 422, f"{payload} → {r.status_code} {r.text}"
+        assert await _clip_count() == 0
+
+        ok = await client.post("/api/video-clips",
+                               json=_shot(**frames, duration=30), headers=h)
+        assert ok.status_code == 202, ok.text
+
+
+async def test_batch_shots_carry_new_fields(tmp_path, monkeypatch):
+    """批量 ``shots[]`` 自动继承新字段：一批里混多图镜与首尾帧镜都能落行。
+
+    电影化的 25-30 镜只能走批量端点，新能力不透到这里等于没开放。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 3)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        shots = [
+            _shot(operation="multimodal2video", images=images),
+            _shot(operation="frames2video", ratio=None, model="seedance2.5", duration=8,
+                  first_image=images[0], last_image=images[2]),
+        ]
+        r = await client.post("/api/video-clip-batches", json={"shots": shots},
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        clip_ids = r.json()["clip_ids"]
+        assert len(clip_ids) == 2 and all(clip_ids)
+
+    async with db_module.async_session() as s:
+        rows = (await s.execute(
+            select(VideoClip).order_by(VideoClip.batch_index))).scalars().all()
+    assert len(dreamina.ref_paths(rows[0])) == 3
+    assert len(dreamina.ref_paths(rows[1])) == 2
+    assert rows[1].operation == "frames2video"

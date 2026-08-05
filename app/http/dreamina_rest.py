@@ -23,6 +23,7 @@ router + MANIFEST_ENTRIES 接线 ``app.http.__init__`` 的 ALL_ROUTERS / ALL_MAN
 """
 
 import asyncio
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +54,7 @@ _NAME_RE = re.compile(r"^clip(_[0-9]{1,2})?\.mp4$")
 # 批次号形态（GET batch 的入参闸，与 services.dreamina.new_batch_id 同形）
 _BATCH_ID_RE = re.compile(r"^vcb_[0-9a-f]{10}$")
 
-_OPERATIONS = Literal["text2video", "image2video", "multimodal2video"]
+_OPERATIONS = Literal["text2video", "image2video", "multimodal2video", "frames2video"]
 _MODELS = Literal["seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip",
                   "seedance2.0mini", "seedance2.5"]
 _RATIOS = Literal["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
@@ -77,6 +78,20 @@ _MODEL_NOTE = (
     "AigcComplianceConfirmationRequired——那是要人去点的一次性动作，服务端重试无意义。"
     "积分只有两档有实测值（5s/720p：fast=25、fast_vip=55），**2.5 与 mini 未实测故不估**："
     "用这两档提交时不会带低积分 warning，那是「估不出」不是「余额充足」。"
+    "**frames2video 的价格从未实测**，估算沿用同 model 的 5s 档粗估，可能有偏差。"
+)
+
+_REF_NOTE = (
+    "参考图三种给法：单张 `image`、多张 `images`（multimodal2video 专用）、首尾两帧 "
+    "`first_image`+`last_image`（frames2video 专用）。**image 与 images 只能给一个**，"
+    "同给 422（本层不静默丢字段）。"
+    "**多图张数按模型分档**：seedance2.5 最多 30 张，seedance2.0 家族 / mini 最多 9 张，"
+    "超限当场 422 不白跑（网上流传的「Seedance 最多 9 张」是 2.0 的数字，别套到 2.5 上）。"
+    "多图用途是锁跨镜一致性——一镜同时给「本镜场景图 + 全片人物定妆图 + 关键道具图」。"
+    "**frames2video 是分镜级运动控制**（精确指定镜头从哪一帧开始、到哪一帧结束，中间过渡"
+    "交给模型）：两帧必须都给，缺一帧 422；**不接受 ratio**——画幅由首帧图推断，CLI 不收"
+    "该参数，传了 422 免得调用方以为设置生效；时长仍按模型分档（2.5 到 30s、其余 15s）。"
+    "本服务只透传参考**图**，CLI 的 --video / --audio 输入面尚未开放。"
 )
 
 MANIFEST_ENTRIES = [
@@ -85,23 +100,31 @@ MANIFEST_ENTRIES = [
         "summary": "提交一条即梦视频生成任务（异步入队，202 返回 clip_id）",
         "admin_only": False,
         "params": {
-            "operation": "body,str(text2video|image2video|multimodal2video)",
+            "operation": "body,str(text2video|image2video|multimodal2video|frames2video)",
             "prompt": "body,str(1-2000 字)",
             "duration": "body,int(4-30 整数秒；**仅 seedance2.5 到 30s**，其余模型 4-15)",
             "model": "body,str(seedance2.0|seedance2.0fast|seedance2.0_vip|seedance2.0fast_vip|"
                      "seedance2.0mini|seedance2.5，默认 seedance2.5)",
-            "ratio": "body,str|None(1:1|3:4|4:3|9:16|16:9|21:9；**image2video 传了就 422**，"
-                     "其画幅由输入图推断)",
-            "image": "body,str|None(图床直链 或 本服务 /uploads 路径；image2video/"
-                     "multimodal2video 必填，text2video 传了就 422。不收 base64 大包)",
+            "ratio": "body,str|None(1:1|3:4|4:3|9:16|16:9|21:9；**image2video / frames2video "
+                     "传了就 422**，其画幅由输入图 / 首帧图推断)",
+            "image": "body,str|None(图床直链 或 本服务 /uploads 路径；image2video 必填，"
+                     "multimodal2video 与 images 二选一，text2video/frames2video 传了就 422。"
+                     "不收 base64 大包)",
+            "images": "body,list[str]|None(多张参考图，**仅 multimodal2video**；顺序即传给 CLI "
+                      "的顺序；seedance2.5 最多 30 张、其余模型最多 9 张，超限 422)",
+            "first_image": "body,str|None(首帧；**仅 frames2video**，与 last_image 必须成对)",
+            "last_image": "body,str|None(尾帧；**仅 frames2video**，与 first_image 必须成对)",
             "client_ref": "body,str|None(1-64，幂等键)",
         },
         "returns": "{clip_id, status(重放命中时带当前状态), warning?(低积分提示，不拦截)}",
-        "errors": "422=参数校验失败（含 image2video+ratio / text2video+image / duration 越界，"
-                  "**含「非 2.5 模型传了 >15s」**）；"
-                  "400=参考图下载失败或不是图片；409=积分不足以再提交任何一镜；"
+        "errors": "422=参数校验失败（含 image2video/frames2video+ratio、text2video+参考图、"
+                  "image 与 images 同给、多图超模型张数上限、frames2video 缺首帧或尾帧、"
+                  "duration 越界，**含「非 2.5 模型传了 >15s」**）；"
+                  "400=参考图下载失败或不是图片（**多张里坏一张即整镜失败**）；"
+                  "409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
-        "notes": _MODEL_NOTE + " " + _POLL_NOTE + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
+        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _POLL_NOTE
+                 + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
                  "零新建零扣分（幂等键按运营隔离，跨运营同 ref 互不影响）。"
                  "**重放不过登录闸/积分闸**：ref 命中时即使掉登录或余额见底也照回原 clip_id，"
                  "不会把「早已在队里」报成提交失败。"
@@ -137,7 +160,10 @@ MANIFEST_ENTRIES = [
                    "clip_ids[](与 shots **等长同序**，可直接按下标映射 shot-NN), warning?}",
         "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效；401=apikey 无效",
-        "notes": _MODEL_NOTE + " **逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
+        "notes": _MODEL_NOTE + " " + _REF_NOTE
+                 + " **shots[] 与单镜入参逐字段同构**，多图 images / 首尾帧 first_image+"
+                 "last_image 在批量端点一样可用（电影化的 25-30 镜只能走这里）。"
+                 " **逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
                  "零新增任务、积分零新增；整批全命中时**登录闸/积分闸都不挂**（掉登录或余额"
                  "见底也照回原 clip_ids，不把「早已在队里」报成提交失败）。"
                  "**batch_id 可能为 null**：整批纯重放时一行都没新建，此时只在命中镜同属一个"
@@ -194,7 +220,15 @@ class CreateClipRequest(BaseModel):
     duration: int = Field(ge=dreamina.DURATION_MIN, le=dreamina.DURATION_MAX)
     ratio: _RATIOS | None = None
     model: _MODELS = dreamina.DEFAULT_MODEL
+    # 单张参考图（老字段，语义不变）。多图参考用 images，**两者只能给一个**（见 _check_media_matrix）。
     image: str | None = None
+    # 多张参考图（multimodal2video 专用，顺序即传给 CLI 的 --image 顺序）。字段界取全家族
+    # 最宽的 30，逐模型收紧在 _check_ref_image_ceiling 里（与 duration 同款两段式）。
+    images: list[str] | None = Field(default=None, min_length=1,
+                                     max_length=dreamina.REF_IMAGE_MAX)
+    # 首尾帧（frames2video 专用，两者必须成对出现）
+    first_image: str | None = None
+    last_image: str | None = None
     client_ref: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
@@ -213,25 +247,63 @@ class CreateClipRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_media_matrix(self) -> "CreateClipRequest":
-        """operation × (image, ratio) 的合法组合闸。
+    def _check_ref_image_ceiling(self) -> "CreateClipRequest":
+        """参考图张数上限**按模型**收紧（字段界只能取全家族最宽的 30，否则 seedance2.5 过不去）。
 
-        - ``image2video``：必须有 image；**有 ratio 就 422**——CLI 不收该参数，画幅由输入图
-          推断，静默丢弃会让调用方以为设置生效（需求第三节明确「别静默吞」）。
-        - ``text2video``：不收 image。语义清晰优于静默忽略（本地 CLI 的 text2video 也是忽略
-          images 的，skill 侧不会发，发了就是调用方 bug）。
-        - ``multimodal2video``：必须有 image（server 单镜契约只有这一个媒体位）。
+        理由与时长闸逐字相同：不在这里拦，``seedance2.0fast + 10 张`` 会先把 10 张图下载
+        物化、把行建好，再由 CLI 拒掉——留下一条要人回头清理的 error 行外加十次白下载。
         """
+        ceiling = dreamina.max_ref_images(self.model)
+        if self.images and len(self.images) > ceiling:
+            raise ValueError(
+                f"参考图 {len(self.images)} 张超出 {self.model} 的上限：该模型最多 "
+                f"{ceiling} 张，仅 seedance2.5 支持到 {dreamina.REF_IMAGE_MAX} 张"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_media_matrix(self) -> "CreateClipRequest":
+        """operation × (image / images / first_image / last_image / ratio) 的合法组合闸。
+
+        - ``image`` 与 ``images`` **只能给一个**。静默取其一是本层最不该做的事：调用方无从
+          发现另一半没生效，而这里每一次提交都在花钱（需求第三节「别静默吞」）。
+        - ``image2video``：必须有 image（CLI 的 ``--image`` 在这个子命令下是单张）；
+          **有 ratio 就 422**——画幅由输入图推断，CLI 不收该参数。
+        - ``text2video``：不收任何参考图。语义清晰优于静默忽略。
+        - ``multimodal2video``：image 或 images 至少给一个（CLI 的 ``--image`` 是 stringArray）。
+        - ``frames2video``：首尾两帧都必须给（缺一帧 CLI 就退化成别的形态，不是我们要的
+          镜头调度）；**不收 ratio**——CLI help 原文 "ratio is inferred from the first frame
+          image size"，传了会被它严格校验拒收，我们提前 422 免得调用方以为设置生效。
+        """
+        if self.image and self.images:
+            raise ValueError(
+                "image 与 images 只能给一个（单张参考图继续用 image，多图参考用 images）；"
+                "同时给时无法判定以哪个为准，本层宁可 422 也不静默丢字段"
+            )
+        if self.operation != "frames2video" and (self.first_image or self.last_image):
+            raise ValueError("first_image / last_image 只属于 frames2video")
         if self.operation == "image2video":
+            # images 的判定排在「必须有 image」之前：只给 images 的调用方是在用错 operation，
+            # 回「必须提供 image」等于让他去补一个本就不该在这里出现的字段。
+            if self.images:
+                raise ValueError("image2video 只收单张 image，多图参考请用 multimodal2video")
             if not self.image:
                 raise ValueError("image2video 必须提供 image（图床直链或 /uploads 路径）")
             if self.ratio:
                 raise ValueError("image2video 的画幅由输入图推断，不接受 ratio（CLI 不收该参数）")
         elif self.operation == "text2video":
-            if self.image:
-                raise ValueError("text2video 不接受 image（生成不参考图片）")
-        elif not self.image:
-            raise ValueError("multimodal2video 必须提供 image")
+            if self.image or self.images:
+                raise ValueError("text2video 不接受参考图（生成不参考图片）")
+        elif self.operation == "frames2video":
+            if not (self.first_image and self.last_image):
+                raise ValueError("frames2video 必须同时提供 first_image 与 last_image")
+            if self.image or self.images:
+                raise ValueError("frames2video 只收首尾两帧，不接受 image / images")
+            if self.ratio:
+                raise ValueError(
+                    "frames2video 的画幅由**首帧图**推断，不接受 ratio（CLI 不收该参数）")
+        elif not (self.image or self.images):
+            raise ValueError("multimodal2video 必须提供 image 或 images")
         return self
 
 
@@ -341,19 +413,50 @@ def _low_credit_warning(credit: int | None, estimate: int | None) -> str | None:
             "已照常入队；扣费在 success 时才结算，余额不足的镜可能失败")
 
 
-async def _materialize(clip_id: str, req: CreateClipRequest) -> tuple[str | None, str | None]:
-    """物化参考图 → (本地路径, 错误说明)。无 image 时两个都是 None。"""
-    if not req.image:
-        return None, None
+def _ref_specs(req: CreateClipRequest) -> list[tuple[str, str]]:
+    """本镜要物化的 ``(来源, 副本名主干)`` 列表，**顺序即落库顺序**。
+
+    - ``frames2video`` 恒为 ``[首, 尾]``：``build_submit_args`` 靠这个顺序取 --first/--last，
+      换了序就是让镜头倒着走、ratio 还会按错的那张图推断；
+    - 多图参考按 ``images`` 传入序，主干 ``ref`` / ``ref_2`` / ``ref_3``…（同名会互相覆盖）；
+    - 单 ``image`` 落 ``ref``，与本次改动之前一字不差。
+    """
+    if req.operation == "frames2video":
+        return [(req.first_image, "first"), (req.last_image, "last")]
+    sources = req.images or ([req.image] if req.image else [])
+    return [(s, "ref" if i == 0 else f"ref_{i + 1}") for i, s in enumerate(sources)]
+
+
+def _first_ref_source(req: CreateClipRequest) -> str | None:
+    """落 ``image_source`` 的那一条来源原文（多来源时取第一条：多图的首张 / 首尾帧的首帧）。
+
+    第 2..N 张的来源原文不单独落库——``image_source`` 只做追溯提示，权威的是
+    ``image_paths_json`` 里那几份本地副本（它们与任务同 TTL，图床过期也还在）。
+    """
+    specs = _ref_specs(req)
+    return specs[0][0] if specs else None
+
+
+async def _materialize(clip_id: str, req: CreateClipRequest) -> tuple[list[str], str | None]:
+    """物化本镜的全部参考图 → (本地路径列表, 错误说明)。无参考图时 ``([], None)``。
+
+    **一张失败即整镜失败**：少一张参考图生成出来的镜是废片，却照样占队列位、照样扣积分。
+    镜内也并发（多图参考可达 30 张，逐张串行 30s 上限会顶穿调用方超时）。
+    """
+    specs = _ref_specs(req)
+    if not specs:
+        return [], None
+    workdir = dreamina.clip_dir(clip_id)
     try:
-        path = await dreamina.materialize_ref_image(req.image, dreamina.clip_dir(clip_id))
-        return str(path), None
+        paths = await asyncio.gather(*(
+            dreamina.materialize_ref_image(src, workdir, stem=stem) for src, stem in specs))
     except ValueError as exc:
-        return None, str(exc)
+        return [], str(exc)
+    return [str(p) for p in paths], None
 
 
 def _apply_revive(clip: VideoClip, req: CreateClipRequest,
-                  image_path: str | None, img_error: str | None) -> None:
+                  image_paths: list[str], img_error: str | None) -> None:
     """把复活的物化结果落到行上（**同一行同一 clip_id**，不新建）。
 
     物化再失败就维持 error、只更新文案——图源还是坏的，重置回 queued 只会让调度器提交一条
@@ -363,8 +466,9 @@ def _apply_revive(clip: VideoClip, req: CreateClipRequest,
         clip.error = img_error
         clip.finished_at = datetime.utcnow()
         return
-    clip.image_source = req.image
-    clip.image_path = image_path
+    clip.image_source = _first_ref_source(req)
+    clip.image_path = image_paths[0] if image_paths else None
+    clip.image_paths_json = json.dumps(image_paths) if image_paths else None
     clip.status = "queued"
     clip.error = None
     clip.finished_at = None
@@ -379,14 +483,14 @@ async def _revive_clips(session, items: list[tuple[VideoClip, CreateClipRequest]
         return
     results = await asyncio.gather(
         *(_materialize(clip.clip_id, req) for clip, req in items))
-    for (clip, req), (image_path, img_error) in zip(items, results):
-        _apply_revive(clip, req, image_path, img_error)
+    for (clip, req), (image_paths, img_error) in zip(items, results):
+        _apply_revive(clip, req, image_paths, img_error)
     await session.commit()
 
 
 async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id: str,
                        batch_id: str | None = None, batch_index: int | None = None,
-                       image_path: str | None = None,
+                       image_paths: list[str] | None = None,
                        error: str | None = None) -> tuple[VideoClip, bool]:
     """落一行任务；返回 (clip, 是否真新建)。
 
@@ -406,8 +510,10 @@ async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id
         model=req.model,
         duration=req.duration,
         ratio=req.ratio,
-        image_source=req.image,
-        image_path=image_path,
+        image_source=_first_ref_source(req),
+        # 两列都写：image_paths_json 是权威全集，image_path 存第一张（老读者与老行的回落口）
+        image_path=image_paths[0] if image_paths else None,
+        image_paths_json=json.dumps(image_paths) if image_paths else None,
         status="error" if error else "queued",
         error=error,
         created_by=op.id,
@@ -455,11 +561,11 @@ async def create_video_clip(req: CreateClipRequest) -> dict:
     _guard_credit(status.get("credit"))
     async with get_session() as session:
         clip_id = dreamina.new_clip_id()
-        image_path, img_error = await _materialize(clip_id, req)
+        image_paths, img_error = await _materialize(clip_id, req)
         if img_error:
             raise ValueError(img_error)  # → 400（宿主 ValueError 处理器）
         clip, _created = await _insert_clip(
-            session, op, req, clip_id=clip_id, image_path=image_path)
+            session, op, req, clip_id=clip_id, image_paths=image_paths)
         payload = {"clip_id": clip.clip_id}
         warning = _low_credit_warning(
             status.get("credit"), dreamina.estimate_credit(req.model, req.duration))
@@ -528,11 +634,11 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
         *(_materialize(cid, shot) for cid, (_i, shot) in zip(new_ids, pending)))
     estimate = 0
     async with get_session() as session:
-        for clip_id, (index, shot), (image_path, img_error) in zip(
+        for clip_id, (index, shot), (image_paths, img_error) in zip(
                 new_ids, pending, materialized):
             clip, created = await _insert_clip(
                 session, op, shot, clip_id=clip_id, batch_id=batch_id, batch_index=index,
-                image_path=image_path, error=img_error,
+                image_paths=image_paths, error=img_error,
             )
             clip_ids[index] = clip.clip_id
             if created and not img_error:
