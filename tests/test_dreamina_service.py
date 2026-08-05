@@ -121,10 +121,11 @@ def test_estimate_credit_by_five_second_tier():
     assert dreamina.estimate_credit("seedance2.0fast", 4) == 25      # 不足一档按一档
     assert dreamina.estimate_credit("seedance2.0fast", 8) == 50      # ceil(8/5)=2
     assert dreamina.estimate_credit("seedance2.0fast_vip", 5) == 55
+    # seedance2.5 已实测：130/5s（2026-08-05 生产 vc_3e1260f8ce 对账精确）。
+    assert dreamina.estimate_credit("seedance2.5", 5) == 130
+    assert dreamina.estimate_credit("seedance2.5", 30) == 780     # ceil(30/5)=6 档
     # 无实测价的档一律不估、不给 warning（宁可不提示也不瞎猜）。
-    # 2.5 / mini 是 2026-08-05 新增的两档，都还没实测过单镜消耗 → 同样不编价。
     assert dreamina.estimate_credit("seedance2.0", 5) is None
-    assert dreamina.estimate_credit("seedance2.5", 5) is None
     assert dreamina.estimate_credit("seedance2.0mini", 5) is None
 
 

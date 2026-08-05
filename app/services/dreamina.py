@@ -66,10 +66,10 @@ DURATION_MAX = 30
 _DURATION_MAX_DEFAULT = 15
 _DURATION_MAX_BY_MODEL = {"seedance2.5": 30}
 
-# 5s/720p 单镜实测价（仅这两档有实测值；未知档不估、不给 warning，绝不瞎猜）。
-# **seedance2.5 与 seedance2.0mini 不编价**：2.5 是 VIP-only 的新档，两档都没实测过单镜消耗，
-# 编一个「看着合理」的数只会让 warning 给出假的估算。首次真跑后按实测回填。
-_PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55}
+# 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
+# seedance2.5 = 130（2026-08-05 生产实测 vc_3e1260f8ce，credit_count 与余额扣减对账精确；
+# maestro 会员秒级出片，无排队）。**seedance2.0mini 仍不编价**（未实测）。
+_PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55, "seedance2.5": 130}
 # 已知最便宜的一镜（5s fast）。余额低于它 = 连一镜都提交不起 → 409。
 MIN_CLIP_CREDIT = 25
 
