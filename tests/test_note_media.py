@@ -290,3 +290,45 @@ def test_note_media_sync_is_idempotent_kind():
     """纯只读快照 → 必须在 _IDEMPOTENT_KINDS 里(僵死可自动重跑)。"""
     from app.services import browser_jobs_repo
     assert "note_media_sync" in browser_jobs_repo._IDEMPOTENT_KINDS
+
+
+# ---------------- 无路径段形态(老笔记,2026-08-05 补) ----------------
+
+_SEGMENTLESS = (
+    "https://sns-na-i2.xhscdn.com/1040g0083210md5hunk6g5pm1humiu9lg9e51400"
+    "?sign=74cd3ad0b0f897d1f5f9667ef801e8f0&t=6a73419b"
+)
+
+
+def test_segmentless_url_normalizes_without_path_segment():
+    """老笔记的图 URL 没有路径段 → 永久形态就是 sns-img-qc/{file_id}。
+
+    实测(账号7 2026-02 的笔记):套上 notes_pre_post/spectrum 反而 404,
+    不带段的 200 且 320844B 与原始带签名版同尺寸。首轮 24 篇图文笔记被记成
+    "空清单"正是漏了这一支。
+    """
+    got = nm.normalize_media_url(_SEGMENTLESS)
+    assert got == {
+        "file_id": "1040g0083210md5hunk6g5pm1humiu9lg9e51400",
+        "segment": "",
+        "url": "https://sns-img-qc.xhscdn.com/1040g0083210md5hunk6g5pm1humiu9lg9e51400",
+    }
+
+
+def test_signed_path_without_segment_is_not_mistaken_for_segment():
+    """/{时间戳}/{签名}/{file_id} 形态:倒数第二段是签名不是路径段,别拿它拼 URL。"""
+    got = nm.normalize_media_url(
+        "https://sns-webpic-qc.xhscdn.com/202608052018/"
+        "73148c23bc237d4ec6ccc9f98c7e1ef8/1040g34o3236vrj0bn2005noda2v08d26gtgrf08"
+    )
+    assert got["segment"] == ""
+    assert got["url"].endswith("/1040g34o3236vrj0bn2005noda2v08d26gtgrf08")
+    assert "73148c23" not in got["url"]
+
+
+def test_collect_mixes_segment_and_segmentless():
+    """同一批里两种形态混着来也各归各的(老号新旧笔记混排)。"""
+    got = nm.collect_media([_SEGMENTLESS, _SIGNED_SPECTRUM])
+    assert [m["segment"] for m in got] == ["", "spectrum"]
+    assert got[0]["url"].count("/") == 3        # https://host/file_id
+    assert got[1]["url"].count("/") == 4        # https://host/seg/file_id

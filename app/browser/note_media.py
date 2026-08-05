@@ -39,6 +39,8 @@ _PERMANENT_HOST = "https://sns-img-qc.xhscdn.com"
 _KNOWN_SEGMENTS = ("notes_pre_post", "spectrum", "notes_uhdr")
 # file_id 形态:平台的长串标识(实测 1040g... 40 位上下的字母数字)
 _FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,}$")
+# 签名 hash(32 位 hex):出现在倒数第二段时说明这条 URL **没有**路径段
+_SIGN_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 # 头像/表情等非笔记内容的域或段
 _EXCLUDE_HOST_MARKS = ("sns-avatar", "picasso-static", "fe-video-qc")
 
@@ -58,24 +60,33 @@ def normalize_media_url(url: str) -> Optional[Dict[str, str]]:
         return None
     path = urlsplit(url).path
     parts = [p for p in path.split("/") if p]
-    if len(parts) < 2:
+    if not parts:
         return None
-    # 末段是 file_id(可能带 !变体 后缀),倒数第二段是路径段;
-    # 带签名的形态是 /{ts}/{sign}/{seg}/{file_id},无签名的是 /{seg}/{file_id},
-    # 两者取末两段的结果相同 —— 这正是归一化能同时吃下两种形态的原因。
+    # 末段是 file_id(可能带 !变体 后缀)。带签名形态 /{ts}/{sign}/{seg}/{file_id} 与
+    # 无签名形态 /{seg}/{file_id} 取末两段结果相同 —— 归一化能同时吃下两者的原因。
     file_id = parts[-1].split("!")[0]
-    segment = parts[-2]
     if not _FILE_ID_RE.match(file_id):
         return None
-    if segment not in _KNOWN_SEGMENTS:
+    segment = parts[-2] if len(parts) >= 2 else None
+    # **老笔记没有路径段**(2026-08-05 实测:2025 年的笔记形如
+    # ``sns-na-i2.xhscdn.com/{file_id}?sign=..``,永久形态就是 ``sns-img-qc/{file_id}``,
+    # 硬套路径段反而 404)。此时倒数第二段其实是签发时间戳或签名 hash,不是路径段 ——
+    # 按形态识破它们:纯数字 = 时间戳,32 位 hex = 签名。首轮 24 篇图文笔记被判成"空清单"
+    # 就是漏了这一支(要求两段才处理)。
+    if segment and (segment.isdigit() or _SIGN_HASH_RE.match(segment)):
+        segment = None
+    if segment and segment not in _KNOWN_SEGMENTS:
         logger.warning(
             f"[note_media] 未见过的路径段 {segment!r}(file_id={file_id});"
             "照常收录,请人工核一次归一化是否仍成立"
         )
     return {
         "file_id": file_id,
-        "segment": segment,
-        "url": f"{_PERMANENT_HOST}/{segment}/{file_id}",
+        "segment": segment or "",
+        "url": (
+            f"{_PERMANENT_HOST}/{segment}/{file_id}" if segment
+            else f"{_PERMANENT_HOST}/{file_id}"
+        ),
     }
 
 
