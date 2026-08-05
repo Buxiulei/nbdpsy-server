@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.19.1 (2026-08-05)
+
+**即梦模型面跟上 CLI 升级:六档模型,默认档切 `seedance2.5`,时长上限按模型分档。**
+dreamina CLI 升级后新增 `seedance2.0mini` / `seedance2.5` 两档(2.5 **没有** fast / vip 变体),
+以下事实均以升级后 CLI 的 `--help` 为准。
+
+- 模型枚举补两档,`DEFAULT_MODEL` 由 `seedance2.0fast` 改为 **`seedance2.5`**(CLI 自己的默认
+  仍是 `seedance2.0fast`,切默认是本服务两端的决策,skill 侧同步)。
+- **时长上限按模型分档**:`seedance2.5` 4-30s,其余模型仍是 4-15s,下限一律 4s。Pydantic 字段界
+  只能取全家族最宽的 30s(否则 2.5 过不去),逐模型收紧放在 `model_validator` 里——不收紧的话
+  `seedance2.0fast + duration=20` 会一路放行到 worker 才被 CLI 拒,那时行已建、参考图已物化,
+  结局是一条要人回头清理的 error 行而不是当场 422。错误文案写明「该模型上限 15s,
+  仅 seedance2.5 支持到 30s」。
+- **`--video_resolution=720p` 保持不动**:该参数升级后**必填且逐档严格校验**,而各档支持的分辨率
+  并不一致(2.5 只有 480p/720p、`seedance2.0_vip` 到 4k、其余只有 720p),**720p 是唯一对全家族都
+  合法的一档**。
+- **2.5 与 mini 不编价**:`_PRICE_PER_5S` 仍只有 `fast=25` / `fast_vip=55` 两个实测值(5s/720p)。
+  新两档没实测过单镜消耗,编一个「看着合理」的数只会让低积分 warning 给出假估算——用这两档提交
+  时**不带 warning 是「估不出」不是「余额充足」**。首次真跑后按实测回填。
+- manifest notes 补模型全集 / 默认档 / **2.5 是 VIP-only** / **首次使用可能需先到即梦网页端完成
+  一次生成**做账号级合规授权(否则回 `AigcComplianceConfirmationRequired`,那是要人去点的一次性
+  动作,服务端重试无意义)。
+
 ## 0.19.0 (2026-08-05)
 
 **即梦(Dreamina)视频生成服务化:CLI / 登录态 / 积分 / 提交轮询取片全部进 server,产物给免鉴权

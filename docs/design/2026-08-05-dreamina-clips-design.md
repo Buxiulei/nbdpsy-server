@@ -102,3 +102,34 @@ GET  /uploads/clips/{token_dir}/{name}   免鉴权直链（token 目录即访问
 
 - **本机参考图上传通道**：需求追记第 4 条问的「运营本机的 storyboard 参考图怎么上去」——现成通道就是 `POST /api/uploads/images`（multipart，图床直链 7 天），拿到直链再作为 `image` 提交即可，本次不新增端点。
 - **CLI 版本号未进 manifest**：需求第六节要求「安装路径、版本落进 `/api/manifest`」。路径已进（`/api/dreamina-status` 的 notes），版本要另跑一次 CLI 才能拿到，为一个自检字段在每次 manifest 请求上挂一次子进程不划算，暂缺。
+
+## 8. 追记：模型面变更（同日 CLI 升级，六档模型 + 默认切 2.5）
+
+本设计定稿时 CLI 只有四档 Seedance 2.0，同日 CLI 升级后模型面扩到六档，事实以升级后
+`--help` 为准（非二手）：
+
+| 模型 | 时长 | 分辨率 | 备注 |
+|---|---|---|---|
+| `seedance2.5` | **4-30s** | 480p / 720p | **VIP-only**；无 fast / vip 变体；**本服务默认档** |
+| `seedance2.0_vip` | 4-15s | 720p / 1080p / 4k | |
+| `seedance2.0` / `2.0fast` / `2.0fast_vip` / `2.0mini` | 4-15s | 720p | `2.0mini` 本次新增 |
+
+四条落点：
+
+- **默认档改 `seedance2.5`**。CLI 自己的默认仍是 `seedance2.0fast`——切默认是本服务**两端代码层
+  的决策**（server 与 skill 侧同改），不是跟随 CLI。
+- **时长上限按模型分档**（`services.dreamina.max_duration`）。Pydantic 字段界只能取全家族最宽的
+  30s，否则 2.5 过不去；逐模型收紧放在 `CreateClipRequest._check_duration_ceiling` 里——不收紧
+  的话 `seedance2.0fast + duration=20` 会一路放行到 worker 才被 CLI 拒，那时行已建、参考图已
+  物化，结局是一条要人回头清理的 error 行而不是当场 422。未知档按家族默认 15s 判（宁可窄不宜宽）。
+- **`--video_resolution=720p` 一个字不动**。该参数升级后**必填且逐档严格校验**，而上表三档支持的
+  分辨率互不相同，**720p 是唯一对全家族都合法的一档**。原先「Seedance 家族只有 720p」的注释已按
+  新事实改写，传参本身没变。
+- **2.5 与 mini 不进价格表**。`_PRICE_PER_5S` 仍只有 `fast=25` / `fast_vip=55` 两个 5s/720p 实测
+  值；新两档没实测过，编数只会让低积分 warning 给出假估算。副作用要写给消费方：**用这两档提交时
+  不带 warning 是「估不出」不是「余额充足」**，manifest notes 已写明。首次真跑后回填。
+
+**2.5 首次使用可能需要一次人工动作**：CLI 会回 `AigcComplianceConfirmationRequired`，需人到即梦
+网页端先完成一次生成做账号级授权。既有的合规分支（原文透传 + `COMPLIANCE_HINT`）已经覆盖这条
+路径，本次不新增处置逻辑；`compliance_confirmed_models` 那个观测近似同样适用——2.5 没出过片不等于
+未授权。

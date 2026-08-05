@@ -121,8 +121,21 @@ def test_estimate_credit_by_five_second_tier():
     assert dreamina.estimate_credit("seedance2.0fast", 4) == 25      # 不足一档按一档
     assert dreamina.estimate_credit("seedance2.0fast", 8) == 50      # ceil(8/5)=2
     assert dreamina.estimate_credit("seedance2.0fast_vip", 5) == 55
-    # 无实测价的档一律不估、不给 warning（宁可不提示也不瞎猜）
+    # 无实测价的档一律不估、不给 warning（宁可不提示也不瞎猜）。
+    # 2.5 / mini 是 2026-08-05 新增的两档，都还没实测过单镜消耗 → 同样不编价。
     assert dreamina.estimate_credit("seedance2.0", 5) is None
+    assert dreamina.estimate_credit("seedance2.5", 5) is None
+    assert dreamina.estimate_credit("seedance2.0mini", 5) is None
+
+
+def test_max_duration_only_seedance25_reaches_thirty():
+    assert dreamina.max_duration("seedance2.5") == 30
+    for model in ("seedance2.0", "seedance2.0fast", "seedance2.0fast_vip",
+                  "seedance2.0_vip", "seedance2.0mini"):
+        assert dreamina.max_duration(model) == 15
+    # 未知档按家族默认判（宁可窄不宜宽：放宽等于让一条 CLI 必拒的任务先建行再失败）
+    assert dreamina.max_duration("seedance9.9") == 15
+    assert dreamina.DEFAULT_MODEL == "seedance2.5"
 
 
 # ── 参考图物化 ──────────────────────────────────────────────────────────────

@@ -83,6 +83,7 @@ async def test_validation_matrix(tmp_path, monkeypatch):
             _shot(operation="text2video", image="https://img/x.png"),      # 多余 image
             _shot(operation="multimodal2video", ratio=None),               # 缺 image
             _shot(duration=3), _shot(duration=16),                          # 时长越界
+            _shot(model="seedance2.5", duration=31),                        # 连 2.5 也没有 31s
             _shot(model="seedance3.0"), _shot(operation="text2image"),      # 枚举越界
             _shot(prompt=""), _shot(prompt="x" * 2001),                     # 提示词长度
             _shot(ratio="2:3"),                                             # 画幅越界
@@ -92,6 +93,58 @@ async def test_validation_matrix(tmp_path, monkeypatch):
             r = await client.post("/api/video-clips", json=payload, headers=h)
             assert r.status_code == 422, f"{payload} → {r.status_code} {r.text}"
         assert await _clip_count() == 0
+
+
+# ── 模型面（2026-08-05 CLI 升级：六档模型、默认 2.5、时长上限按模型分档）──────────
+async def test_default_model_is_seedance25(tmp_path, monkeypatch):
+    """不传 model 时落 seedance2.5（单镜与批量共用同一个 Pydantic 默认值）。"""
+    _stub_credit(monkeypatch)
+    payload = _shot()
+    payload.pop("model")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post("/api/video-clips", json=payload, headers=h)
+        assert r.status_code == 202, r.text
+        got = await client.get(f"/api/video-clips/{r.json()['clip_id']}", headers=h)
+        assert got.json()["model"] == "seedance2.5"
+
+        batch = await client.post("/api/video-clip-batches",
+                                  json={"shots": [payload, payload]}, headers=h)
+        assert batch.status_code == 202, batch.text
+        for clip_id in batch.json()["clip_ids"]:
+            one = await client.get(f"/api/video-clips/{clip_id}", headers=h)
+            assert one.json()["model"] == "seedance2.5"
+
+
+async def test_duration_ceiling_is_per_model(tmp_path, monkeypatch):
+    """只有 seedance2.5 到 30s；其余模型 >15s 当场 422（不许建行再让 CLI 拒）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        ok = await client.post("/api/video-clips",
+                               json=_shot(model="seedance2.5", duration=30), headers=h)
+        assert ok.status_code == 202, ok.text
+
+        bad = await client.post("/api/video-clips",
+                                json=_shot(model="seedance2.0fast", duration=16), headers=h)
+        assert bad.status_code == 422, bad.text
+        # 文案要说清「不是所有档都能 30s」，否则运营只会看到一个光秃秃的越界
+        assert "仅 seedance2.5" in bad.text
+        assert await _clip_count() == 1, "422 的那镜不许留下任务行"
+
+
+async def test_new_models_are_accepted(tmp_path, monkeypatch):
+    """本次新增的两档都进枚举（mini 走家族默认 15s 上限）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        for model in ("seedance2.0mini", "seedance2.5"):
+            r = await client.post("/api/video-clips",
+                                  json=_shot(model=model, duration=15), headers=h)
+            assert r.status_code == 202, f"{model} → {r.text}"
+        over = await client.post("/api/video-clips",
+                                 json=_shot(model="seedance2.0mini", duration=16), headers=h)
+        assert over.status_code == 422, over.text
 
 
 async def test_bad_reference_image_is_4xx_before_any_row(tmp_path, monkeypatch):

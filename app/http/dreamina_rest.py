@@ -54,7 +54,8 @@ _NAME_RE = re.compile(r"^clip(_[0-9]{1,2})?\.mp4$")
 _BATCH_ID_RE = re.compile(r"^vcb_[0-9a-f]{10}$")
 
 _OPERATIONS = Literal["text2video", "image2video", "multimodal2video"]
-_MODELS = Literal["seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip"]
+_MODELS = Literal["seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip",
+                  "seedance2.0mini", "seedance2.5"]
 _RATIOS = Literal["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
 
 # 在飞态（GET 汇总用）：尚未落终态的一切状态
@@ -68,6 +69,16 @@ _POLL_NOTE = (
     "旧任务保留，谁先出用谁。"
 )
 
+_MODEL_NOTE = (
+    "模型全集 seedance2.0 | seedance2.0fast | seedance2.0fast_vip | seedance2.0_vip | "
+    "seedance2.0mini | seedance2.5，**默认 seedance2.5**（2.5 没有 fast / vip 变体）。"
+    "**seedance2.5 是 VIP-only**，时长 4-30s；其余模型 4-15s，超了 422。"
+    "**2.5 首次使用可能需先到即梦网页端完成一次生成**做账号级合规授权，否则回 "
+    "AigcComplianceConfirmationRequired——那是要人去点的一次性动作，服务端重试无意义。"
+    "积分只有两档有实测值（5s/720p：fast=25、fast_vip=55），**2.5 与 mini 未实测故不估**："
+    "用这两档提交时不会带低积分 warning，那是「估不出」不是「余额充足」。"
+)
+
 MANIFEST_ENTRIES = [
     {
         "method": "POST", "path": "/api/video-clips",
@@ -76,9 +87,9 @@ MANIFEST_ENTRIES = [
         "params": {
             "operation": "body,str(text2video|image2video|multimodal2video)",
             "prompt": "body,str(1-2000 字)",
-            "duration": "body,int(4-15 整数秒)",
-            "model": "body,str(seedance2.0|seedance2.0fast|seedance2.0_vip|seedance2.0fast_vip，"
-                     "默认 seedance2.0fast)",
+            "duration": "body,int(4-30 整数秒；**仅 seedance2.5 到 30s**，其余模型 4-15)",
+            "model": "body,str(seedance2.0|seedance2.0fast|seedance2.0_vip|seedance2.0fast_vip|"
+                     "seedance2.0mini|seedance2.5，默认 seedance2.5)",
             "ratio": "body,str|None(1:1|3:4|4:3|9:16|16:9|21:9；**image2video 传了就 422**，"
                      "其画幅由输入图推断)",
             "image": "body,str|None(图床直链 或 本服务 /uploads 路径；image2video/"
@@ -86,10 +97,11 @@ MANIFEST_ENTRIES = [
             "client_ref": "body,str|None(1-64，幂等键)",
         },
         "returns": "{clip_id, status(重放命中时带当前状态), warning?(低积分提示，不拦截)}",
-        "errors": "422=参数校验失败（含 image2video+ratio / text2video+image / duration 越界）；"
+        "errors": "422=参数校验失败（含 image2video+ratio / text2video+image / duration 越界，"
+                  "**含「非 2.5 模型传了 >15s」**）；"
                   "400=参考图下载失败或不是图片；409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
-        "notes": _POLL_NOTE + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
+        "notes": _MODEL_NOTE + " " + _POLL_NOTE + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
                  "零新建零扣分（幂等键按运营隔离，跨运营同 ref 互不影响）。"
                  "**重放不过登录闸/积分闸**：ref 命中时即使掉登录或余额见底也照回原 clip_id，"
                  "不会把「早已在队里」报成提交失败。"
@@ -125,7 +137,7 @@ MANIFEST_ENTRIES = [
                    "clip_ids[](与 shots **等长同序**，可直接按下标映射 shot-NN), warning?}",
         "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效；401=apikey 无效",
-        "notes": "**逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
+        "notes": _MODEL_NOTE + " **逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
                  "零新增任务、积分零新增；整批全命中时**登录闸/积分闸都不挂**（掉登录或余额"
                  "见底也照回原 clip_ids，不把「早已在队里」报成提交失败）。"
                  "**batch_id 可能为 null**：整批纯重放时一行都没新建，此时只在命中镜同属一个"
@@ -179,11 +191,26 @@ class CreateClipRequest(BaseModel):
 
     operation: _OPERATIONS
     prompt: str = Field(min_length=1, max_length=2000)
-    duration: int = Field(ge=4, le=15)
+    duration: int = Field(ge=dreamina.DURATION_MIN, le=dreamina.DURATION_MAX)
     ratio: _RATIOS | None = None
     model: _MODELS = dreamina.DEFAULT_MODEL
     image: str | None = None
     client_ref: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _check_duration_ceiling(self) -> "CreateClipRequest":
+        """时长上限**按模型**收紧（字段界只能取全家族最宽的 30s，否则 seedance2.5 过不去）。
+
+        不在这里收紧的话，``seedance2.0fast + duration=20`` 会一路放行到 worker 才被 CLI 拒——
+        那时任务行已建好、参考图已物化，结局是一条要人回头清理的 error 行，而不是当场 422。
+        """
+        ceiling = dreamina.max_duration(self.model)
+        if self.duration > ceiling:
+            raise ValueError(
+                f"duration={self.duration}s 超出 {self.model} 的上限："
+                f"该模型上限 {ceiling}s，仅 seedance2.5 支持到 {dreamina.DURATION_MAX}s"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_media_matrix(self) -> "CreateClipRequest":

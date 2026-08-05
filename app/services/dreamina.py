@@ -20,8 +20,8 @@ BGM、ffmpeg 合成、审查仍在 skill 侧，不在本模块范围。
 
 CLI 事实（均已实测，非二手）：输出干净 JSON；submit 后顶层 ``submit_id``（16 位 hex）；
 ``query_result --submit_id=X --download_dir=Y`` 成功返回 ``result_json.videos[].path`` +
-``credit_count``；``gen_status`` ∈ querying/success/failed/…；Seedance 家族只有 720p；
-``image2video`` 画幅由输入图推断、不接受 ``--ratio``。
+``credit_count``；``gen_status`` ∈ querying/success/failed/…；``--video_resolution`` 必填且逐档校验，720p 是
+唯一对全家族都合法的一档；``image2video`` 画幅由输入图推断、不接受 ``--ratio``。
 
 非阻塞红线：本模块跑在 worker 的单一事件循环上（与 supervisor 扫描、视频调度共享），
 所有 CLI 调用一律 ``asyncio.create_subprocess_exec``，**禁止 subprocess.run**。
@@ -52,10 +52,23 @@ from app.core.config import settings
 from app.models.video_clip import VideoClip
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
-# 默认档（四档模型 / 六种画幅 / 三种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）
-DEFAULT_MODEL = "seedance2.0fast"
+# 默认档（六档模型 / 六种画幅 / 三种 operation 的枚举闸在 REST 层的 Literal 上，不在此重复）。
+# 2026-08-05 CLI 升级后模型面从四档扩到六档（新增 seedance2.0mini / seedance2.5，2.5 **没有**
+# fast / vip 变体），默认档同时切到 seedance2.5。
+DEFAULT_MODEL = "seedance2.5"
 
-# 5s/720p 单镜实测价（仅这两档有实测值；未知档不估、不给 warning，绝不瞎猜）
+# 时长闸：下限全家族都是 4s；上限**只有 seedance2.5 到 30s**，其余仍是 15s。
+# REST 的 Pydantic 字段界取全家族最宽（4-30）才放得过 2.5，逐模型收紧在 model_validator 里
+# ——不收紧的话 `seedance2.0fast + duration=20` 要等到 CLI 那边才被拒，那时行已建、参考图已物化，
+# 运营看到的是一条要人回头清理的 error 行。
+DURATION_MIN = 4
+DURATION_MAX = 30
+_DURATION_MAX_DEFAULT = 15
+_DURATION_MAX_BY_MODEL = {"seedance2.5": 30}
+
+# 5s/720p 单镜实测价（仅这两档有实测值；未知档不估、不给 warning，绝不瞎猜）。
+# **seedance2.5 与 seedance2.0mini 不编价**：2.5 是 VIP-only 的新档，两档都没实测过单镜消耗，
+# 编一个「看着合理」的数只会让 warning 给出假的估算。首次真跑后按实测回填。
 _PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55}
 # 已知最便宜的一镜（5s fast）。余额低于它 = 连一镜都提交不起 → 409。
 MIN_CLIP_CREDIT = 25
@@ -315,6 +328,12 @@ def reset_credit_cache() -> None:
     _credit_cache["value"] = None
 
 
+def max_duration(model: str) -> int:
+    """该模型的单镜时长上限（秒）。未知模型按家族默认 15s 判——宁可窄不宜宽，
+    放宽等于让一条 CLI 必拒的任务先建行再失败。"""
+    return _DURATION_MAX_BY_MODEL.get(model, _DURATION_MAX_DEFAULT)
+
+
 def estimate_credit(model: str, duration: int) -> int | None:
     """按 5s 档粗估一镜积分；未知模型返回 None（不估、不给 warning）。
 
@@ -481,8 +500,10 @@ def build_submit_args(clip: VideoClip) -> list[str]:
     """按 operation 组装 dreamina 生成子命令参数（与 skill 侧本地实现逐字同形）。
 
     ``--poll=0`` 纯提交不等待：即梦排队常达数小时，服务端只拿 submit_id 就走，轮询交给
-    poll 阶段。``--video_resolution=720p``：Seedance 家族 CLI 只有 720p。
-    ``image2video`` **一律不带 --ratio**（画幅由输入图推断，CLI 不收该参数）。
+    poll 阶段。``--video_resolution=720p``：CLI 升级后该参数**必填且严格校验**，各档支持的
+    分辨率并不一致（2.5 只有 480p/720p、2.0_vip 到 4k、其余只有 720p），**720p 是唯一对全家族
+    都合法的一档**，故继续统一传它。``image2video`` **一律不带 --ratio**（画幅由输入图推断，
+    CLI 不收该参数）。
     """
     common = [
         f"--prompt={clip.prompt}",
