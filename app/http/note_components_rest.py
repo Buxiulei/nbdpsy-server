@@ -105,6 +105,13 @@ MANIFEST_ENTRIES = [
             "account_id": "path,int",
             "note_id": "body,str(要编辑的笔记平台 id,**必填**,深链定位)",
             "collection_id": "body,str|None(加入哪个合集,取自 GET /collections)",
+            "collection_name": "body,str|None(该合集的名字,**建议每次带 collection_id 时都顺带传**"
+                               "——你从 GET /collections 本就有 id→名映射。笔记已在某合集时"
+                               "「加入合集」按钮根本不渲染,浏览器层只能靠名字确认已选的是不是"
+                               "目标:已在**同一**合集 → applied.collection=true(零点击,"
+                               "components.collection.status='skipped');已在**别的**合集 → "
+                               "collection_already_in_another;不传且确认不了 → "
+                               "collection_chosen_unverifiable。单独给不构成组件请求)",
             "quoted_note_id": "body,str|None(引用哪篇笔记;本号笔记走「我的笔记」,"
                               "他号笔记自动走「他人笔记」tab 按 note_id 检索(显式跨账号"
                               "引用可行,如接待员联系方式那篇——检索不到会如实报错拒引);"
@@ -148,6 +155,13 @@ MANIFEST_ENTRIES = [
                  "都不点),提交后若发现被改会自动改回并在结果里告警(permission_* 字段);"
                  "④ **部分生效是常态**——私密笔记的合集绑定会被平台静默丢弃(照返成功),"
                  "所以 done 只在全部回读确认后才给,别拿 202 或 'no error' 当成功凭据。"
+                 "**合集为什么要你传 collection_name**:服务端并非不想自己查——合集的 id→名"
+                 "映射只在合集弹层打开时才由平台接口下发,而笔记已在某合集时那个弹层根本打不开,"
+                 "服务端手里多半没有映射。所以「已选态」下能不能判出「已选的就是目标」,"
+                 "**取决于你传没传 collection_name**:传了就是 skipped(幂等成功,零点击),"
+                 "不传只能报 collection_chosen_unverifiable —— 那不是失败,是「没法确认」,"
+                 "reason 里带着实读到的合集名,名字对得上就视为已挂,"
+                 "可用 note-component-reads 复核。"
                  "**引用推导仅在显式引用意图时进行**(2026-08-04 收口):只传 "
                  "collection_id/activity_id/编辑项时**绝不**顺带推导出引用——本端点对已"
                  "发布笔记只做被请求的事(发布端点 POST /api/publish-jobs 的隐式推导是"

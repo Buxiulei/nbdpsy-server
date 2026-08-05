@@ -205,9 +205,13 @@ MANIFEST_ENTRIES = [
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
                  "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。"
                  "三组件(collection_id / quoted_note_id / activity_id)在发布链路里于话题之后、"
-                 "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇),"
-                 "且本端点**不回传**组件是否设上——要确认得事后看笔记或调 "
-                 "POST /api/accounts/{id}/note-components 补设。"
+                 "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇)。"
+                 "组件逐项结果**发出去之后能查**:成功后 GET /api/publish-jobs/{job_id} 的 "
+                 "applied.components 给每项 status(202 响应体里当然没有,那时还没开始发)。"
+                 "但要注意那是**编辑器内**回读,逮不住服务端静默丢弃(私密笔记的合集绑定),"
+                 "要板上钉钉得事后调 POST /api/accounts/{id}/note-components 复核或补设。"
+                 "**「原创声明」每次发布无条件打开,不用传任何参数**(运营裁定 2026-08-05):"
+                 "已是开态就零点击,结果同样在 applied.components.original_declaration 里。"
                  "⚠️ activity_id 会让平台把该活动的话题**追加**进正文(话题名可能与活动名不同)。"
                  "**引用哪篇笔记可以不用自己算**:不传 quoted_note_id 时按四条规则自动推导"
                  "(建 job 那一刻算完落库):① 标题形如「X咨询师-姓名，…」= 这篇本身就是咨询师"
@@ -230,7 +234,10 @@ MANIFEST_ENTRIES = [
         "summary": "轮询发布任务状态(caller 须对该 job 的账号有 access)",
         "admin_only": False, "params": {"job_id": "path,int"},
         "returns": "{job_id, account_id, title, status, note_id, note_url, error, "
-                    "retries, schedule_time, next_retry_at, created_at}",
+                    "retries, schedule_time, next_retry_at, created_at, "
+                    "applied?:{topics_requested, topics_applied, topics_failed, "
+                    "components:{collection?/quote?/activity?/original_declaration: "
+                    "{status, ...}}}}",
         "errors": "403=无该账号 access;404=job 不存在",
         "notes": "status 枚举五态:pending(排队中,含定时未到期/失败等待重试)、publishing"
                  "(发布中,常态 1-3 分钟)、published(成功,保证有 note_url,note_id 可能为空)、"
@@ -238,7 +245,17 @@ MANIFEST_ENTRIES = [
                  "next_retry_at 是失败后回 pending 的下次重试时刻(未安排重试则为 null);"
                  "retries 是已重试次数。轮询节奏建议每 5-10s 一次直到 published/failed。"
                  "schedule_time/next_retry_at/created_at 读回均带 +00:00 显式 UTC 偏移"
-                 "(如 2026-01-01T01:00:00+00:00),即该时刻的 UTC 值;要看本地时间自行 +8 小时。",
+                 "(如 2026-01-01T01:00:00+00:00),即该时刻的 UTC 值;要看本地时间自行 +8 小时。"
+                 "── **applied 是「服务端到底应用了什么」的回显**,只有 published 的任务才有"
+                 "(本功能上线前发布的老任务不下发该键,别把「没记录」渲染成「什么都没应用」)。"
+                 "topics_requested vs topics_applied 一对比就知道话题有没有被平台静默丢弃。"
+                 "components 是逐项组件结果,键只含**请求过的**组件,外加一个恒有的 "
+                 "**original_declaration ——「原创声明」每次发布无条件打开,不需要传参**。"
+                 "它和其余组件同为三态:done=点开成功;skipped=**本来就是开的,零点击**"
+                 "(同样算成功,别当成「跳过没做」);error=没开成,**不阻断发布**,笔记照发,"
+                 "reason 给原因,遇到请带 job_id 上报。"
+                 "组件回读都是**编辑器内**确认,逮不住服务端静默丢弃,要板上钉钉见 "
+                 "POST /api/publish-jobs 的 notes。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs",
