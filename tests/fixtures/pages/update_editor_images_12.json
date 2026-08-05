@@ -1,0 +1,912 @@
+{
+  "scene": "update_editor_images",
+  "captured_at": "2026-08-05T02:24:34.109625+00:00",
+  "account_id": 1,
+  "source_note_id": "6a71dbdf000000000502adec",
+  "url": "https://creator.xiaohongshu.com/publish/update?id=6a71dbdf000000000502adec&noteType=normal",
+  "dom": {
+    ".img-upload-area": [
+      {
+        "text": "1 2 3 4 5 6 7 8 9 10 11 12 展开所有图片",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "class": "img-upload-area"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 128,
+          "width": 816,
+          "height": 130
+        }
+      }
+    ],
+    ".img-upload-area .img-container": [
+      {
+        "text": "1",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 832,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "2",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 922,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "3",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1012,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "4",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1102,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "5",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1192,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "6",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1282,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "7",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1372,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "8",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1462,
+          "y": 138,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "9",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 228,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "10",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 832,
+          "y": 228,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "11",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 922,
+          "y": 228,
+          "width": 82,
+          "height": 82
+        }
+      },
+      {
+        "text": "12",
+        "attrs": {
+          "data-v-bf187162": "",
+          "data-v-a39dfc98": "",
+          "class": "img-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1012,
+          "y": 228,
+          "width": 82,
+          "height": 82
+        }
+      }
+    ],
+    ".img-container .close-btn": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1173,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1263,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1353,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1443,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1533,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 813,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      }
+    ],
+    "input[type='file']": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "type": "file",
+          "hidden": "",
+          "multiple": "",
+          "accept": ".jpg,.jpeg,.png,.webp",
+          "alt": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-a39dfc98": "",
+          "type": "file",
+          "hidden": "",
+          "accept": ".jpg,.jpeg,.png,.webp",
+          "alt": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-245e136a": "",
+          "style": "display: none;",
+          "type": "file",
+          "accept": ".pdf,.doc,.docx,.ppt,.pptx"
+        },
+        "visible": false,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        }
+      }
+    ],
+    "input[placeholder*='标题']": [
+      {
+        "text": "",
+        "attrs": {
+          "class": "d-text",
+          "type": "text",
+          "placeholder": "填写标题会有更多赞哦",
+          "value": "行为实验和多参加活动，你做的是哪种"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 306,
+          "width": 683,
+          "height": 24
+        }
+      }
+    ],
+    "div[contenteditable='true']": [
+      {
+        "text": "有人已经参加过几十场聚会，自信却完全没有累积🌙 不是场次不够。是每次都撑住了，功劳却被记在别的地方——「幸好我背了稿」「幸好有同事在」。成功划给了保护措施，你的账户上一分都没进。 所以「多参加活动」和「做一次实验」根本不是一回事☁️ 差别只在三样：有假设、有观察、有记录。所以后者能产生新数据，前者只是让你再熬一次💭 认知行为疗法里那个很朴素的工具就叫行为实验，六步走： 1 回想上一次难熬的场合",
+        "attrs": {
+          "contenteditable": "true",
+          "role": "textbox",
+          "translate": "no",
+          "class": "tiptap ProseMirror",
+          "tabindex": "0"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 350,
+          "width": 816,
+          "height": 806
+        }
+      }
+    ],
+    "[class*='tip']": [
+      {
+        "text": "有人已经参加过几十场聚会，自信却完全没有累积🌙 不是场次不够。是每次都撑住了，功劳却被记在别的地方——「幸好我背了稿」「幸好有同事在」。成功划给了保护措施，你的账户上一分都没进。 所以「多参加活动」和「做一次实验」根本不是一回事☁️ 差别只在三样：有假设、有观察、有记录。所以后者能产生新数据，前者只是让你再熬一次💭 认知行为疗法里那个很朴素的工具就叫行为实验，六步走： 1 回想上一次难熬的场合",
+        "attrs": {
+          "data-v-787eeb26": "",
+          "class": "tiptap-container"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 350,
+          "width": 816,
+          "height": 806
+        }
+      },
+      {
+        "text": "有人已经参加过几十场聚会，自信却完全没有累积🌙 不是场次不够。是每次都撑住了，功劳却被记在别的地方——「幸好我背了稿」「幸好有同事在」。成功划给了保护措施，你的账户上一分都没进。 所以「多参加活动」和「做一次实验」根本不是一回事☁️ 差别只在三样：有假设、有观察、有记录。所以后者能产生新数据，前者只是让你再熬一次💭 认知行为疗法里那个很朴素的工具就叫行为实验，六步走： 1 回想上一次难熬的场合",
+        "attrs": {
+          "contenteditable": "true",
+          "role": "textbox",
+          "translate": "no",
+          "class": "tiptap ProseMirror",
+          "tabindex": "0"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 350,
+          "width": 816,
+          "height": 806
+        }
+      },
+      {
+        "text": "#行为实验[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"id\":\"61893d8f00000000010089af\",\"name\":\"行为实验\",\"record_count\":0,\"biz_id\":\"\",\"type\":\"topic\",\"link\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 742,
+          "y": 1132,
+          "width": 70,
+          "height": 22
+        }
+      },
+      {
+        "text": "#社交焦虑[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"biz_id\":\"\",\"id\":\"5cfc694c000000000d02e135\",\"type\":\"topic\",\"link\":\"\",\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"name\":\"社交焦虑\",\"record_count\":0}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 817,
+          "y": 1132,
+          "width": 70,
+          "height": 22
+        }
+      },
+      {
+        "text": "#认知行为疗法[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"current_score\":0,\"biz_id\":\"\",\"record_unit\":\"\",\"id\":\"61514ddd0000000001007a0e\",\"name\":\"认知行为疗法\",\"type\":\"topic\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 892,
+          "y": 1132,
+          "width": 100,
+          "height": 22
+        }
+      },
+      {
+        "text": "#社恐[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"type\":\"topic\",\"record_emoji\":\"\",\"biz_id\":\"\",\"id\":\"5c2f5942000000000800a1eb\",\"name\":\"社恐\",\"link\":\"\",\"record_count\":0,\"record_unit\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 997,
+          "y": 1132,
+          "width": 40,
+          "height": 22
+        }
+      },
+      {
+        "text": "#心理机制[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"name\":\"心理机制\",\"type\":\"topic\",\"record_unit\":\"\",\"current_score\":0,\"id\":\"617bda6d00000000010099eb\",\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"biz_id\":\"\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1042,
+          "y": 1132,
+          "width": 70,
+          "height": 22
+        }
+      },
+      {
+        "text": "#心理科普[话题]#",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_count\":0,\"current_score\":0,\"id\":\"5e71d9580000000001006b63\",\"type\":\"topic\",\"link\":\"\",\"record_emoji\":\"\",\"record_unit\":\"\",\"biz_id\":\"\",\"name\":\"心理科普\"}",
+          "contenteditable": "false"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1117,
+          "y": 1132,
+          "width": 70,
+          "height": 22
+        }
+      },
+      {
+        "text": "原创声明",
+        "attrs": {
+          "data-v-298c3e02": "",
+          "class": "has-tips"
+        },
+        "visible": true,
+        "rect": {
+          "x": 782,
+          "y": 1451,
+          "width": 54,
+          "height": 20
+        }
+      },
+      {
+        "text": "选择文件",
+        "attrs": {
+          "data-v-09759943": "",
+          "class": "setting-card-text has-tips"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1198,
+          "y": 1738,
+          "width": 56,
+          "height": 21
+        }
+      },
+      {
+        "text": "#行为实验",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"id\":\"61893d8f00000000010089af\",\"name\":\"行为实验\",\"record_count\":0,\"biz_id\":\"\",\"type\":\"topic\",\"link\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1665,
+          "y": 1952,
+          "width": 74,
+          "height": 23
+        }
+      },
+      {
+        "text": "#社交焦虑",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"biz_id\":\"\",\"id\":\"5cfc694c000000000d02e135\",\"type\":\"topic\",\"link\":\"\",\"record_emoji\":\"\",\"record_unit\":\"\",\"current_score\":0,\"name\":\"社交焦虑\",\"record_count\":0}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1744,
+          "y": 1952,
+          "width": 74,
+          "height": 23
+        }
+      },
+      {
+        "text": "#认知行为疗法",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"current_score\":0,\"biz_id\":\"\",\"record_unit\":\"\",\"id\":\"61514ddd0000000001007a0e\",\"name\":\"认知行为疗法\",\"type\":\"topic\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1823,
+          "y": 1952,
+          "width": 106,
+          "height": 23
+        }
+      },
+      {
+        "text": "#社恐",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"current_score\":0,\"type\":\"topic\",\"record_emoji\":\"\",\"biz_id\":\"\",\"id\":\"5c2f5942000000000800a1eb\",\"name\":\"社恐\",\"link\":\"\",\"record_count\":0,\"record_unit\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1934,
+          "y": 1952,
+          "width": 42,
+          "height": 23
+        }
+      },
+      {
+        "text": "#心理机制",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"name\":\"心理机制\",\"type\":\"topic\",\"record_unit\":\"\",\"current_score\":0,\"id\":\"617bda6d00000000010099eb\",\"link\":\"\",\"record_emoji\":\"\",\"record_count\":0,\"biz_id\":\"\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1665,
+          "y": 1952,
+          "width": 358,
+          "height": 49
+        }
+      },
+      {
+        "text": "#心理科普",
+        "attrs": {
+          "class": "tiptap-topic",
+          "data-topic": "{\"record_count\":0,\"current_score\":0,\"id\":\"5e71d9580000000001006b63\",\"type\":\"topic\",\"link\":\"\",\"record_emoji\":\"\",\"record_unit\":\"\",\"biz_id\":\"\",\"name\":\"心理科普\"}"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1702,
+          "y": 1978,
+          "width": 74,
+          "height": 23
+        }
+      }
+    ],
+    "[class*='hint']": [],
+    "[class*='limit']": []
+  },
+  "extra": {
+    "close_btn_after_hover": [
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1173,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1263,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1353,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1443,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1533,
+          "y": 129,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 813,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 903,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 993,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      },
+      {
+        "text": "",
+        "attrs": {
+          "data-v-bf187162": "",
+          "class": "close-btn hoverShow"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1083,
+          "y": 219,
+          "width": 20,
+          "height": 20
+        }
+      }
+    ],
+    "modal_overlap": {
+      "modal": [
+        {
+          "text": "选择笔记 我的笔记 他人笔记 这里查看引用的笔记哦 NBDpsy-我们都有病 1 心理咨询师-徐瑞恒，陪你走出长期自我怀疑 NBDpsy-我们都有病 4 小大人不是早熟，是童年被占用了 NBDpsy-我们都有病 5 越逃避社交越怕，这6件事你中了几条 NBDpsy-我们都有病 5 总在照顾别人的8个信号，我中了几条 NBDpsy-我们都有病 7 总是道歉：对不起成了你的口头禅 NBDpsy-我们都",
+          "attrs": {
+            "class": "d-modal select-note-modal",
+            "style": "width: 802px; z-index: 300;"
+          },
+          "visible": true,
+          "rect": {
+            "x": 879,
+            "y": 80,
+            "width": 802,
+            "height": 620
+          }
+        }
+      ],
+      "img_area": [
+        {
+          "text": "1 2 3 4 5 6 7 8 9 10 11 12 展开所有图片",
+          "attrs": {
+            "data-v-a39dfc98": "",
+            "class": "img-upload-area"
+          },
+          "visible": true,
+          "rect": {
+            "x": 742,
+            "y": -895,
+            "width": 816,
+            "height": 130
+          }
+        }
+      ]
+    }
+  },
+  "api": [],
+  "note": "真号只读采集;xsec_token 已抹除。**不要手改本文件** —— 它是证据,改它去迁就代码等于自欺,要更新只能重新采集。"
+}

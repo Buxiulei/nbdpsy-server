@@ -86,7 +86,9 @@ def test_gate_refuses_with_zero_clicks_when_ordinals_are_scrambled(scene):
     认知不确定时零动作是唯一安全解。
     """
     page = ReplayPage(scene)
-    page.set_text(nei._IMG_AREA, "1 2 3 4 5 7")   # 第 6 张的序号渲染成了 7
+    # 2026-08-05 判据 B 语义修正(逐容器序号,不再读图片区父节点文案)后,
+    # 错乱注入点同步移到容器自身:首卡序号渲染成了 7。
+    page.set_text(nei._IMG_CONTAINER, "7")
 
     out = nei.image_gate(page, 6)
 
@@ -411,8 +413,14 @@ def test_count_images_returns_count_when_both_judgements_agree():
 
 
 def test_count_images_returns_none_when_judgements_disagree():
-    """容器 6 张但图片区文案只拼到 5 → 不可确认。差一张就是删错一张,不许放行。"""
-    assert nei.count_images(_Editor(count=6, area_text="1 2 3 4 5")) is None
+    """容器 6 张但有一张序号没重绘(空文案)→ 不可确认。差一张就是删错一张,不许放行。
+
+    (2026-08-05 语义修正:判据 B 从「图片区父节点文案拼接」改为「逐容器序号首 token」,
+    半截态的注入点随之从 area_text 移到单卡文案——见 count_images docstring 根因记录。)
+    """
+    page = _Editor(count=6)
+    page.labels[4] = ""      # 第 5 张序号没重绘
+    assert nei.count_images(page) is None
 
 
 def test_count_images_returns_none_when_ordinals_are_not_sequential():
@@ -420,7 +428,36 @@ def test_count_images_returns_none_when_ordinals_are_not_sequential():
 
     数量对但序号不连续,恰恰是"按序号认卡"最危险的场景:数得过、认得错。
     """
-    assert nei.count_images(_Editor(count=6, area_text="1 2 3 4 5 7")) is None
+    page = _Editor(count=6)
+    page.labels[5] = "7"     # 跳号
+    assert nei.count_images(page) is None
+
+
+def test_count_images_tolerates_expander_control_text():
+    """图 >10 时平台加「展开所有图片」控件,其文字在图片区 innerText 里 → 不许毒化图数。
+
+    生产 4 连 image_count_unconfirmable(job e26bfd9f/2a72adfb/8a6bcbeb)的根因锁,
+    夹具 update_editor_images_12.json 实拍 12 图文案「1 2 ... 12 展开所有图片」。
+    """
+    page = _Editor(count=12, area_text="1 2 3 4 5 6 7 8 9 10 11 12 展开所有图片")
+    assert nei.count_images(page) == 12
+
+
+def test_count_images_tolerates_hover_polluted_ordinal():
+    """鼠标恰好悬停某卡时其文案变「2\n编辑」(hover 显形,平台事实)→ 取首 token 不误拒。"""
+    page = _Editor(count=6)
+    page.labels[1] = "2\n编辑"
+    assert nei.count_images(page) == 6
+
+
+def test_gate_unconfirmable_reason_carries_both_values():
+    """不可确认时报错必须带双判据各自读数(运营 08-05 需求 3:只说不一致无从排查)。"""
+    page = _Editor(count=6)
+    page.labels[4] = ""
+    result = nei.image_gate(page, 6)
+    assert result["status"] == "error"
+    assert "判据A=6" in result["reason"]
+    assert "判据B=None" in result["reason"]
 
 
 def test_count_images_returns_none_when_image_area_missing():

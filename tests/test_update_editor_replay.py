@@ -201,3 +201,20 @@ def test_title_and_body_selectors_hit_exactly_one_each(page):
     assert "ProseMirror" in (bodies[0].get_attribute("class") or ""), (
         "正文是 tiptap/ProseMirror 富文本 —— 不是 textarea,写入方式受此约束"
     )
+
+
+# ---------------- 12 图折叠态(2026-08-05 采集,image_count_unconfirmable 根因锁)----------------
+
+
+def test_count_images_confirms_12_with_expander_control():
+    """12 图夹具回放:count_images 必须确认 12 张——「展开所有图片」控件文字不许毒化判据。
+
+    根因锁(2026-08-05,账号1 笔记 6a71dbdf 实拍):图 >10 时平台在 .img-upload-area 里
+    加「展开所有图片」折叠控件,其文字混进图片区 innerText,旧判据 B(父节点文案拼接)
+    恒 None → remove 4 连 image_count_unconfirmable + add 提交后回读误报 not_verified,
+    两个症状同根。折叠态下 12 个容器全部可见可点(夹具 rect 为证),图数本可确认。
+    """
+    from app.browser import note_editing_images as nei
+
+    page = ReplayPage(load_scene("update_editor_images_12"))
+    assert nei.count_images(page) == 12

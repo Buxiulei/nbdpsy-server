@@ -143,7 +143,8 @@ def image_gate(page, expected_image_count: int) -> Dict[str, Any]:
             "status": "error",
             "count": None,
             "reason": "image_count_unconfirmable: 图数双判据未取到一致值"
-                      f"(判据A .img-container 计数 / 判据B {_IMG_AREA} 序号拼接),"
+                      f"(判据A={_container_count(page)} 判据B={_ordinal_sequence_total(page)};"
+                      "A=.img-container 计数,B=逐容器序号连续性),"
                       f"图数不可确认,零点击退出(expected={expected_image_count})",
         }
     if actual != expected_image_count:
@@ -168,20 +169,23 @@ def _container_count(page) -> Optional[int]:
 
 
 def _ordinal_sequence_total(page) -> Optional[int]:
-    """判据 B:图片区自身文案是不是 1..N 的连续序号拼接;是则取 N,否则 None。
+    """判据 B:**逐容器**序号文案(各取首 token)拼成 1..N 的连续序列;是则取 N,否则 None。
 
-    实拍(附录 B / E1):``.img-upload-area`` 的 ``innerText`` 就是 ``"1 2 3 4 5 6"`` ——
-    各卡序号顺次拼接。它与判据 A **不是同一个读法**:A 数节点个数,B 读父节点渲染出来的
-    文本,所以"节点在但序号没重绘""序号跳号/重号"这类半截态会被 B 抓住。
+    **2026-08-05 根因修正**(夹具 ``update_editor_images_12.json``):原实现读
+    ``.img-upload-area`` 父节点 innerText 再 split——图 >10 时平台在图片区里加
+    「展开所有图片」折叠控件,其文字混进 token 使判据 B 恒 None,酿成 remove 4 连
+    ``image_count_unconfirmable``(job e26bfd9f/2a72adfb/8a6bcbeb)与 add 提交后回读
+    误报 ``image_add_not_verified``(job 8070b471 等 3 例)两族生产故障,同一根因。
+    改为逐容器读文案取首 token:控件文字不在容器里,天然免疫;首 token 同时免疫
+    hover 显形的「2\n编辑」污染(平台事实,与删除落点复核同一纪律)。
 
-    只用 ``query_selector`` + ``inner_text``(不走 evaluate):同样是只读,但这条路能被
-    回放夹具驱动,页面改版夹具一跑就红。
+    与判据 A 仍是**不同读法**:A 数节点个数,B 读各节点渲染文本 ——
+    "节点在但序号没重绘""序号跳号/重号"这类半截态照样被 B 抓住(单测锁住)。
     """
     try:
-        area = page.query_selector(_IMG_AREA)
-        if area is None:
+        if page.query_selector(_IMG_AREA) is None:
             return None
-        tokens = (area.inner_text() or "").split()
+        tokens = [(t.split() or [""])[0] for t in _ordinals(page)]
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[note_editing_images] 判据B 读取失败: {exc}")
         return None
@@ -195,9 +199,11 @@ def _ordinals(page) -> List[str]:
     out = []
     for card in page.query_selector_all(_IMG_CONTAINER):
         try:
-            out.append((card.inner_text() or "").strip())
+            text = (card.inner_text() or "").strip()
         except Exception:  # noqa: BLE001 — 单张读失败按空串计,下面的重排校验自然会红
-            out.append("")
+            text = ""
+        # 取首 token:hover 显形会把卡文案变「2\n编辑」(平台事实),全文比对会误拒
+        out.append((text.split() or [""])[0])
     return out
 
 
