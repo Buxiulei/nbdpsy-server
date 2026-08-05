@@ -95,6 +95,15 @@ class PublishedNote(Base):
     # 再为这篇起一次浏览器会话——重开会话的代价远高于存一个空串。
     content_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # ── 媒体清单:只存**归一化后的永久 URL**,不落文件(2026-08-05 实测定案) ──
+    # 平台页面上的图 URL 带签发时间戳与签名,18 天就过期(实证 403);剥成
+    # sns-img-qc/{路径段}/{file_id} 则永久有效**且是原图**。故台账只记清单
+    # (几百字节/篇),要图时按需下载 —— 比落盘 1500 张省几十 GB,画质还更高。
+    # 形如 [{"ordinal":1,"kind":"image","file_id":"...","segment":"spectrum","url":"..."}]
+    media_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 媒体抓取时刻。非空 = 已为这篇开过一次详情页,别再为它起第二次会话(同 content_fetched_at)
+    media_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     source_publish_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("publish_jobs.id"), nullable=True
     )

@@ -43,7 +43,8 @@ STALE_AFTER_SECONDS = 900
 # note_purpose_backfill 同理:只读进编辑页取正文 + 按行写目的,一个字都不改平台内容。
 _IDEMPOTENT_KINDS = (
     "cookie_check", "note_export", "note_ledger_sync", "note_purpose_backfill",
-    "note_components_read",  # 纯只读快照,重跑零副作用
+    "note_components_read",
+    "note_media_sync",  # 纯只读快照,重跑零副作用
 )
 
 # 进程内消费任务强引用集合:防未完成的 asyncio.Task 被 GC 提前回收。

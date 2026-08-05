@@ -380,6 +380,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_components_read
 
         return lambda account_id, payload: note_components_read.execute(account_id, payload)
+    if kind == "note_media_sync":
+        from app.services import note_media
+
+        return lambda account_id, payload: note_media.execute(account_id, payload)
     if kind == "note_visibility":
         from app.services import note_visibility
 
