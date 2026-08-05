@@ -153,13 +153,11 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
             # ① 基态广撒网 dump(发现选择器用,夹具过滤器保证可读)
             base = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
             # ② 定位「原创声明」所在行,dump 行内全部后代的形态
+            # 行容器 .original-wrapper 与开关 .d-switch 均为首采夹具实证的选择器
             _ROW_JS = r"""
             () => {
-                const all = [...document.querySelectorAll('div,span,p,label')];
-                const hit = all.find(el => (el.innerText || '').trim() === '原创声明');
-                if (!hit) return null;
-                let row = hit;
-                for (let i = 0; i < 4 && row.parentElement; i++) row = row.parentElement;
+                const row = document.querySelector('.original-wrapper');
+                if (!row) return null;
                 const dump = (el) => {
                     const r = el.getBoundingClientRect();
                     const attrs = {};
@@ -168,21 +166,17 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
                             attrs, rect: {x: Math.round(r.x), y: Math.round(r.y),
                                           width: Math.round(r.width), height: Math.round(r.height)}};
                 };
-                return {row: dump(row), descendants: [...row.querySelectorAll('*')].slice(0, 60).map(dump)};
+                const sw = row.querySelector('.d-switch');
+                const box = sw ? sw.querySelector('input') : null;
+                return {row: dump(row),
+                        switch_el: sw ? dump(sw) : null,
+                        checkbox_checked: box ? box.checked : null,
+                        descendants: [...row.querySelectorAll('*')].map(dump)};
             }
             """
             extra["original_row"] = page.evaluate(_ROW_JS)
             # ③ 受控点开开关观察反应(弹窗/即时翻转),再恢复原态。找不到开关就只留基态证据。
-            toggle = page.evaluate_handle(
-                r"""() => {
-                    const all = [...document.querySelectorAll('div,span,p,label')];
-                    const hit = all.find(el => (el.innerText || '').trim() === '原创声明');
-                    if (!hit) return null;
-                    let row = hit;
-                    for (let i = 0; i < 4 && row.parentElement; i++) row = row.parentElement;
-                    return row.querySelector("[class*='switch'],button[role='switch'],input[type='checkbox']");
-                }"""
-            ).as_element()
+            toggle = page.query_selector(".original-wrapper .d-switch")
             if toggle is not None:
                 human.click(toggle, reason="点开原创声明开关(取证:观察弹窗/即时生效)")
                 human.wait(1.2, 2.0, context="等开关反应渲染")
