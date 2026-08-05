@@ -94,6 +94,13 @@ _POOL_TIMEOUT = 30.0
 _ANCHOR_MAX_SIDE = 1536
 _ANCHOR_MAX_BYTES = 500 * 1024
 _ANCHOR_JPEG_QUALITY = 90
+# 原样返回锚点时按 PIL 认出的真实格式标注 (文件名, mime);表里没有的格式沿用 png 标注
+# (不猜)。**不能按文件名判**——归档里大量 .png 的真身是 JPEG,理由见 _compress_anchor。
+_ANCHOR_FORMAT_LABELS = {
+    "JPEG": ("anchor.jpg", "image/jpeg"),
+    "PNG": ("anchor.png", "image/png"),
+    "WEBP": ("anchor.webp", "image/webp"),
+}
 
 
 @dataclass
@@ -177,6 +184,12 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
     返回 ``(文件名, bytes, mime)`` 三元组,即 images.edit 的 image 载荷形状(顺序是
     SDK 约定的 file tuple,别写反)。两个判据都不触发就原样返回(小图小文件不折腾)。
 
+    **原样返回时按 PIL 认出的真实格式标注,绝不按文件名/一律 png**:归档目录里抽样
+    200 个 ``.png``,**73 个真身是 JPEG** ——成因是调用方上传什么我们就存什么、文件名
+    沿用了 ``.png``。旧实现在这条路上硬编码 ``image/png``,等于给上游送错元数据:今天
+    上游容忍,哪天严格校验就是这类锚点批量 400,且症状是"莫名其妙的上游失败"极难查。
+    认不出的格式沿用 ``anchor.png``/``image/png`` —— 修一个小问题不引入新的不确定。
+
     **本函数对外的承诺是"只减不增"**,它由两条护栏共同兑现,缺一条承诺就不成立
     (别当防御性冗余删掉):
     1. 任何失败一律回退原字节——瘦身只是给上传减负,绝不能因为它把一次生图搞挂;
@@ -190,10 +203,13 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
         from PIL import Image
 
         with Image.open(io.BytesIO(raw)) as im:
+            # 原样返回时按**真实格式**标注:归档里大量 .png 其实是 JPEG(见 docstring),
+            # 旧实现一律贴 image/png = 给上游送错元数据。认不出的格式沿用旧标注不猜。
+            as_is = _ANCHOR_FORMAT_LABELS.get(im.format, ("anchor.png", "image/png"))
             oversized = max(im.size) > _ANCHOR_MAX_SIDE
             heavy = len(raw) > _ANCHOR_MAX_BYTES
             if not oversized and not heavy:
-                return "anchor.png", raw, "image/png"
+                return as_is[0], raw, as_is[1]
             # JPEG 不支持 alpha:RGBA/P 等模式必须先转 RGB,否则 save 直接抛
             out = im.convert("RGB")
             if oversized:
@@ -211,7 +227,7 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
             logger.info(
                 f"[openai_image] 锚点转码反而变大({len(raw) / 1024:.0f}KB → "
                 f"{len(data) / 1024:.0f}KB),保留原字节")
-            return "anchor.png", raw, "image/png"
+            return as_is[0], raw, as_is[1]
         logger.info(
             f"[openai_image] 锚点瘦身: {len(raw) / 1024:.0f}KB → {len(data) / 1024:.0f}KB "
             f"{size_after}{'(已缩放)' if oversized else '(仅转码,尺寸不变)'}")

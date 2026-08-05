@@ -755,7 +755,8 @@ def test_transcode_skipped_when_it_would_grow_the_payload():
     name, data, mime = openai_image._compress_anchor(raw)
 
     assert data == raw, "转码反而更大时必须原样返回"
-    assert (name, mime) == ("anchor.png", "image/png")
+    # 退回原字节时也按真实格式标注(源是 JPEG 就标 jpeg),不再一律贴 image/png
+    assert (name, mime) == ("anchor.jpg", "image/jpeg")
 
 
 def test_compress_anchor_falls_back_on_pil_failure():
@@ -828,3 +829,58 @@ def test_proxy_branch_also_gets_explicit_timeouts(tmp_path, monkeypatch):
     assert client is not None and client.max_retries == 1
     inner = client._client.timeout           # 自带 httpx.AsyncClient 上的超时
     assert (inner.connect, inner.read, inner.write) == (30.0, 300.0, 120.0)
+
+
+# ── 原样返回时的 mime 标注(2026-08-06:归档里 73/200 的 .png 真身是 JPEG)────────
+
+def _jpeg_bytes(width: int, height: int, quality: int = 90) -> bytes:
+    """造一张真实的 JPEG(真字节,不是伪造 header)。"""
+    import io
+
+    from PIL import Image
+
+    im = Image.linear_gradient("L").resize((width, height)).convert("RGB")
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def test_untouched_jpeg_is_labeled_jpeg_not_png():
+    """**本轮回归锁**:内容是 JPEG(文件名却常是 .png)→ 必须标 jpeg,不能贴 image/png。
+
+    生产实证:归档目录抽样 200 个 ``.png``,73 个真身是 JPEG(调用方上传什么我们存
+    什么,文件名沿用了 .png)。原来"原样返回"这条路硬编码 image/png,等于给上游送
+    错元数据——今天上游容忍,哪天严格校验就是这类锚点批量 400,且症状难查。
+    """
+    raw = _jpeg_bytes(1024, 1536)          # 尺寸与体积都不超阈值 → 走原样返回那条路
+    assert len(raw) < openai_image._ANCHOR_MAX_BYTES
+
+    assert openai_image._compress_anchor(raw) == ("anchor.jpg", raw, "image/jpeg")
+
+
+def test_untouched_png_still_labeled_png():
+    """真 PNG 原样返回时标注不变(本次改动不许波及正常 PNG)。"""
+    raw = _light_png_bytes(1024, 1536)
+    assert openai_image._compress_anchor(raw) == ("anchor.png", raw, "image/png")
+
+
+def test_untouched_webp_is_labeled_webp():
+    """WEBP 同理按真实格式标注。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.linear_gradient("L").resize((800, 1000)).convert("RGB").save(buf, format="WEBP")
+    raw = buf.getvalue()
+
+    assert openai_image._compress_anchor(raw) == ("anchor.webp", raw, "image/webp")
+
+
+def test_unknown_format_keeps_current_labeling():
+    """PIL 认不出的字节 → 保持现状标注(anchor.png/image/png),不抛异常。
+
+    修一个小问题不许引入新的不确定:认不出格式时我们**不猜**,沿用改动前的行为。
+    """
+    assert openai_image._compress_anchor(b"not-an-image-at-all") == (
+        "anchor.png", b"not-an-image-at-all", "image/png")
