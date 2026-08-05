@@ -176,7 +176,13 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
 
     返回 ``(文件名, bytes, mime)`` 三元组,即 images.edit 的 image 载荷形状(顺序是
     SDK 约定的 file tuple,别写反)。两个判据都不触发就原样返回(小图小文件不折腾)。
-    **任何失败一律回退原字节**:瘦身只是给上传减负,绝不能因为它把一次生图搞挂。
+
+    **本函数对外的承诺是"只减不增"**,它由两条护栏共同兑现,缺一条承诺就不成立
+    (别当防御性冗余删掉):
+    1. 任何失败一律回退原字节——瘦身只是给上传减负,绝不能因为它把一次生图搞挂;
+    2. 纯转码路径若产出反而更大,原样退回。这不是假想:源本就是高压缩 JPEG 时,重编到
+       q90 实测能从 **664KB 涨到 1363KB(翻倍)**,而运营手里就有大量已压缩的 JPEG 素材
+       (归档目录抽样 200 个 ``.png``,73 个真身是 JPEG)。
     """
     try:
         import io
@@ -199,8 +205,8 @@ def _compress_anchor(raw: bytes) -> tuple[str, bytes, str]:
             out.save(buf, format="JPEG", quality=_ANCHOR_JPEG_QUALITY)
             size_after = out.size
         data = buf.getvalue()
-        # 纯转码路径(没缩尺寸)有可能反而更大——源本就是高压缩 JPEG 时,重编到 q90
-        # 实测能从 664KB 涨到 1363KB。瘦身产出更大就是负收益,原样退回。
+        # "只减不增"承诺的第 2 条护栏(实测数字与理由见 docstring):纯转码路径产出
+        # 反而更大时原样退回。缩过尺寸的必然更小,故只在没缩的路径上判。
         if not oversized and len(data) >= len(raw):
             logger.info(
                 f"[openai_image] 锚点转码反而变大({len(raw) / 1024:.0f}KB → "
