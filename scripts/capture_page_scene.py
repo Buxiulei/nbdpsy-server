@@ -78,6 +78,17 @@ _SCENES = {
         ],
         "api_marks": [],
     },
+    # 引用入口惰性诊断(quote_candidates_unavailable 11 例,标本 6a707e9f 确定性复现):
+    # 视口/遮挡 hit-test → 生产同路径点击 → 广谱扫弹窗 → 阶梯重试(再点/点标签子元素)。
+    "quote_probe": {
+        "flow": "quote_probe",
+        "dom": [
+            nc._QUOTE_CONTAINER,
+            "[class*='modal']",
+            "[class*='select-note']",
+        ],
+        "api_marks": [nc._POSTED_API_MARK],
+    },
     "quote_modal": {
         "flow": "quote_modal",
         "dom": [
@@ -151,7 +162,78 @@ def capture(scene: str, account_id: int, note_id: str, cookies) -> dict:  # noqa
 
         flow = _SCENES[scene].get("flow", "quote_modal")
         extra: dict = {}
-        if flow == "content_settings":
+        if flow == "quote_probe":
+            _ENV_JS = r"""
+            () => ({iw: window.innerWidth, ih: window.innerHeight,
+                    sx: window.scrollX, sy: window.scrollY,
+                    focus: document.hasFocus(), vis: document.visibilityState})
+            """
+            _ROWINFO_JS = r"""
+            () => {
+                const row = document.querySelector('.quote-note-container');
+                if (!row) return null;
+                const r = row.getBoundingClientRect();
+                const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+                const top = document.elementFromPoint(cx, cy);
+                const chain = [];
+                let el = top;
+                for (let i = 0; i < 5 && el; i++) {
+                    chain.push({tag: el.tagName, cls: (el.className || '').toString().slice(0, 80)});
+                    el = el.parentElement;
+                }
+                return {rect: {x: r.x, y: r.y, w: r.width, h: r.height},
+                        pointer_events: getComputedStyle(row).pointerEvents,
+                        center: [Math.round(cx), Math.round(cy)],
+                        top_chain: chain,
+                        top_is_row_descendant: top ? row.contains(top) : null};
+            }
+            """
+            _MODALS_JS = r"""
+            () => [...document.querySelectorAll("[class*='modal'],[class*='select-note'],[class*='popover']")]
+                .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+                .map(el => ({cls: (el.className || '').toString().slice(0, 90),
+                             text: (el.innerText || '').replace(/\s+/g, ' ').slice(0, 60)}))
+            """
+            ladder = []
+            def _rung(name):
+                human.wait(2.0, 3.0, context=f"等{name}反应")
+                ladder.append({
+                    "step": name,
+                    "posted_responses": len(api),
+                    "row": page.evaluate(_ROWINFO_JS),
+                    "visible_modals": page.evaluate(_MODALS_JS),
+                })
+            extra["env"] = page.evaluate(_ENV_JS)
+            extra["row_before"] = page.evaluate(_ROWINFO_JS)
+            entry = page.query_selector(nc._QUOTE_CONTAINER)
+            if entry is None:
+                raise RuntimeError("没找到引用笔记入口")
+            # 梯 1:生产同路径(人性化点容器随机点)
+            human.click(entry, reason="梯1:生产同路径点引用入口")
+            _rung("ladder1_container_click")
+            if len(api) == 0:
+                # 梯 2:再点一次(排除单次事件丢失)
+                entry = page.query_selector(nc._QUOTE_CONTAINER)
+                if entry is not None:
+                    human.click(entry, reason="梯2:再点一次引用入口")
+                    _rung("ladder2_container_again")
+            if len(api) == 0:
+                # 梯 3:点行内文字子元素(可点区可能只在标签上)
+                label = page.evaluate_handle(
+                    r"""() => {
+                        const row = document.querySelector('.quote-note-container');
+                        if (!row) return null;
+                        const els = [...row.querySelectorAll('*')];
+                        return els.find(el => (el.innerText || '').trim() === '引用笔记') || null;
+                    }"""
+                ).as_element()
+                if label is not None:
+                    human.click(label, reason="梯3:点「引用笔记」文字子元素")
+                    _rung("ladder3_label_click")
+            extra["ladder"] = ladder
+            dom = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
+            nc._close_quote_modal(page, human)
+        elif flow == "content_settings":
             # ① 基态广撒网 dump(发现选择器用,夹具过滤器保证可读)
             base = {sel: page.evaluate(_DUMP_JS, sel) for sel in _SCENES[scene]["dom"]}
             # ② 定位「原创声明」所在行,dump 行内全部后代的形态
