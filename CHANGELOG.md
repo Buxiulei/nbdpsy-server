@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.19.0 (2026-08-05)
+
+**即梦(Dreamina)视频生成服务化:CLI / 登录态 / 积分 / 提交轮询取片全部进 server,产物给免鉴权
+直链。** 运营侧从此零登录零装 CLI,链路里「submit + fetch」两步换成两条 REST 调用。
+设计与取舍见 `docs/design/2026-08-05-dreamina-clips-design.md`,契约来自 skill 侧需求文档
+`NBDpsy/文档/2026-08-05-server需求-即梦视频生成服务化.md`。
+
+- 新表 `video_clips`(迁移 e2c47f9b3a15)+ 6 个端点(单镜/批量提交与查询、积分、登录态)+
+  `GET /uploads/clips/{token_dir}/{name}` 免鉴权直链(HMAC token 目录即访问控制)。
+- **`clip_id` 形态钉死 `vc_<10hex>`,绝不是 16 位纯小写 hex** —— 那是本机 dreamina CLI
+  `submit_id` 的形态,skill 侧 auto 模式靠形态判断「问 server 还是问本机 CLI」,撞车会把
+  server 的 clip 派到本机 CLI 空转到超时。
+- **所有重试语义围绕「submit 即占队列位、success 即扣积分」设计**(重复提交不是浪费时间而是
+  烧钱,且排队中无法取消):卡 querying 数小时**不自动重提**只如实回 `queued_seconds`;submit
+  超时/无 submit_id 的**歧义结局判 error 并写明「是否已入队未知」**,不重排(重排=赌它没入队,
+  赌输双倍扣分);崩在 submit 中途的 `submitting` 残留由启动自愈同样判 error。
+  `submit_id` 的正则兜底**只在 rc==0 时启用且锚定成恰好 16 位**——否则 CLI 明确失败的原文里
+  一个 logid/request_id 就会被当成 submit_id,让确定失败的任务落成 `submitted` + 假 id、
+  poll 永远查不到、无终态出口,运营看着涨的 `queued_seconds` 以为在正常排队。
+- **幂等键 `UNIQUE(created_by, client_ref)` 按运营隔离**:同 ref 重发回原 clip_id 零新建;
+  单列唯一会让他人 ref 抢注 + 泄漏任务状态。批量端点逐镜去重,整批重放零新增任务。
+  **ref 去重排在登录闸/积分闸之前**:纯重放没有副作用,用 503/409 挡它等于把「任务早已在队里」
+  报成提交失败,运营重跑就是双倍扣分。
+- `error` 与 `last_poll_error` 分列:查询接口瞬时故障**不改 status**——写成终态会让运营误判
+  任务已死而重发。
+- 低积分 warning 不拦截(扣费 success 才结算),只有余额 < 最便宜一镜(25)才 409。
+- **幂等键不会被一次图源故障永久烧死**:同 ref 命中一条「从没跑过 submit CLI」的 error 行
+  (参考图物化失败落的那种)时**原地复活** —— 重新物化 + 回 `queued`,clip_id 不变、零新建。
+  否则图床一次 502 就让那一镜被自己的 ref 永久占死,修好图重放也生不出来(而单镜端点同样
+  入参是 400 不建行、重放就能成功,两边不对称)。判据是**结构化字段**不是 error 文案:
+  认领进 submitting 的那一刻就写 `submitted_at`,它为空 ⟺ CLI 从没为这行跑过。有 submit_id
+  或认领过的 error 行**绝不复活**(资金状态未知或已扣分,复活 = 可能双倍扣分)。
+- 提交第二段落库带 `WHERE status='submitting'` 守卫(rowcount≠1 只记日志、连 submit_id 一起
+  打出来对账,不盲写) + 调度器每轮 sweep 认领后超 3×submit 超时仍滞留的 `submitting` 行判
+  error(话术同启动自愈)。此前运行期产生的残留要卡到下次重启才被处置,期间对外一直显示
+  queued、submit 阶段又只捡 queued,运营看着「在排队」其实没有任何东西在推进它。
+- 参考图在**建行之前**同步物化(坏图当场 4xx),`/uploads` 来源**复制**成独立副本(图床 7 天
+  清理,clip TTL 独立);只收图床直链或 /uploads 路径,不收 base64 大包。
+  **判来源看 scheme 不看 path 形状**:`http(s)://` 一律走远程下载(本服务公网域名的完整直链
+  就长这样,经 Cloudflare 解析到公网 IP,回环正常),裸 `/uploads/...` 才查本地图床——改前
+  「URL 的 path 以 /uploads 开头就当自家图床」会把任意主机的
+  `https://evil.example/uploads/x.png` 误认成本服务的图。远程下载新增 **SSRF 闸**(解析出的
+  每个 IP 都不得是 loopback/RFC1918/link-local/169.254,且**重定向每一跳都过闸**——只查初始
+  URL 挡不住跳板;不设闸这个端点就是个任意内网探测器,连云元数据 169.254.169.254 都会被服务端
+  代访)+ **总时长 30s 上限**(`asyncio.wait_for` 包整段;httpx 的 timeout 是每次操作各自计时,
+  慢速滴流能拖到无限长)。
+- 产物 14 天 TTL:到期删目录清 `video_url`,但 status 保持 done、`credit_count` 保留供对账。
+  reaper 另收两类**只删盘不删行**的垃圾:`error` 终态超 TTL 的工作目录(此前失败越多、参考图
+  副本在盘上堆越多,而 done 分支根本扫不到它们)、以及 `uploads/clips/` 下无对应 DB 行的
+  **孤儿目录**(「先建目录物化、再插行」中途失败留下的半截;卡 mtime TTL 而不是「没行就删」,
+  免得误杀正在物化、行还没插进去的那几秒)。
+- **产物过期不再写进 `error`**,改由 GET 视图下发 `expired` 布尔键:`error` 只装任务失败原因,
+  掺进「产物已 TTL 清理」会让 skill 侧判 error 的分支把一条生成成功、只是产物过期的片当成失败。
+- **纯重放批的 `batch_id` 返回 `null`**(命中镜同属一批时回那个真批次号),不再现编一个数据库里
+  一行都没有的号——那种号拿去 GET batch 必 404,比 null 更难排查。clip 定位一律以 `clip_ids`
+  为准;GET batch 另加 `vcb_` 形态闸,`"null"` / `"None"` 这类字面量直接 404。
+- worker Supervisor 新开关 `include_dreamina` 起 `DreaminaScheduler` + `ClipReaper`;CLI 调用
+  全经**两层锁**串行 + `create_subprocess_exec`(单账号 CLI 不能并发,且不得阻塞 worker 事件
+  循环):进程内 `asyncio.Lock` + `DATA_DIR/dreamina-cli.lock` 上的跨进程 `flock`——API 单元的
+  积分/登录闸查询与 worker 单元的 submit/query 是两个 OS 进程,只有文件锁拦得住。等锁 10s
+  不到就回「CLI 未被调起」:submit 复位 `queued` 下轮再提、poll 跳过本轮、积分沿用上次结论
+  且不写缓存(**绝不把「CLI 忙」判成登录失效**——那会缓存 60s 让期间所有提交 503)。
+- ⚠️ 上线要 **API 与 worker 两个 systemd 单元都 restart**(真正跑 dreamina 的是 worker);
+  `DREAMINA_BIN` 必须绝对路径(systemd PATH 不含 `~/.local/bin`)。
+
 ## 0.18.0 (2026-07-31)
 
 **矩阵互动:发布成功后,矩阵内其余账号在窗口内随机时刻点赞 / 收藏 / 评论。**

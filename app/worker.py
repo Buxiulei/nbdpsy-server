@@ -35,6 +35,7 @@ from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
 from app.services.content_archive import ArchiveReaper
 from app.services.draft_clean import DraftCleanScheduler
+from app.services.dreamina import ClipReaper, DreaminaScheduler
 from app.services.interaction_backfill_scheduler import InteractionBackfillScheduler
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
@@ -70,6 +71,7 @@ class Supervisor:
 
     - ``repo``:browser_jobs 台账 repo(默认模块级容缺导入的真 repo,可能为 None)。
     - ``include_video``:是否内嵌视频调度(worker 进程 True;server ``all`` 模式 False)。
+    - ``include_dreamina``:是否内嵌即梦片段调度 + 产物 TTL 清理(同上开关语义)。
     - ``scan_interval`` / ``batch_per_account`` / ``proc_timeout`` / ``child_grace`` /
       ``max_procs``:分别兜底 ``WORKER_SCAN_INTERVAL``(5s)/ ``WORKER_BATCH_PER_ACCOUNT``
       (3)/ ``ACCOUNT_PROC_TIMEOUT``(1800s)/ 停机宽限(10s)/ ``BROWSER_CONCURRENCY``。
@@ -81,6 +83,7 @@ class Supervisor:
         *,
         repo=None,
         include_video: bool = False,
+        include_dreamina: bool = False,
         scan_interval: float | None = None,
         batch_per_account: int | None = None,
         proc_timeout: float | None = None,
@@ -90,6 +93,7 @@ class Supervisor:
         self._session_factory = session_factory
         self._repo = repo if repo is not None else _default_browser_jobs_repo
         self._include_video = include_video
+        self._include_dreamina = include_dreamina
         self._scan_interval = (
             scan_interval
             if scan_interval is not None
@@ -127,6 +131,8 @@ class Supervisor:
         self._interaction_backfill_scheduler: InteractionBackfillScheduler | None = None
         self._egress_guard: EgressGuard | None = None
         self._video_scheduler = None
+        self._dreamina_scheduler: DreaminaScheduler | None = None
+        self._clip_reaper: ClipReaper | None = None
 
     # ---------------- 生命周期 ----------------
 
@@ -207,9 +213,26 @@ class Supervisor:
                 stale_timeout=int(settings.VIDEO_STALE_TIMEOUT or 900),
             )
             self._video_scheduler.start()
+        if self._include_dreamina:
+            # 即梦片段调度:每轮先提交 queued 再轮询在飞任务;产物 TTL 另起 reaper。
+            # CLI 调用全在 services/dreamina 内经 create_subprocess_exec 串行执行,
+            # 与本进程其它后台组件共享事件循环不阻塞。
+            self._dreamina_scheduler = DreaminaScheduler(self._session_factory)
+            self._dreamina_scheduler.start()
+            if settings.CLIP_REAP_INTERVAL > 0:
+                self._clip_reaper = ClipReaper(
+                    self._session_factory, settings.CLIP_REAP_INTERVAL
+                )
+                self._clip_reaper.start()
 
     async def _stop_components(self) -> None:
         """停后台组件(与启动相反顺序)。"""
+        if self._clip_reaper is not None:
+            await self._clip_reaper.stop()
+            self._clip_reaper = None
+        if self._dreamina_scheduler is not None:
+            await self._dreamina_scheduler.stop()
+            self._dreamina_scheduler = None
         if self._video_scheduler is not None:
             await self._video_scheduler.stop()
             self._video_scheduler = None
@@ -564,9 +587,11 @@ class Supervisor:
 
 
 async def main() -> None:
-    """worker 进程入口:建表 → 起 Supervisor(含视频调度)→ 信号驱动优雅停机。"""
+    """worker 进程入口:建表 → 起 Supervisor(含视频调度 + 即梦片段调度)→ 信号驱动优雅停机。"""
     await db_module.init_db()
-    supervisor = Supervisor(db_module.async_session, include_video=True)
+    supervisor = Supervisor(
+        db_module.async_session, include_video=True, include_dreamina=True
+    )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:

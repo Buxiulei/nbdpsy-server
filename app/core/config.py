@@ -141,6 +141,31 @@ class Settings(BaseSettings):
     VIDEO_HEARTBEAT_INTERVAL: int = 300
     VIDEO_STALE_TIMEOUT: int = 900
 
+    # ── 即梦视频生成(dreamina clips,设计 2026-08-05-dreamina-clips-design.md)──
+    # dreamina CLI 绝对路径:systemd 进程 PATH **不含** ~/.local/bin,必须写全路径,
+    # 否则 worker 里一律 FileNotFoundError(本机交互 shell 能跑不代表服务能跑)。
+    # 登录态在 CLI 自己的 ~/.dreamina_cli/(公司号一份,运营侧零登录),不进本配置。
+    DREAMINA_BIN: str = "/home/roots/.local/bin/dreamina"
+    # 调度主循环周期(秒):每轮先 submit 全部 queued,再 poll 到期的在飞任务。
+    CLIP_POLL_SECONDS: int = 20
+    # 单条在飞任务两次 query_result 的最小间隔(秒)。即梦排队常达数小时,查密了纯属
+    # 给单账号 CLI 加锁竞争,60s 足够。
+    CLIP_QUERY_INTERVAL: int = 60
+    # CLI 子命令超时(秒):submit 只提交不等待故 120s 足够;query_result 成功时要下载
+    # MP4,给 300s。**超时一律不重提**(见 services/dreamina 的歧义结局处置)。
+    CLIP_SUBMIT_TIMEOUT: int = 120
+    CLIP_QUERY_TIMEOUT: int = 300
+    # 产物 MP4 保留天数(需求要求 ≥7 天:一条片从生成到过审可能跨几天)
+    CLIP_TTL_DAYS: int = 14
+    # 产物 TTL 巡检间隔(秒,0=关闭);默认 6h,与内容资产库同量级。
+    CLIP_REAP_INTERVAL: int = 21600
+    # 积分低水位:GET /api/video-credits 的 low_threshold_hit 判据(仅提示不拦截)
+    CLIP_CREDIT_LOW_WATERMARK: int = 200
+    # 单次批量提交的镜数上限(超出 422)
+    CLIP_MAX_BATCH: int = 50
+    # 参考图物化的单张大小上限(MB)
+    CLIP_IMAGE_MAX_MB: int = 15
+
     # ── 内容资产库(content_archive,设计 2026-07-25-content-archive-design.md)──
     # 发布成功自动归档;取详情即刷新 last_used_at;距最后使用超 TTL 天由 ArchiveReaper 删除。
     ARCHIVE_TTL_DAYS: int = 90

@@ -12,6 +12,7 @@ from app.http import (
     content_archive_rest,
     cookies_rest,
     downloads,
+    dreamina_rest,
     extension_rest,
     interaction_backfill_rest,
     manifest,
@@ -51,6 +52,7 @@ ALL_ROUTERS = [
     downloads.router,
     uploads_rest.router,
     video_rest.router,
+    dreamina_rest.router,
 ]
 
 ALL_MANIFEST_ENTRIES = [
@@ -74,4 +76,5 @@ ALL_MANIFEST_ENTRIES = [
     *style_profile_rest.MANIFEST_ENTRIES,
     *uploads_rest.MANIFEST_ENTRIES,
     *video_rest.MANIFEST_ENTRIES,
+    *dreamina_rest.MANIFEST_ENTRIES,
 ]

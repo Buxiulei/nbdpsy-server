@@ -16,6 +16,7 @@ from app.models.published_note import PublishedNote
 from app.models.risk_event import RiskEvent
 from app.models.style_profile import StyleProfile, StyleProfileVersion
 from app.models.upload_batch import UploadBatch
+from app.models.video_clip import VideoClip
 from app.models.video_job import VideoJob
 from app.models.xhs_account import XhsAccount
 
@@ -33,6 +34,7 @@ __all__ = [
     "NoteMetric",
     "NoteMetricDaily",
     "UploadBatch",
+    "VideoClip",
     "VideoJob",
     "PsychGlossary",
     "StyleProfile",
