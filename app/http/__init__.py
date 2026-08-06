@@ -27,6 +27,7 @@ from app.http import (
     style_profile_rest,
     system,
     uploads_rest,
+    video_assets_rest,
     video_rest,
 )
 
@@ -52,6 +53,7 @@ ALL_ROUTERS = [
     downloads.router,
     uploads_rest.router,
     video_rest.router,
+    video_assets_rest.router,
     dreamina_rest.router,
 ]
 
@@ -76,5 +78,6 @@ ALL_MANIFEST_ENTRIES = [
     *style_profile_rest.MANIFEST_ENTRIES,
     *uploads_rest.MANIFEST_ENTRIES,
     *video_rest.MANIFEST_ENTRIES,
+    *video_assets_rest.MANIFEST_ENTRIES,
     *dreamina_rest.MANIFEST_ENTRIES,
 ]
