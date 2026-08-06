@@ -550,7 +550,7 @@ async def test_batch_size_limits(tmp_path, monkeypatch):
 
 # ── 积分守卫 ────────────────────────────────────────────────────────────────
 async def test_credit_exhausted_returns_409(tmp_path, monkeypatch):
-    """余额连最便宜一镜都不够才拦（409）。"""
+    """余额低于提交下限才拦（409）；这里 10 分连 4s fast 的 20 都不够，两种口径下都该拦。"""
     _stub_credit(monkeypatch, credit=10)
     async with rest_client(tmp_path, monkeypatch) as client:
         r = await client.post("/api/video-clips", json=_shot(), headers=bearer(ADMIN_KEY))
@@ -1069,7 +1069,7 @@ async def test_multiframe_warns_price_is_unmeasured(tmp_path, monkeypatch):
 
 
 async def test_multiframe_credit_guard_still_hard_blocks(tmp_path, monkeypatch):
-    """估不出价 ≠ 不设防：余额连最便宜一镜都不够时照旧 409（保守拦截）。"""
+    """估不出价 ≠ 不设防：余额低于提交下限时照旧 409（保守拦截）。"""
     _stub_credit(monkeypatch, credit=10)
     monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
     two = _seed_uploads(tmp_path, 2, folder="mf")

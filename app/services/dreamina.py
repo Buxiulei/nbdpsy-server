@@ -131,9 +131,11 @@ MULTIFRAME_MODEL_PLACEHOLDER = "platform_fixed"
 # **seedance2.0mini / seedance2.0 / seedance2.0_vip 仍不编价**（从未实测）；
 # multiframe2video 恒不估（模型由平台下发，本表不适用，见 estimate_credit）。
 _PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55, "seedance2.5": 130}
-# 提交闸的下限（5s fast 的价）。改按秒后**最便宜的一镜其实是 4s fast = 20**，这条线因而是
-# 保守的：余额落在 [20, 25) 时其实还能提一镜 4s fast，却会被 409 挡。阈值维持 25 不动——它是
-# 破产线不是预算线，且下调会放宽一道拦截闸，不在本次修公式的范围内（待运营确认后再调）。
+# 提交闸的**保守**下限。按秒计价后理论上最便宜的一镜是 4s fast = 20，这里取 25（5s fast 的
+# 价）：余额落在 [20, 25) 时其实还提得起一镜 4s fast，会被多拦一次。这是有意为之——它是破产
+# 线不是预算线，多拦的那一格只影响「余额见底且恰好发 4s fast 单」这种边角，而放宽一道拦截闸
+# 换不回什么。409 文案与 manifest 都只引这个常量、不手写数字，改这里即全线同步；只有
+# _guard_credit 的 docstring 复述了「25 = 5s fast」这个理由，改档价时记得一并看一眼。
 MIN_CLIP_CREDIT = 25
 
 # 首次用某模型可能返回它：需人到 Dreamina 网页端做一次性授权（账号级），服务端重试无意义。
@@ -422,7 +424,7 @@ def estimate_credit(model: str, duration: int, operation: str | None = None) -> 
     """按秒线性估一镜积分；未知模型返回 None（不估、不给 warning）。
 
     只用于**提示**：扣费 success 才结算、排队中还有变数，所以低余额一律 warning 不拦截
-    （需求第四节第 5 条）。真正拦截只有一种情况——余额连最便宜一镜都不够。
+    （需求第四节第 5 条）。真正拦截只有一种情况——余额低于 ``MIN_CLIP_CREDIT`` 那条保守线。
 
     ``multiframe2video`` 恒返回 None：它的模型由平台固定，我们库里那个 ``model`` 值只是
     请求默认档的占位，拿它去查价会算出 seedance2.5 的 130/5s——一个凭空来的数字，运营会

@@ -159,7 +159,7 @@ _MULTIFRAME_NOTE = (
     "**不接受 ratio**（画幅由第一张图推断）。"
     "**单价从未实测**：提交必带一条「估不出」的 warning，低积分估算对它不可用"
     "（服务端不瞎编价格），真实消耗等 success 后看 credit_count；"
-    "余额连最便宜一镜都不够时**照旧 409 硬拦**。"
+    "余额低于提交下限时**照旧 409 硬拦**。"
     "**入参回显看 GET 的 `transitions`**（逐段原话，[{prompt, duration}]）——"
     "库里那条行的 prompt / duration 是服务端为台账合成的派生值（各段连起来 / 各段之和），"
     "本来就不在对外视图里，别去别处找你的原话。"
@@ -207,7 +207,7 @@ MANIFEST_ENTRIES = [
                   "长式传了 prompt 或 duration、duration 越界，**含「非 2.5 模型传了 >15s」**）；"
                   "400=参考素材下载失败 / 不是图片 / 不是视频容器 / **参考视频时长越界**"
                   "（**多份里坏一份即整镜失败**）；"
-                  "409=积分不足以再提交任何一镜；"
+                  "409=积分余额低于提交下限（保守线，具体数值见响应体）；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
         "notes": _MODEL_NOTE + " " + _ESTIMATE_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
                  + " " + _POLL_NOTE
@@ -258,7 +258,7 @@ MANIFEST_ENTRIES = [
                    "estimated_credits(整批新增预估合计；**批内有估不出的镜时为 null**), "
                    "estimated_credits_per_shot[](与 shots 等长同序，逐镜；不新提交的镜为 0、"
                    "估不出的为 null), warning?}",
-        "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜，"
+        "errors": "422=结构校验失败或镜数越界；409=积分余额低于提交下限（保守线，具体数值见响应体），"
                   "**或整批预估超 max_credits**，**或批内含无法估价的镜致护栏无法执行**；"
                   "503=即梦登录态失效；401=apikey 无效",
         "notes": _MODEL_NOTE + " " + _ESTIMATE_NOTE
@@ -704,12 +704,16 @@ async def _require_login() -> dict:
 
 
 def _guard_credit(credit: int | None) -> None:
-    """余额连最便宜一镜（5s fast = 25）都不够才 409；其余一律放行给 warning。"""
+    """余额低于 ``MIN_CLIP_CREDIT`` 才 409；其余一律放行给 warning。
+
+    那是条**保守线**（25 = 5s fast 的价），不是精确的「最便宜一镜」——按秒计价后理论最低是
+    4s fast = 20，故 [20, 25) 会被多拦一次，见 ``MIN_CLIP_CREDIT`` 的注释。
+    """
     if credit is not None and credit < dreamina.MIN_CLIP_CREDIT:
         raise HTTPException(
             409,
-            f"即梦积分余额 {credit} 不足以再提交任何一镜（最低一镜约 "
-            f"{dreamina.MIN_CLIP_CREDIT} 积分），请先充值",
+            f"即梦积分余额 {credit} 低于提交下限 {dreamina.MIN_CLIP_CREDIT} 积分"
+            "（保守线，见服务端 MIN_CLIP_CREDIT），请先充值",
         )
 
 
