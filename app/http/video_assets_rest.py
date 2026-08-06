@@ -30,7 +30,7 @@ from app.services import video_assets
 
 router = APIRouter()
 
-# ── /uploads/assets 直链的防路径穿越白名单（形态与 dreamina_rest 同款）─────────
+# ── /uploads/video-assets 直链的防路径穿越白名单（形态与 dreamina_rest 同款）──
 # 目录段 = {asset_id}-{hmac16}（services.video_assets.asset_token_dir）；文件名恒定。
 _TOKEN_DIR_RE = re.compile(r"^va_[0-9a-f]{10}-[0-9a-f]{16}$")
 _NAME_RE = re.compile(r"^asset\.mp4$")
@@ -73,7 +73,12 @@ MANIFEST_ENTRIES = [
                    "created_by, created_at}",
         "errors": "403=资产不归你;404=资产不存在",
         "notes": "video_url 是免鉴权公网直链(相对路径,拼 manifest 的 base_url 即得完整链),"
-                 "**不过期**——除非你自己 DELETE。可直接下载复用,或作后续生成的参考输入。",
+                 "**不过期**——除非你自己 DELETE。可直接下载复用。"
+                 "**今天还不能直接塞进 POST /api/video-clips 的 images[]**:那条参数只收图片"
+                 "(有魔数白名单,mp4 一律 4xx),这是安全闸不会为资产库放宽。要拿资产当参考,"
+                 "现在走 GET /api/video-clips/{clip_id}/frame 从**尚未过期的源片段**抽一张 "
+                 "png 再进 images[](注意那张 png 落在 clip 工作目录,跟着 clip 的 TTL 走);"
+                 "等即梦 multimodal2video 的 videos[] 开放后本直链可直接当视频参考输入。",
     },
     {
         "method": "DELETE", "path": "/api/video-assets/{asset_id}",
@@ -146,7 +151,7 @@ async def delete_video_asset(asset_id: str) -> dict:
     return {"ok": True}
 
 
-@router.get("/uploads/assets/{token_dir}/{name}")
+@router.get("/uploads/video-assets/{token_dir}/{name}")
 async def serve_asset_product(token_dir: str, name: str) -> FileResponse:
     """取回资产副本 MP4（白名单免鉴权：HMAC token 目录即访问控制，与 clip 产物同款）。
 
@@ -156,7 +161,7 @@ async def serve_asset_product(token_dir: str, name: str) -> FileResponse:
     """
     if not _TOKEN_DIR_RE.fullmatch(token_dir) or not _NAME_RE.fullmatch(name):
         raise HTTPException(status_code=404, detail="资源不存在")
-    root = (Path(settings.DATA_DIR) / "uploads" / "assets").resolve()
+    root = (Path(settings.DATA_DIR) / "uploads" / "video-assets").resolve()
     file_path = (root / token_dir / name).resolve()
     if not file_path.is_relative_to(root) or not file_path.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")

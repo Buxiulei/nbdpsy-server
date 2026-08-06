@@ -6,6 +6,7 @@
 
 import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -74,6 +75,61 @@ async def test_stored_asset_survives_source_clip_deletion(tmp_path, monkeypatch)
         assert detail.json()["source_clip_id"] == clip_id
 
 
+async def test_asset_dir_survives_clip_reaper_orphan_sweep(tmp_path, monkeypatch):
+    """资产目录必须落在 ClipReaper 的射程之外——这是本模块最容易被静默误杀的一条。
+
+    ``dreamina.reap_clips_once`` 第三类清理会把 ``uploads/clips/`` 下「没有对应 video_clips
+    行、且 mtime 超龄」的目录当孤儿 rmtree。资产副本正中这个判据：真放进去，存够 TTL 天
+    就无声消失。这里把资产目录的 mtime 调到远古再真跑一轮 reaper，钉死它不被扫到。
+    """
+    import os
+    import time
+
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        op_key = "op-assets-reaper"
+        op_id = await make_operator(op_key)
+        clip_id = await _seed_done_clip(op_id)
+        asset = (await client.post("/api/video-assets",
+                                   json={"clip_id": clip_id, "name": "别删我"},
+                                   headers=bearer(op_key))).json()
+        adir = video_assets.assets_root() / video_assets.asset_token_dir(asset["asset_id"])
+        assert not adir.is_relative_to(dreamina.clips_root()), "资产目录不得落在 clips 树下"
+
+        ancient = time.time() - settings.CLIP_TTL_DAYS * 86400 * 10
+        os.utime(adir, (ancient, ancient))
+        os.utime(video_assets.assets_root(), (ancient, ancient))
+
+        await dreamina.reap_clips_once(db_module.async_session)
+
+        assert (adir / video_assets.ASSET_FILE_NAME).is_file(), "资产副本被 ClipReaper 误杀"
+        assert (await client.get(asset["video_url"])).status_code == 200
+
+
+async def test_truncated_copy_rolls_back(tmp_path, monkeypatch):
+    """拷贝只落了半截（与 reaper 的竞态）→ 400 且不留资产行、不留半截目录。"""
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        op_key = "op-assets-truncated"
+        op_id = await make_operator(op_key)
+        clip_id = await _seed_done_clip(op_id, content=b"x" * 4096)
+
+        def _half_copy(src, dst, **kwargs):
+            Path(dst).write_bytes(Path(src).read_bytes()[:100])
+            return dst
+
+        monkeypatch.setattr(video_assets.shutil, "copy2", _half_copy)
+        r = await client.post("/api/video-assets",
+                              json={"clip_id": clip_id, "name": "半截"},
+                              headers=bearer(op_key))
+        assert r.status_code == 400
+        assert "不完整" in r.json()["error"]
+        assert (await client.get("/api/video-assets",
+                                 headers=bearer(op_key))).json()["assets"] == []
+        root = video_assets.assets_root()
+        assert not root.exists() or not any(root.iterdir()), "半截目录必须回滚干净"
+
+
 async def test_direct_link_rejects_wrong_token_and_traversal(tmp_path, monkeypatch):
     """直链的访问控制就是不可猜的 HMAC 目录名：token 错 / 文件名不在白名单一律 404。"""
     monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
@@ -88,11 +144,11 @@ async def test_direct_link_rejects_wrong_token_and_traversal(tmp_path, monkeypat
         token_dir = video_assets.asset_token_dir(asset_id)
 
         wrong = f"{asset_id}-" + "0" * 16
-        assert (await client.get(f"/uploads/assets/{wrong}/asset.mp4")).status_code == 404
+        assert (await client.get(f"/uploads/video-assets/{wrong}/asset.mp4")).status_code == 404
         assert (await client.get(
-            f"/uploads/assets/{token_dir}/asset.mp4.bak")).status_code == 404
+            f"/uploads/video-assets/{token_dir}/asset.mp4.bak")).status_code == 404
         assert (await client.get(
-            f"/uploads/assets/{token_dir}/../../t.db")).status_code == 404
+            f"/uploads/video-assets/{token_dir}/../../t.db")).status_code == 404
 
 
 # ── 转存失败：源不可用 ───────────────────────────────────────────────────────

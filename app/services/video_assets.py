@@ -4,12 +4,18 @@
 ``services/content_archive``（媒体独立副本落 ``uploads`` 下复用免鉴权直链路由）与
 ``services/dreamina``（HMAC token 目录名即访问控制），不另起炉灶：
 
-- 文件落 ``DATA_DIR/uploads/assets/{asset_id}-{hmac16}/asset.mp4``。落在 ``uploads`` 下
-  即被免鉴权 ``/uploads`` 路由暴露，故父段用 SECRET_KEY 派生的 HMAC token——攻击者无
+- 文件落 ``DATA_DIR/uploads/video-assets/{asset_id}-{hmac16}/asset.mp4``。落在 ``uploads``
+  下即被免鉴权 ``/uploads`` 路由暴露，故父段用 SECRET_KEY 派生的 HMAC token——攻击者无
   key 无法由 asset_id 枚举他人素材。
-- **不被任何清理机制覆盖**：uploads 的 7 天懒清理只删有 ``UploadBatch`` 行的批次目录
-  （``upload_service.sweep_expired``），ClipReaper 的孤儿扫描只遍历 ``uploads/clips/``。
-  资产目录两者都不沾——这正是 content_archive 当初规避 7 天清理的同一手法。
+- **绝不能落在 ``uploads/clips/`` 下**：``dreamina.reap_clips_once`` 的第三类清理会把
+  该目录下「没有对应 video_clips 行且 mtime 超龄」的目录当孤儿 ``rmtree`` —— 资产副本
+  正中这个判据，放进去等于存够 TTL 天数就被**静默**删掉，比不做资产库还糟。
+- **同时也不被 uploads 的 7 天懒清理覆盖**：``upload_service.sweep_expired`` 是按
+  ``UploadBatch`` 行驱动删 ``uploads/{batch_id}``，不扫全目录，本位置不在其射程——
+  这正是 content_archive 当初规避 7 天清理的同一手法。
+- 位置留在 ``uploads`` 根下还有一层用处：``dreamina._uploads_local_file`` 收 uploads 根下
+  任意文件做本地短路，等 ``videos[]`` 开放后资产直链能直接当参考输入，**不用改
+  dreamina.py 的参考解析**。
 - 生命周期只有一条出口：运营显式 ``DELETE``（行 + 目录一起删）。**不设 TTL**。
 
 归属规则与 ``dreamina_rest._can_access`` 逐字同义：admin 全见，其余仅本人 ``created_by``。
@@ -58,9 +64,12 @@ def asset_token_dir(asset_id: str) -> str:
 
 
 def assets_root() -> Path:
-    """资产根：``DATA_DIR/uploads/assets``。请求时读 settings（不在 import 期绑定），
-    使测试对 DATA_DIR 的 monkeypatch 生效，与 dreamina.clips_root 同惯例。"""
-    return (Path(settings.DATA_DIR) / "uploads" / "assets").resolve()
+    """资产根：``DATA_DIR/uploads/video-assets``。请求时读 settings（不在 import 期绑定），
+    使测试对 DATA_DIR 的 monkeypatch 生效，与 dreamina.clips_root 同惯例。
+
+    **与 ``uploads/clips`` 平级而非其子目录**——理由见模块 docstring 第二条（ClipReaper
+    的孤儿清理只认自己那棵树，放进去会被静默误杀）。"""
+    return (Path(settings.DATA_DIR) / "uploads" / "video-assets").resolve()
 
 
 def asset_dir(asset_id: str) -> Path:
@@ -72,7 +81,7 @@ def asset_dir(asset_id: str) -> Path:
 
 def asset_public_url(asset_id: str) -> str:
     """免鉴权直链相对路径（与 clip 的 video_url 同形，调用方拼 base_url 即得公网链）。"""
-    return f"/uploads/assets/{asset_token_dir(asset_id)}/{ASSET_FILE_NAME}"
+    return f"/uploads/video-assets/{asset_token_dir(asset_id)}/{ASSET_FILE_NAME}"
 
 
 def _can_access(row: VideoAsset, op: Operator) -> bool:
@@ -140,9 +149,22 @@ async def store_clip(session, op: Operator, *, clip_id: str, name: str,
             f"{settings.CLIP_TTL_DAYS} 天），无法转存"
         )
 
+    expected = src.stat().st_size
     asset_id = new_asset_id()
     dest = asset_dir(asset_id) / ASSET_FILE_NAME
-    shutil.copy2(src, dest)                     # 独立副本：源 clip 到期被删也不影响
+    try:
+        shutil.copy2(src, dest)                 # 独立副本：源 clip 到期被删也不影响
+        copied = dest.stat().st_size
+    except OSError as exc:
+        # 与 ClipReaper 有微小竞态（拷到一半源目录被 rmtree），落盘异常也归这里。
+        # 一律当「源不可用」回 400，**不留半截目录、更不留资产行**。
+        shutil.rmtree(assets_root() / asset_token_dir(asset_id), ignore_errors=True)
+        raise ValueError(f"片段 {clip_id} 的产物拷贝失败（可能正被 TTL 清理）：{exc}") from exc
+    if copied != expected or copied == 0:
+        # 拷完 verify：竞态下 copy2 可能只落了半截而不报错，半截 mp4 是最难查的假资产
+        shutil.rmtree(assets_root() / asset_token_dir(asset_id), ignore_errors=True)
+        raise ValueError(
+            f"片段 {clip_id} 的产物拷贝不完整（{copied}/{expected} 字节），已回滚")
     try:
         row = VideoAsset(
             asset_id=asset_id,
@@ -153,7 +175,7 @@ async def store_clip(session, op: Operator, *, clip_id: str, name: str,
             source_model=clip.model,
             source_prompt=clip.prompt,
             duration=clip.duration,
-            size_bytes=dest.stat().st_size,
+            size_bytes=copied,
             created_by=op.id,
             created_at=datetime.utcnow(),
         )
