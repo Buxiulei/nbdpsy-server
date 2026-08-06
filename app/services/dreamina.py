@@ -35,7 +35,6 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import math
 import os
 import re
 import secrets
@@ -122,14 +121,19 @@ MULTIFRAME_DEFAULT_SEGMENT = 3.0
 MULTIFRAME_MODEL_PLACEHOLDER = "platform_fixed"
 
 # 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
-# seedance2.5 = 130，**三次独立生产实测一致，线性折算成立**（credit_count 与余额扣减逐次对账）：
+# seedance2.5 = 130/5s = **26/秒，按秒线性**（credit_count 与余额扣减逐次对账）：
 #   - 2026-08-05 vc_3e1260f8ce  5s  → 130
 #   - 2026-08-06 vc_9090b4f40b  10s → 260
 #   - 2026-08-06 vc_5d0ec24ff7  10s → 260
+#   - 2026-08-06 vc_0cf759e417  4s  → **104**（= 26×4）
+# 前三条是 5 的整数倍，「按秒」与「按 5s 档取整」在这些点同值、分不出高下；**4s=104 是判别
+# 点**：按档取整会算 130，与实扣差 26。故估算按秒线性（见 estimate_credit）。
 # **seedance2.0mini / seedance2.0 / seedance2.0_vip 仍不编价**（从未实测）；
 # multiframe2video 恒不估（模型由平台下发，本表不适用，见 estimate_credit）。
 _PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55, "seedance2.5": 130}
-# 已知最便宜的一镜（5s fast）。余额低于它 = 连一镜都提交不起 → 409。
+# 提交闸的下限（5s fast 的价）。改按秒后**最便宜的一镜其实是 4s fast = 20**，这条线因而是
+# 保守的：余额落在 [20, 25) 时其实还能提一镜 4s fast，却会被 409 挡。阈值维持 25 不动——它是
+# 破产线不是预算线，且下调会放宽一道拦截闸，不在本次修公式的范围内（待运营确认后再调）。
 MIN_CLIP_CREDIT = 25
 
 # 首次用某模型可能返回它：需人到 Dreamina 网页端做一次性授权（账号级），服务端重试无意义。
@@ -415,7 +419,7 @@ def max_ref_video_seconds(model: str) -> float:
 
 
 def estimate_credit(model: str, duration: int, operation: str | None = None) -> int | None:
-    """按 5s 档粗估一镜积分；未知模型返回 None（不估、不给 warning）。
+    """按秒线性估一镜积分；未知模型返回 None（不估、不给 warning）。
 
     只用于**提示**：扣费 success 才结算、排队中还有变数，所以低余额一律 warning 不拦截
     （需求第四节第 5 条）。真正拦截只有一种情况——余额连最便宜一镜都不够。
@@ -429,7 +433,10 @@ def estimate_credit(model: str, duration: int, operation: str | None = None) -> 
     unit = _PRICE_PER_5S.get(model)
     if unit is None:
         return None
-    return unit * max(1, math.ceil(duration / 5))
+    # **按秒线性，不按 5s 档向上取整**：生产 vc_0cf759e417（2.5 / 4s）实扣 104 = 26×4，
+    # 而按档取整会算 130 —— 平台是按秒计的。三档 5s 单价都能被 5 整除（25/55/130 →
+    # 每秒 5/11/26），先整除再乘保证结果恒为整数、不引入浮点误差。
+    return duration * (unit // 5)
 
 
 def price_per_5s(model: str) -> int | None:

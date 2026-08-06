@@ -117,14 +117,21 @@ async def test_credit_status_missing_credit_field_means_logged_out(monkeypatch):
     assert (await dreamina.get_credit_status())["logged_in"] is False
 
 
-def test_estimate_credit_by_five_second_tier():
+def test_estimate_credit_is_linear_per_second():
+    # 原断言写的是 4s==25、8s==50（「不足一档按一档」/ ceil(8/5)=2），那是把**块状取整**
+    # 当成了正确行为；生产 vc_0cf759e417（2.5 / 4s）实扣 104 = 26×4 已证伪它——平台按秒计。
+    # 故这两条改成按秒的 20 / 40，它们同时是能区分两种公式的判别点。
     assert dreamina.estimate_credit("seedance2.0fast", 5) == 25
-    assert dreamina.estimate_credit("seedance2.0fast", 4) == 25      # 不足一档按一档
-    assert dreamina.estimate_credit("seedance2.0fast", 8) == 50      # ceil(8/5)=2
+    assert dreamina.estimate_credit("seedance2.0fast", 4) == 20       # 块状会算 25
+    assert dreamina.estimate_credit("seedance2.0fast", 8) == 40       # 块状会算 50
     assert dreamina.estimate_credit("seedance2.0fast_vip", 5) == 55
-    # seedance2.5 已实测：130/5s（2026-08-05 生产 vc_3e1260f8ce 对账精确）。
+    # seedance2.5 = 26/秒。4s / 7s / 29s 是判别点（块状分别算 130 / 182→260 / 780）。
+    assert dreamina.estimate_credit("seedance2.5", 4) == 104          # 实测点 vc_0cf759e417
+    assert dreamina.estimate_credit("seedance2.5", 7) == 182          # 块状会算 260
+    assert dreamina.estimate_credit("seedance2.5", 29) == 754         # 块状会算 780
+    # 5 的整数倍处两种公式同值，保留但没有判别力。
     assert dreamina.estimate_credit("seedance2.5", 5) == 130
-    assert dreamina.estimate_credit("seedance2.5", 30) == 780     # ceil(30/5)=6 档
+    assert dreamina.estimate_credit("seedance2.5", 30) == 780
     # 无实测价的档一律不估、不给 warning（宁可不提示也不瞎猜）。
     assert dreamina.estimate_credit("seedance2.0", 5) is None
     assert dreamina.estimate_credit("seedance2.0mini", 5) is None
@@ -691,13 +698,14 @@ async def test_compliance_models_exclude_multiframe_rows(db_factory):
         assert await dreamina.compliance_confirmed_models(s) == ["seedance2.0fast_vip"]
 
 
-# ── 单价表：三次实测互证的 seedance2.5 线性折算 ─────────────────────────────
+# ── 单价表：四次实测互证的 seedance2.5 按秒线性 ─────────────────────────────
 def test_seedance25_price_is_linear_across_measured_durations():
-    """2.5 = 130/5s，**三次独立生产实测互证**（vc_3e1260f8ce 5s=130、vc_9090b4f40b 10s=260、
-    vc_5d0ec24ff7 10s=260），因此按 5s 档线性折算成立。
+    """2.5 = 26/秒，**四次独立生产实测互证**（vc_0cf759e417 4s=104、vc_3e1260f8ce 5s=130、
+    vc_9090b4f40b 10s=260、vc_5d0ec24ff7 10s=260），故按**秒**线性、不按 5s 档取整。
 
     这条锁的是「默认档必须能估价」：2.5 是双端默认档，它估不出等于估算表对绝大多数提交无效。
     """
+    assert dreamina.estimate_credit("seedance2.5", 4) == 104     # 判别点：块状会算 130
     assert dreamina.estimate_credit("seedance2.5", 5) == 130
     assert dreamina.estimate_credit("seedance2.5", 10) == 260
     assert dreamina.estimate_credit("seedance2.5", 30) == 780

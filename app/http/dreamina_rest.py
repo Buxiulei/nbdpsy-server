@@ -82,11 +82,15 @@ def _price_note() -> str:
     手写那版在 seedance2.5 回填实测价之后整整落后了一版（还挂着「2.5 未实测故不估」），
     而 2.5 是双端默认档——运营照这段文案做预算、并据此提了缺口。文档与表同源就没有第二次。
     """
-    priced = "、".join(f"{m}={dreamina.price_per_5s(m)}" for m in dreamina.priced_models())
+    priced = "、".join(
+        f"{m}={dreamina.price_per_5s(m)}（每秒 {dreamina.price_per_5s(m) // 5}）"
+        for m in dreamina.priced_models())
     unpriced = "、".join(m for m in get_args(_MODELS) if dreamina.price_per_5s(m) is None)
     return (
-        f"**积分估算 = 该档 5s/720p 实测单价 × 时长（按 5s 档向上取整）线性折算**。"
-        f"有实测价的档：{priced}（seedance2.5=130 由三次生产实测互证：5s=130、10s=260×2）。"
+        f"**积分估算 = 每秒单价 × 时长秒数，按秒线性、不按 5s 档向上取整**"
+        f"（4s 的 2.5 估 104 而非 130）。"
+        f"有实测价的档（5s/720p 实测价，每秒 = 它 ÷5）：{priced}；"
+        f"seedance2.5 由四次生产实测互证：4s=104、5s=130、10s=260×2。"
         f"**未实测故不估的档：{unpriced}**——用这些档提交时 estimated_credits 为 null、"
         "也不会带低积分 warning，那是「估不出」不是「余额充足」。"
         "**multiframe2video 恒不估**（模型由平台下发，本表不适用）。"
@@ -767,7 +771,7 @@ def _guard_max_credits(max_credits: int | None,
             409,
             f"本批预估消耗 {total} 积分，超过预算上限 max_credits={max_credits}："
             "整批已拒绝，一镜未创建、未提交、未扣分。"
-            "预估按各档 5s 实测单价×时长线性折算，**实际扣分以 success 后的 credit_count "
+            "预估按各档每秒单价×时长秒数（按秒线性），**实际扣分以 success 后的 credit_count "
             "为准**；请下调镜数/时长、或确认后提高 max_credits 重发。",
         )
 
@@ -776,7 +780,7 @@ def _low_credit_warning(credit: int | None, estimate: int | None) -> str | None:
     """低积分提示（不拦截：扣费 success 才结算，排队中还有变数）。"""
     if credit is None or not estimate or credit >= estimate:
         return None
-    return (f"积分余额 {credit} 低于本次粗估消耗 {estimate}（按 5s 档价×时长粗估），"
+    return (f"积分余额 {credit} 低于本次粗估消耗 {estimate}（按每秒单价×时长秒数粗估），"
             "已照常入队；扣费在 success 时才结算，余额不足的镜可能失败")
 
 

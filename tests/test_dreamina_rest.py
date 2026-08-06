@@ -1304,7 +1304,7 @@ async def test_non_multiframe_clip_has_null_transitions(tmp_path, monkeypatch):
 
 # ── 预估费用回显（estimated_credits）─────────────────────────────────────────
 async def test_single_clip_returns_estimated_credits(tmp_path, monkeypatch):
-    """提交前就能知道这一镜大概烧多少：默认档 2.5 按 130/5s 线性折算。"""
+    """提交前就能知道这一镜大概烧多少：默认档 2.5 按 26/秒线性折算。"""
     _stub_credit(monkeypatch)
     async with rest_client(tmp_path, monkeypatch) as client:
         h = bearer(ADMIN_KEY)
@@ -1349,12 +1349,12 @@ async def test_batch_returns_total_and_per_shot_estimates(tmp_path, monkeypatch)
         r = await client.post("/api/video-clip-batches", json={"shots": [
             _shot(model="seedance2.5", duration=10),      # 260
             _shot(model="seedance2.0fast", duration=5),   # 25
-            _shot(model="seedance2.0fast_vip", duration=8),  # ceil(8/5)=2 档 × 55
+            _shot(model="seedance2.0fast_vip", duration=8),  # 8s × 11/秒 = 88（块状会算 110）
         ]}, headers=bearer(ADMIN_KEY))
         assert r.status_code == 202, r.text
         body = r.json()
-        assert body["estimated_credits_per_shot"] == [260, 25, 110]
-        assert body["estimated_credits"] == 395
+        assert body["estimated_credits_per_shot"] == [260, 25, 88]
+        assert body["estimated_credits"] == 373
         assert len(body["estimated_credits_per_shot"]) == len(body["clip_ids"])
 
 
@@ -1489,6 +1489,40 @@ async def test_max_credits_ignores_pure_replay(tmp_path, monkeypatch):
         assert again.status_code == 202, again.text
         assert again.json()["estimated_credits"] == 0
         assert await _clip_count() == 1
+
+
+async def test_max_credits_counts_revived_shot_and_leaves_it_dead(tmp_path, monkeypatch):
+    """回归锁：**会被复活的 error 镜要计入护栏**，且超预算时那一镜不许被复活。
+
+    复活 = 重物化参考图 + 把行改回 queued，也就是「这一镜这次真会去提交、真会扣分」。
+    闸若挪到 ``_revive_clips`` 之后，这批会先把行复活成 queued 再报 409——运营看到整批被拒
+    却有一镜已在队里烧分，正是护栏承诺的「一镜未创建、未提交、未扣分」的反面。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        shots = [_shot(operation="image2video", ratio=None, prompt="镜1",
+                       image="/uploads/rev-guard/01.png", model="seedance2.5",
+                       duration=10, client_ref="guard-revive")]
+        first = await client.post("/api/video-clip-batches", json={"shots": shots}, headers=h)
+        assert first.status_code == 202, first.text
+        clip_id = first.json()["clip_ids"][0]
+        assert (await client.get(f"/api/video-clips/{clip_id}",
+                                 headers=h)).json()["status"] == "error"
+
+        # 图源修好了：这次重放本会复活并真去提交（10s×26 = 260），但预算只给 259。
+        (tmp_path / "uploads" / "rev-guard").mkdir(parents=True)
+        (tmp_path / "uploads" / "rev-guard" / "01.png").write_bytes(_PNG)
+        again = await client.post("/api/video-clip-batches",
+                                  json={"shots": shots, "max_credits": 259}, headers=h)
+
+        assert again.status_code == 409, again.text
+        assert "260" in again.text and "259" in again.text
+        assert await _clip_count() == 1
+        async with db_module.async_session() as s:
+            clip = (await s.execute(select(VideoClip))).scalars().one()
+        assert clip.status == "error", "超预算被拒的批次不许把 error 行复活回 queued"
 
 
 # ── 段尾帧提取 ──────────────────────────────────────────────────────────────
