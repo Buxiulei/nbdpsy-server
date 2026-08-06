@@ -1600,3 +1600,264 @@ async def test_frame_respects_ownership(tmp_path, monkeypatch):
         await make_operator("other-key")
         r = await client.get(f"/api/video-clips/{clip_id}/frame", headers=bearer("other-key"))
         assert r.status_code == 403, r.text
+
+
+# ── 参考视频 videos（CLI 的 --video 输入面）──────────────────────────────────
+# ISO BMFF：4-8 字节是 ftyp。测试用的是**形态合法但解不出时长**的假容器，故 ffprobe 探不出
+# → 时长闸放行（与线上「探不出不拦」的纪律一致），要测时长闸的用例单独 stub probe_duration。
+_MP4 = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32
+
+
+def _seed_video_uploads(tmp_path, count: int, folder: str = "vids") -> list[str]:
+    """在本服务图床里放 count 条假 MP4，返回 /uploads 路径（顺序即返回序，内容各带序号）。"""
+    d = tmp_path / "uploads" / folder
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(count):
+        (d / f"{i:02d}.mp4").write_bytes(_MP4 + str(i).encode())
+        out.append(f"/uploads/{folder}/{i:02d}.mp4")
+    return out
+
+
+async def test_reference_videos_reach_cli_as_repeated_video_flags(tmp_path, monkeypatch):
+    """参考视频物化成独立副本，CLI 收到逐条 ``--video``，与 ``--image`` 并存且排在其后。
+
+    这条能力开的是「上一部片里成立的运镜 / 风格，当下一部片的参考」——CLI 的 --video 一直
+    都在，此前是本服务没透传。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2)
+    videos = _seed_video_uploads(tmp_path, 2)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       images=images, videos=videos),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    vpaths = dreamina.ref_video_paths(clip)
+    assert len(vpaths) == 2 and len(set(vpaths)) == 2, "两条要是两个独立副本，不能互相覆盖"
+    for p in vpaths:
+        assert Path(p).is_file() and dreamina.clip_token_dir(clip.clip_id) in p
+    # 图床里的源被清掉后副本仍在（复制不是引用）
+    (tmp_path / "uploads" / "vids" / "00.mp4").unlink()
+    assert Path(vpaths[0]).is_file()
+
+    args = dreamina.build_submit_args(clip)
+    assert [a for a in args if a.startswith("--video=")] == [f"--video={p}" for p in vpaths]
+    assert [a for a in args if a.startswith("--image=")], "参考图与参考视频要并存"
+    assert args.index(f"--video={vpaths[0]}") > max(
+        i for i, a in enumerate(args) if a.startswith("--image="))
+
+
+async def test_reference_video_order_is_preserved_exactly(tmp_path, monkeypatch):
+    """**数组顺序 = @视频N 编号顺序**，逐位比对到内容；同一 URL 传两次照样物化两份。
+
+    与多图同一条纪律：顺序错乱 / 去重合并都不会报错，只会默默出错片——prompt 里
+    「@视频1 取运镜、@视频2 取调色」全靠位置绑定。这条锁防的正是将来有人为省一次下载
+    做「相同 URL 只物化一次」的优化。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 3, folder="ordered_vids")
+    # 顺序 2,0,0,1：既打乱又含重复，一次锁住「不重排 + 不去重」
+    given = [videos[2], videos[0], videos[0], videos[1]]
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       videos=given),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_video_paths(clip)
+    assert len(paths) == 4, "同一 URL 传两次必须物化两份，绝不合并"
+    assert len(set(paths)) == 4, "四份副本要有四个独立文件名"
+    for i, expect in enumerate([2, 0, 0, 1]):
+        assert Path(paths[i]).read_bytes() == _MP4 + str(expect).encode(), f"第 {i + 1} 条错位"
+    flags = [a for a in dreamina.build_submit_args(clip) if a.startswith("--video=")]
+    assert flags == [f"--video={p}" for p in paths], "CLI 参数顺序必须与数组顺序逐位一致"
+
+
+async def test_ref_video_count_ceiling_is_per_model(tmp_path, monkeypatch):
+    """条数上限按模型分档（2.5≤10 / 2.0 家族≤3），超限**当场 422**、不留任何行。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 11)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        over25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       videos=videos),
+            headers=h)
+        assert over25.status_code == 422, over25.text
+
+        over20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       videos=videos[:4]),
+            headers=h)
+        assert over20.status_code == 422, over20.text
+        assert "3" in over20.text, "文案要说清 2.0 家族的档位，不能只报一个光秃秃的越界"
+
+        ok20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       videos=videos[:3]),
+            headers=h)
+        assert ok20.status_code == 202, ok20.text
+        ok25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       videos=videos[:10]),
+            headers=h)
+        assert ok25.status_code == 202, ok25.text
+    assert await _clip_count() == 2, "两条 422 都不许留下任务行"
+
+
+async def test_videos_only_belong_to_multimodal(tmp_path, monkeypatch):
+    """``videos`` 用在别的 operation 一律 422：那些子命令没有 --video，收下也送不出去。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2)
+    videos = _seed_video_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        for payload in (
+            _shot(videos=videos),                                   # text2video
+            _shot(operation="image2video", ratio=None, image=images[0], videos=videos),
+            _shot(operation="frames2video", ratio=None, first_image=images[0],
+                  last_image=images[1], videos=videos),
+            {"operation": "multiframe2video", "images": images, "prompt": "两帧",
+             "duration": 5, "videos": videos},
+        ):
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == 422, (payload["operation"], r.text)
+    assert await _clip_count() == 0
+
+
+async def test_videos_alone_satisfy_multimodal_input_requirement(tmp_path, monkeypatch):
+    """纯参考视频（一张图都不给）是合法输入面：CLI 原文 "at least one --image or --video"。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        ok = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", videos=videos), headers=h)
+        assert ok.status_code == 202, ok.text
+        # 三样都不给仍然 422（这条 operation 至少要一份输入）
+        none = await client.post(
+            "/api/video-clips", json=_shot(operation="multimodal2video"), headers=h)
+        assert none.status_code == 422, none.text
+
+    clip = await _only_clip()
+    assert dreamina.ref_paths(clip) == [] and len(dreamina.ref_video_paths(clip)) == 1
+    assert not any(a.startswith("--image=") for a in dreamina.build_submit_args(clip))
+
+
+async def test_bad_video_content_is_4xx_before_any_row(tmp_path, monkeypatch):
+    """内容不是视频容器（PNG 改名成 .mp4）→ 当场 4xx，**不建行**，与坏图同一条通道。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    d = tmp_path / "uploads" / "fake"
+    d.mkdir(parents=True)
+    (d / "not-a-video.mp4").write_bytes(_PNG)      # 后缀对、内容是图
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video",
+                       videos=["/uploads/fake/not-a-video.mp4"]),
+            headers=bearer(ADMIN_KEY))
+    assert r.status_code == 400, r.text
+    assert "不是有效视频容器" in r.text
+    assert await _clip_count() == 0
+
+
+async def test_ref_video_duration_out_of_range_blocks_before_submit(tmp_path, monkeypatch):
+    """时长越界（每条 2-30s / 2.0 家族 2-15s）在**提交前**拦下，省一次白跑与积分。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 1, folder="longvid")
+
+    async def _fake_probe(_path):
+        return 40.0                                # 超过 2.5 的 30s 上限
+
+    monkeypatch.setattr(dreamina, "probe_duration", _fake_probe)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       videos=videos),
+            headers=bearer(ADMIN_KEY))
+    assert r.status_code == 400, r.text
+    assert "越界" in r.text
+    assert await _clip_count() == 0, "越界不许留下要人回头清理的 error 行"
+
+
+async def test_batch_video_failure_does_not_connect_other_shots(tmp_path, monkeypatch):
+    """批量里一镜的参考视频坏了**只让那一镜落 error 行**，其余照常入队（不连坐）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        shots = [
+            _shot(operation="multimodal2video", videos=videos),
+            _shot(operation="multimodal2video", videos=["/uploads/vids/nope.mp4"]),
+            _shot(),                                            # 纯文生视频
+        ]
+        r = await client.post("/api/video-clip-batches", json={"shots": shots},
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert all(r.json()["clip_ids"]), "clip_ids 必须等长同序，坏镜也占位"
+
+    async with db_module.async_session() as s:
+        rows = (await s.execute(
+            select(VideoClip).order_by(VideoClip.batch_index))).scalars().all()
+    assert [row.status for row in rows] == ["queued", "error", "queued"]
+    assert "找不到" in rows[1].error
+    assert len(dreamina.ref_video_paths(rows[0])) == 1
+    assert dreamina.ref_video_paths(rows[2]) == []
+
+
+async def test_videos_do_not_change_pricing_or_budget_guard(tmp_path, monkeypatch):
+    """参考视频**不改变计价**（计价只看 model × duration），预算护栏照常工作。
+
+    钉住这条是因为 videos 与 max_credits 是同期上线的两件事：估算若被新字段带偏，
+    护栏放行/拒绝的判断就全错了。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    videos = _seed_video_uploads(tmp_path, 1)
+    with_videos = _shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                        videos=videos)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        # 单镜：带 videos 的估算与同 model/duration 的纯文生视频一模一样（130）
+        one = await client.post("/api/video-clips", json=with_videos, headers=h)
+        assert one.status_code == 202, one.text
+        assert one.json()["estimated_credits"] == 130
+
+        # 预算刚好够：两镜 260，护栏放行
+        ok = await client.post(
+            "/api/video-clip-batches",
+            json={"shots": [dict(with_videos), dict(with_videos)], "max_credits": 260},
+            headers=h)
+        assert ok.status_code == 202, ok.text
+        assert ok.json()["estimated_credits"] == 260
+        assert ok.json()["estimated_credits_per_shot"] == [130, 130]
+
+        # 差一分就整批拒，且**一镜不建、零物化**
+        before = await _clip_count()
+        over = await client.post(
+            "/api/video-clip-batches",
+            json={"shots": [dict(with_videos), dict(with_videos)], "max_credits": 259},
+            headers=h)
+        assert over.status_code == 409, over.text
+        assert await _clip_count() == before, "护栏拒绝后不许留下半批任务"

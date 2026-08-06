@@ -172,6 +172,9 @@ class Settings(BaseSettings):
     CLIP_MAX_BATCH: int = 50
     # 参考图物化的单张大小上限(MB)
     CLIP_IMAGE_MAX_MB: int = 15
+    # 参考视频物化的单条大小上限(MB)。视频比图片大一到两个量级(2-30s 的 720p 片常在
+    # 10-60MB),共用图片那个 15MB 的闸会把正常参考视频全拒掉,故单列一档。
+    CLIP_VIDEO_MAX_MB: int = 200
 
     # ── 内容资产库(content_archive,设计 2026-07-25-content-archive-design.md)──
     # 发布成功自动归档;取详情即刷新 last_used_at;距最后使用超 TTL 天由 ArchiveReaper 删除。

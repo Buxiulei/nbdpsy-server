@@ -7,6 +7,7 @@ httpx 一律 monkeypatch ``dreamina.httpx``——**绝不真跑 CLI、绝不发�
 
 import asyncio
 import fcntl
+import json
 import os
 import re
 import socket
@@ -782,3 +783,182 @@ async def test_probe_duration_reads_real_length_and_tolerates_garbage(tmp_path):
     junk = tmp_path / "not-a-video.mp4"
     junk.write_bytes(b"nope")
     assert await dreamina.probe_duration(junk) is None
+
+
+# ── 参考视频物化（CLI 的 --video 输入面）────────────────────────────────────
+# ISO BMFF：4-8 字节是 ftyp，随后是 major brand。mov 的 brand 以 "qt" 开头。
+_MP4 = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32
+_MOV = b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 32
+_WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 32
+
+
+def test_video_caps_are_per_model():
+    """条数 / 总输入 / 时长三档全部按模型分档，未知档按 2.0 家族的窄档判。
+
+    CLI help 原文：``seedance2.5 -> image<=30, video<=10, audio<=10, total inputs<=50;
+    each and total video/audio duration 2-30s``；``seedance2.0 family/seedance2.0mini ->
+    image<=9, video<=3, audio<=3, total inputs<=12``（时长 2-15s）。
+    """
+    assert dreamina.max_ref_videos("seedance2.5") == 10
+    assert dreamina.max_total_inputs("seedance2.5") == 50
+    assert dreamina.max_ref_video_seconds("seedance2.5") == 30.0
+    for model in ("seedance2.0", "seedance2.0fast", "seedance2.0fast_vip",
+                  "seedance2.0_vip", "seedance2.0mini", "seedance9.9"):
+        assert dreamina.max_ref_videos(model) == 3
+        assert dreamina.max_total_inputs(model) == 12
+        assert dreamina.max_ref_video_seconds(model) == 15.0
+
+
+def test_total_inputs_cap_is_implied_by_per_kind_caps():
+    """总输入闸（≤50 / ≤12）**不可达**，故 REST 层不单设一道——这条守住那个推导。
+
+    audio 不透传，总输入 = 参考图 + 参考视频；分项上限已把上界钉死在 30+10=40≤50、
+    9+3=12≤12。哪天分项被放宽、或 audio 开了透传，这条立刻红，届时必须回 REST 层补总输入闸
+    （否则「分项都合法、合计超了」的组合会一路放行到 CLI 才被拒，白下一次素材白建一行）。
+    """
+    for model in ("seedance2.5", "seedance2.0fast", "seedance2.0mini", "seedance9.9"):
+        assert (dreamina.max_ref_images(model) + dreamina.max_ref_videos(model)
+                <= dreamina.max_total_inputs(model)), model
+
+
+def test_video_magic_whitelist_is_separate_from_image_whitelist():
+    """视频走**独立**魔数白名单：图片那条是安全闸，绝不为了收视频把它放宽。"""
+    assert dreamina._sniff_video_ext(_MP4) == ".mp4"
+    assert dreamina._sniff_video_ext(_MOV) == ".mov"
+    assert dreamina._sniff_video_ext(_WEBM) == ".webm"
+    for junk in (_PNG, b"<html>404</html>", b"", b"RIFF____AVI "):
+        assert dreamina._sniff_video_ext(junk) is None, junk[:8]
+    # 反向：图片白名单**没有**因此认视频（放宽它等于同时放宽 image2video / 首尾帧 / 多图参考）
+    for video in (_MP4, _MOV, _WEBM):
+        assert dreamina._sniff_ext(video) is None
+
+
+async def test_materialize_ref_video_http_ok(tmp_path, monkeypatch):
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP4[:8], _MP4[8:]]))
+    got = await dreamina.materialize_ref_video("https://cdn.example/a.mp4", tmp_path / "w")
+    assert got.suffix == ".mp4" and got.read_bytes() == _MP4
+
+
+async def test_materialize_ref_video_rejects_non_video_content(tmp_path, monkeypatch):
+    """按内容魔数判容器：PNG / 错误页冒充 .mp4 一律拒收（扩展名不作数）。"""
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_PNG]))
+    with pytest.raises(ValueError, match="不是有效视频容器"):
+        await dreamina.materialize_ref_video("https://cdn.example/fake.mp4", tmp_path / "w")
+
+
+async def test_materialize_ref_image_still_rejects_video_bytes(tmp_path, monkeypatch):
+    """回归锁：**图片白名单一寸没放宽**——mp4 字节喂给参考图通道照旧当场拒收。"""
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP4]))
+    with pytest.raises(ValueError, match="不是有效图片"):
+        await dreamina.materialize_ref_image("https://cdn.example/a.mp4", tmp_path / "w")
+
+
+async def test_materialize_ref_video_from_uploads_makes_independent_copy(tmp_path, monkeypatch):
+    """/uploads 参考视频同样**复制**而非引用（本服务自己的成片直接回传当参考就是这条路）。"""
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    src = tmp_path / "uploads" / "clips" / "vc_x-token"
+    src.mkdir(parents=True)
+    (src / "clip.mp4").write_bytes(_MP4)
+    got = await dreamina.materialize_ref_video(
+        "/uploads/clips/vc_x-token/clip.mp4", tmp_path / "w")
+    assert got.is_file() and got.parent == (tmp_path / "w")
+    (src / "clip.mp4").unlink()                    # 源片被 TTL 清了
+    assert got.read_bytes() == _MP4                # 副本仍在
+
+
+async def test_materialize_ref_video_has_its_own_size_limit(tmp_path, monkeypatch):
+    """视频有独立体积闸：图片那个 15MB 套上来会把正常参考视频全拒掉。"""
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(settings, "CLIP_IMAGE_MAX_MB", 1)
+    monkeypatch.setattr(settings, "CLIP_VIDEO_MAX_MB", 1)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP4 + b"x" * (1024 * 1024)]))
+    with pytest.raises(ValueError, match="参考视频超过 1MB 上限"):
+        await dreamina.materialize_ref_video("https://cdn.example/big.mp4", tmp_path / "w")
+
+
+# ── 参考视频时长前置校验（ffprobe，省一次白跑）───────────────────────────────
+def _stub_probe(monkeypatch, values: dict):
+    """把 ffprobe 换成查表：{路径尾名: 秒数或 None}。"""
+    async def _fake(path):
+        return values[Path(path).name]
+
+    monkeypatch.setattr(dreamina, "probe_duration", _fake)
+
+
+async def test_ref_video_duration_window_is_per_model(monkeypatch):
+    """每条 2-30s（2.0 家族 2-15s）：越界当场给说明，省掉一次必被 CLI 拒的提交。"""
+    _stub_probe(monkeypatch, {"vid.mp4": 20.0})
+    assert await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5") is None
+    over = await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.0fast")
+    assert over and "15" in over and "第 1 条" in over
+
+    _stub_probe(monkeypatch, {"vid.mp4": 1.2})
+    short = await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5")
+    assert short and "越界" in short
+
+
+async def test_ref_video_total_duration_is_also_capped(monkeypatch):
+    """CLI 口径是 "each **and total**"：每条都合规、合计超了照样拦。"""
+    _stub_probe(monkeypatch, {"vid.mp4": 20.0, "vid_2.mp4": 15.0})
+    bad = await dreamina.check_ref_video_durations(
+        ["/w/vid.mp4", "/w/vid_2.mp4"], "seedance2.5")
+    assert bad and "合计" in bad
+
+
+async def test_unprobeable_video_is_not_blocked(monkeypatch):
+    """探不出时长不拦：把「探测器不给力」变成拒绝服务是本末倒置，真越界 CLI 那边还有一道。"""
+    _stub_probe(monkeypatch, {"vid.mp4": None})
+    assert await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5") is None
+    assert await dreamina.check_ref_video_durations([], "seedance2.5") is None
+
+
+# ── 提交参数组装：--video 与 --image 同序拼接 ────────────────────────────────
+def test_build_submit_args_carries_videos_after_images():
+    """multimodal2video 的 --video 逐条一个 flag，**顺序即 @视频N**，排在 --image 之后。"""
+    clip = _clip(operation="multimodal2video", model="seedance2.5", ratio=None,
+                 image_paths_json=json.dumps(["/w/ref.png", "/w/ref_2.png"]),
+                 video_paths_json=json.dumps(["/w/vid.mp4", "/w/vid_2.mp4"]))
+    args = dreamina.build_submit_args(clip)
+    assert [a for a in args if a.startswith("--image=")] == [
+        "--image=/w/ref.png", "--image=/w/ref_2.png"]
+    assert [a for a in args if a.startswith("--video=")] == [
+        "--video=/w/vid.mp4", "--video=/w/vid_2.mp4"]
+    assert args.index("--image=/w/ref_2.png") < args.index("--video=/w/vid.mp4")
+
+
+def test_video_only_multimodal_submits_without_any_image_flag():
+    """纯参考视频（一张图都不给）也是合法输入面，参数里就不该出现 --image。"""
+    clip = _clip(operation="multimodal2video", model="seedance2.5", ratio=None,
+                 video_paths_json=json.dumps(["/w/vid.mp4"]))
+    args = dreamina.build_submit_args(clip)
+    assert not any(a.startswith("--image=") for a in args)
+    assert "--video=/w/vid.mp4" in args
+
+
+def test_ref_video_paths_tolerates_old_rows_and_bad_json():
+    """本列上线前的老行恒空；坏 JSON 也回空——一个坏值不该让已建好的任务永远提交不出去。"""
+    assert dreamina.ref_video_paths(_clip()) == []
+    assert dreamina.ref_video_paths(_clip(video_paths_json="{坏的")) == []
+    assert dreamina.ref_video_paths(_clip(video_paths_json='["/w/vid.mp4"]')) == ["/w/vid.mp4"]
+
+
+async def test_materialize_ref_video_sniffs_local_uploads_too(tmp_path, monkeypatch):
+    """本地 /uploads 来源的**视频也过魔数**：判错的代价是一次真提交、一次真扣分。
+
+    参考图那条路仍按后缀走（本函数抽出来之前就是这样，本次不动它）——图床里的图是上传闸
+    校验过的，而参考视频最可能的误用恰恰是「把一张图当参考视频传进来」。
+    """
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    src = tmp_path / "uploads" / "mixed"
+    src.mkdir(parents=True)
+    (src / "fake.mp4").write_bytes(_PNG)            # 后缀对、内容是图
+    with pytest.raises(ValueError, match="不是有效视频容器"):
+        await dreamina.materialize_ref_video("/uploads/mixed/fake.mp4", tmp_path / "w")
+
+    # 反向：内容对但后缀错的，按**内容**落扩展名（送给 CLI 的副本名不会骗它）
+    (src / "mislabeled.bin").write_bytes(_MOV)
+    got = await dreamina.materialize_ref_video("/uploads/mixed/mislabeled.bin", tmp_path / "w")
+    assert got.suffix == ".mov"

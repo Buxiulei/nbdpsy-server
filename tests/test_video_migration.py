@@ -42,6 +42,28 @@ def _index_names(db_file: str) -> set[str]:
         conn.close()
 
 
+def _column_names(db_file: str, table: str) -> set[str]:
+    conn = sqlite3.connect(db_file)
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    finally:
+        conn.close()
+
+
+def test_video_clips_reference_columns_come_from_migrations(monkeypatch, tmp_path):
+    """加列迁移真的加上了列——``create_all`` 建表不等于加列。
+
+    生产上「PR 合并了但漏跑 alembic upgrade」的结局是缺列 + 静默 500，而缺列本身在
+    create_all 的库上测不出来（那边表是照模型现建的）。这里跑的是**纯迁移链**，
+    列出现与否只取决于迁移文件。
+    """
+    db_file = str(tmp_path / "cols.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    command.upgrade(Config(str(_REPO_ROOT / "alembic.ini")), "head")
+    assert {"image_paths_json", "video_paths_json", "transitions_json"} <= _column_names(
+        db_file, "video_clips")
+
+
 def test_migration_up_creates_and_down_drops(monkeypatch, tmp_path):
     db_file = str(tmp_path / "mig.db")
     monkeypatch.setattr(

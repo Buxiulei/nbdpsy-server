@@ -77,6 +77,12 @@ class VideoClip(Base):
     # ``[首帧, 尾帧]`` 两元素。``image_path`` 的语义**不变**——新行同时写它=第一张，本列上线
     # 前的老行只有它，故读侧一律走 ``dreamina.ref_paths()``：本列优先、回落 image_path。
     image_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
+    # 参考**视频**本地副本路径的 JSON 数组，**顺序即语义**（= prompt 里的 @视频N）。
+    # 仅 multimodal2video 有值（CLI 的 --video 也是 stringArray，2.5 收 10 条 / 2.0 家族收
+    # 3 条，且与参考图合计不超总输入上限）。与图分两列而不是混进 image_paths_json：两者的
+    # 条数闸、时长闸、魔数白名单、提交 flag 全不一样，混一列就得靠猜后缀去分。本列上线前的
+    # 老行恒 NULL，读侧 ``dreamina.ref_video_paths()`` 对 NULL 回空列表，语义与改前一致。
+    video_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
     # multiframe2video 的逐段转场：JSON 数组 ``[{"prompt": str, "duration": float|null}, …]``，
     # **恰好 N-1 段**（N = image_paths_json 的图数），顺序即段序。``duration`` 全为 null 表示
     # 调用方没指定逐段时长，提交时整个 ``--transition-duration`` flag 不出现，由 CLI 按它自己

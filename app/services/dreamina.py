@@ -72,11 +72,33 @@ _DURATION_MAX_BY_MODEL = {"seedance2.5": 30}
 # ``seedance2.5 -> image<=30``；``seedance2.0 family/seedance2.0mini -> image<=9``）。
 # 网上流传的「Seedance 最多 9 张」是 **2.0** 的数字，套到 2.5 上会白砍掉 21 个图槽——
 # 那些槽正是跨镜锁人物一致性（本镜场景图 + 全片人物定妆图 + 关键道具图）要用的。
-# server 侧只支持 --image 一种输入（不接 --video / --audio），故「总输入 ≤50/≤12」的闸
-# 由张数闸自然覆盖，不另设。
 REF_IMAGE_MAX = 30
 _REF_IMAGE_MAX_DEFAULT = 9
 _REF_IMAGE_MAX_BY_MODEL = {"seedance2.5": REF_IMAGE_MAX}
+
+# multimodal2video 的参考**视频**条数上限（CLI help 原文：``seedance2.5 -> video<=10``；
+# ``seedance2.0 family/seedance2.0mini -> video<=3``）。CLI 的 ``--video stringArray``
+# 一直都在，是本服务此前没透传——参考视频的用途是把上一部片里成立的运镜/风格当下一部片的
+# 参考，与参考图各占一路输入面。**audio 仍未透传**（运营未要求，本模块也没有 --audio 的组装）。
+REF_VIDEO_MAX = 10
+_REF_VIDEO_MAX_DEFAULT = 3
+_REF_VIDEO_MAX_BY_MODEL = {"seedance2.5": REF_VIDEO_MAX}
+
+# 总输入上限（CLI help：``total inputs<=50``/``<=12``）。**本服务不为它单设闸**——audio 不
+# 透传，总输入 = 图 + 视频，而分项闸已把上界钉死在 30+10=40≤50、9+3=12≤12，那道闸永远不会响。
+# 常量仍照 CLI 原文留着，由 test_total_inputs_cap_is_implied_by_per_kind_caps 守住这个推导：
+# 分项上限被放宽 / audio 开了透传时它立刻红，提醒补闸。
+TOTAL_INPUTS_MAX = 50
+_TOTAL_INPUTS_MAX_DEFAULT = 12
+_TOTAL_INPUTS_MAX_BY_MODEL = {"seedance2.5": TOTAL_INPUTS_MAX}
+
+# 参考视频的时长窗口（CLI help 原文："each and total video/audio duration 2-30s"，
+# 2.0 家族是 2-15s）。**每条**与**合计**同一个窗口——数字与出片时长上限撞巧一样，但那是
+# 两件事（一个是输入素材有多长，一个是出片有多长），故各存各的表，不互相引用。
+REF_VIDEO_SECONDS_MIN = 2.0
+REF_VIDEO_SECONDS_MAX = 30.0
+_REF_VIDEO_SECONDS_MAX_DEFAULT = 15.0
+_REF_VIDEO_SECONDS_MAX_BY_MODEL = {"seedance2.5": REF_VIDEO_SECONDS_MAX}
 
 # multiframe2video（多图连贯故事）的口径，全部照 CLI help 原文，**与上面几档无关**：
 # "inputs: 2-20 images"、"for N images, the transition count is N-1"、
@@ -377,6 +399,21 @@ def max_ref_images(model: str) -> int:
     return _REF_IMAGE_MAX_BY_MODEL.get(model, _REF_IMAGE_MAX_DEFAULT)
 
 
+def max_ref_videos(model: str) -> int:
+    """该模型 multimodal2video 的参考视频条数上限（未知模型按家族默认 3 判，理由同上）。"""
+    return _REF_VIDEO_MAX_BY_MODEL.get(model, _REF_VIDEO_MAX_DEFAULT)
+
+
+def max_total_inputs(model: str) -> int:
+    """该模型 multimodal2video 的**总输入**上限（本服务口径 = 参考图 + 参考视频）。"""
+    return _TOTAL_INPUTS_MAX_BY_MODEL.get(model, _TOTAL_INPUTS_MAX_DEFAULT)
+
+
+def max_ref_video_seconds(model: str) -> float:
+    """该模型对参考视频的时长上限（每条及合计各自适用；未知模型按家族默认 15s 判）。"""
+    return _REF_VIDEO_SECONDS_MAX_BY_MODEL.get(model, _REF_VIDEO_SECONDS_MAX_DEFAULT)
+
+
 def estimate_credit(model: str, duration: int, operation: str | None = None) -> int | None:
     """按 5s 档粗估一镜积分；未知模型返回 None（不估、不给 warning）。
 
@@ -430,6 +467,25 @@ def _sniff_ext(data: bytes) -> str | None:
     return None
 
 
+def _sniff_video_ext(data: bytes) -> str | None:
+    """按容器魔数判视频扩展名；不是已知容器返回 None。
+
+    **独立于图片白名单**，绝不往 ``_IMAGE_MAGICS`` 里掺视频容器：那条白名单是「这个字节流
+    确实是一张图」的安全闸（挡 HTML 错误页/任意大文件冒充参考图），放宽它等于同时放宽
+    image2video / frames2video / 多图参考的全部入口。
+
+    认两类：ISO BMFF（mp4 / mov / m4v，特征是 4-8 字节的 ``ftyp``，major brand 以 ``qt``
+    开头的是 QuickTime）与 Matroska/WebM（EBML 头 ``1A 45 DF A3``）。**不认 avi 等老容器**
+    ——即梦网页端与 CLI 的实际用法都是 mp4/mov，白名单窄一点的代价是极少见的误拒（调用方
+    转码即可），放宽的代价是把「是不是视频」这道闸糊掉。
+    """
+    if data[4:8] == b"ftyp":
+        return ".mov" if data[8:10] == b"qt" else ".mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return ".webm"
+    return None
+
+
 def _uploads_local_file(path: str) -> Path | None:
     """裸 ``/uploads/...`` 路径 → 本地文件；越界/不存在返回 None。
 
@@ -450,39 +506,49 @@ def _uploads_local_file(path: str) -> Path | None:
 # 慢速滴流的服务端（每 29s 吐一个字节）能把单次下载拖到无限长，故整段再包一层
 # ``asyncio.wait_for``——批量端点「单张最多 30s」的承诺靠的就是这一层。
 _REMOTE_FETCH_TIMEOUT = 30.0
+# 参考视频的那一份预算：同样的 30s 对一条几十 MB 的视频是**够不着的**（30MB 要 1MB/s 才能
+# 在 30s 内拉完），照搬会让体积上限形同虚设——所有正常参考视频都在下载超时上失败。
+# 仍然有硬上限（不是无限等）：批量端点的超时建议按它换算。
+_REMOTE_VIDEO_FETCH_TIMEOUT = 60.0
 
 
 def _assert_public_host(host: str | None) -> None:
-    """拒绝指向内网/环回/链路本地的参考图 URL（SSRF 闸）；不合规抛 ValueError。
+    """拒绝指向内网/环回/链路本地的参考素材 URL（SSRF 闸）；不合规抛 ValueError。
 
-    参考图 URL 由调用方给，服务端会**主动去 GET**——不设闸就是一个任意内网探测器：
+    话术说「参考素材」而不是「参考图」：这道闸同时服务参考图与参考视频两条物化通道。
+
+    参考素材 URL 由调用方给，服务端会**主动去 GET**——不设闸就是一个任意内网探测器：
     ``http://127.0.0.1:8000/api/...``、``http://169.254.169.254/``（云元数据）、
-    ``http://10.x/`` 都会被服务端代为访问，响应内容还会以「不是有效图片」的形式回灌。
+    ``http://10.x/`` 都会被服务端代为访问，响应内容还会以「不是有效图片 / 视频」的形式回灌。
 
     解析出的**每个** A/AAAA 都要合规（多 A 记录里混一条 127.0.0.1 就能绕过只查首条的实现）。
     残留 TOCTOU（这里解析完、httpx 再解析一次，之间 DNS 可能翻脸）不在本闸射程内——
     要堵得把连接固定到已校验的 IP 上，那要接管 httpx 的 transport，代价远超收益。
     """
     if not host:
-        raise ValueError("参考图 URL 缺少主机名")
+        raise ValueError("参考素材 URL 缺少主机名")
     host = host.strip("[]")           # IPv6 字面量在 URL 里带方括号
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
-        raise ValueError(f"参考图域名解析失败（{host}）：{exc}") from exc
+        raise ValueError(f"参考素材域名解析失败（{host}）：{exc}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if (ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             raise ValueError(
-                f"参考图不允许内网地址（{host} 解析到 {ip}）。"
-                "本服务图床的图请直接传裸 /uploads/... 路径，不要传内网 URL"
+                f"参考素材不允许内网地址（{host} 解析到 {ip}）。"
+                "本服务图床的素材请直接传裸 /uploads/... 路径，不要传内网 URL"
             )
 
 
-async def _fetch_remote_image(source: str) -> bytes:
-    """下载远程参考图（限大小 + 每跳过 SSRF 闸）；失败抛 ValueError。"""
-    limit = settings.CLIP_IMAGE_MAX_MB * 1024 * 1024
+async def _fetch_remote(source: str, *, kind: str, limit_mb: int, timeout: float) -> bytes:
+    """下载远程参考素材（限大小 + 每跳过 SSRF 闸）；失败抛 ValueError。
+
+    ``kind`` 只进错误话术（「参考图」/「参考视频」），``limit_mb`` 是该类素材的体积上限
+    ——视频比图片大一到两个量级，共用一个 15MB 的闸会把正常的参考视频全拒掉。
+    """
+    limit = limit_mb * 1024 * 1024
     chunks: list[bytes] = []
     size = 0
 
@@ -496,7 +562,7 @@ async def _fetch_remote_image(source: str) -> bytes:
 
     try:
         async with httpx.AsyncClient(
-            timeout=_REMOTE_FETCH_TIMEOUT, follow_redirects=True,
+            timeout=timeout, follow_redirects=True,
             event_hooks={"request": [_guard_redirect]},
         ) as client:
             async with client.stream("GET", source) as resp:
@@ -504,12 +570,70 @@ async def _fetch_remote_image(source: str) -> bytes:
                 async for chunk in resp.aiter_bytes():
                     size += len(chunk)
                     if size > limit:
-                        raise ValueError(
-                            f"参考图超过 {settings.CLIP_IMAGE_MAX_MB}MB 上限：{source}")
+                        raise ValueError(f"{kind}超过 {limit_mb}MB 上限：{source}")
                     chunks.append(chunk)
     except httpx.HTTPError as exc:
-        raise ValueError(f"参考图下载失败（{source}）：{exc}") from exc
+        raise ValueError(f"{kind}下载失败（{source}）：{exc}") from exc
     return b"".join(chunks)
+
+
+async def _materialize_ref(source: str, workdir: Path, stem: str, *, kind: str,
+                           limit_mb: int, timeout: float, sniff, content_hint: str,
+                           local_ext_default: str, sniff_local: bool = False) -> Path:
+    """参考素材物化的公共实现（参考图 / 参考视频只在白名单、体积上限与话术上不同）。
+
+    两种来源（与 note-components ``add_images`` 同款约定，**不收 base64 大包**——524 教训），
+    **判据是 scheme 而不是 path 形状**：
+    - ``http(s)://``：一律走远程下载（哪怕 path 长得像 ``/uploads/...``——本服务公网域名的
+      完整直链就是这个样子，它经 Cloudflare 解析到公网 IP，回环下载正常）。限体积 /
+      总时长 30s / 每跳过 SSRF 闸，内容不合 ``sniff`` 的魔数白名单直接拒收；
+    - 裸 ``/uploads/...`` 路径：从本服务图床解析并**复制**（不是引用）——图床 7 天懒清理，
+      clip 的 TTL 是独立的，引用会在图床过期后让重查/重发的镜找不到素材。
+
+    ``sniff_local`` 决定本地来源要不要也过魔数：
+    - 参考图 **False**（沿用本函数抽出来之前的行为，一字不差）——``/uploads`` 根下的图是
+      上传闸校验过的，后缀可信；
+    - 参考视频 **True**——最可能的误用是把一张图 / 一份成片以外的东西当参考视频传进来，
+      而这里判错的代价是**一次真提交、一次真扣分**。读 16 字节换掉这个代价，值。
+    """
+    source = (source or "").strip()
+    workdir.mkdir(parents=True, exist_ok=True)
+    if source.startswith(("http://", "https://")):
+        _assert_public_host(urlparse(source).hostname)
+        try:
+            data = await asyncio.wait_for(
+                _fetch_remote(source, kind=kind, limit_mb=limit_mb, timeout=timeout),
+                timeout=timeout)
+        except asyncio.TimeoutError:
+            raise ValueError(
+                f"{kind}下载超时（{timeout:.0f}s 总时长上限）：{source}") from None
+        ext = sniff(data)
+        if ext is None:
+            raise ValueError(f"{kind}{content_hint}：{source}")
+        target = workdir / f"{stem}{ext}"
+        target.write_bytes(data)
+        return target
+    if source.startswith("/uploads/"):
+        local = _uploads_local_file(source)
+        if local is None:
+            # 形态对但文件不在：图床 7 天懒清理过 / 路径越界。单独给话，别混进「形态不对」里。
+            raise ValueError(
+                f"{kind}在本服务图床里找不到（可能已过期清理或路径越界）：{source[:120]}")
+        ext = local.suffix.lower() or local_ext_default
+        if sniff_local:
+            # 只读文件头 32 字节（**不是 read_bytes()[:32]**：那会把整条几百 MB 的视频
+            # 先读进内存，只为看前 12 个字节的容器魔数）
+            with local.open("rb") as fh:
+                sniffed = sniff(fh.read(32))
+            if sniffed is None:
+                raise ValueError(f"{kind}{content_hint}：{source[:120]}")
+            ext = sniffed
+        target = workdir / f"{stem}{ext}"
+        shutil.copyfile(local, target)
+        return target
+    raise ValueError(
+        f"{kind}只接受图床直链（http/https）或本服务 /uploads 路径，收到：{source[:120]}"
+    )
 
 
 async def materialize_ref_image(source: str, workdir: Path, *, stem: str = "ref") -> Path:
@@ -519,47 +643,60 @@ async def materialize_ref_image(source: str, workdir: Path, *, stem: str = "ref"
     30 张 / 首尾帧两张），共用一个名字会让后一张盖掉前一张，故由调用方给互不相同的 stem
     （多图 ``ref``/``ref_2``…、首尾帧 ``first``/``last``）。默认值让单图调用一字不变。
 
-    两种来源（与 note-components ``add_images`` 同款约定，**不收 base64 大包**——524 教训），
-    **判据是 scheme 而不是 path 形状**：
-    - ``http(s)://``：一律走远程下载（哪怕 path 长得像 ``/uploads/...``——本服务公网域名的
-      完整直链就是这个样子，它经 Cloudflare 解析到公网 IP，回环下载正常）。限
-      ``CLIP_IMAGE_MAX_MB`` / 总时长 30s / 每跳过 SSRF 闸，内容非图片魔数直接拒收；
-    - 裸 ``/uploads/...`` 路径：从本服务图床解析并**复制**（不是引用）——图床 7 天懒清理，
-      clip 的 TTL 是独立的，引用会在图床过期后让重查/重发的镜找不到图。
-
     在 POST 里同步执行：坏图当场 400，不建任务；建完任务再发现图坏了只能落 error 行，运营
     还得回头清理。
     """
-    source = (source or "").strip()
-    workdir.mkdir(parents=True, exist_ok=True)
-    if source.startswith(("http://", "https://")):
-        _assert_public_host(urlparse(source).hostname)
-        try:
-            data = await asyncio.wait_for(
-                _fetch_remote_image(source), timeout=_REMOTE_FETCH_TIMEOUT)
-        except asyncio.TimeoutError:
-            raise ValueError(
-                f"参考图下载超时（{_REMOTE_FETCH_TIMEOUT:.0f}s 总时长上限）：{source}"
-            ) from None
-        ext = _sniff_ext(data)
-        if ext is None:
-            raise ValueError(f"参考图不是有效图片（按内容判定，非扩展名）：{source}")
-        target = workdir / f"{stem}{ext}"
-        target.write_bytes(data)
-        return target
-    if source.startswith("/uploads/"):
-        local = _uploads_local_file(source)
-        if local is None:
-            # 形态对但文件不在：图床 7 天懒清理过 / 路径越界。单独给话，别混进「形态不对」里。
-            raise ValueError(
-                f"参考图在本服务图床里找不到（可能已过期清理或路径越界）：{source[:120]}")
-        ext = local.suffix.lower() or ".jpg"
-        target = workdir / f"{stem}{ext}"
-        shutil.copyfile(local, target)
-        return target
-    raise ValueError(
-        f"参考图只接受图床直链（http/https）或本服务 /uploads 路径，收到：{source[:120]}"
-    )
+    return await _materialize_ref(
+        source, workdir, stem, kind="参考图", limit_mb=settings.CLIP_IMAGE_MAX_MB,
+        timeout=_REMOTE_FETCH_TIMEOUT, sniff=_sniff_ext,
+        content_hint="不是有效图片（按内容判定，非扩展名）", local_ext_default=".jpg")
+
+
+async def materialize_ref_video(source: str, workdir: Path, *, stem: str = "vid") -> Path:
+    """把参考视频落成 clip 工作目录内的**独立副本**，返回本地路径；非法来源抛 ValueError。
+
+    与参考图共用一条实现，但**走独立的视频魔数白名单**（``_sniff_video_ext``）与独立的体积
+    上限 ``CLIP_VIDEO_MAX_MB``——绝不为了收视频去放宽图片那条白名单（那是安全闸）。
+
+    ``stem`` 默认 ``vid``，多条时由调用方给 ``vid``/``vid_2``…；与参考图的 ``ref*`` /
+    ``first`` / ``last`` 不撞名，两类素材可以同时落在一个 clip 工作目录里。
+    """
+    return await _materialize_ref(
+        source, workdir, stem, kind="参考视频", limit_mb=settings.CLIP_VIDEO_MAX_MB,
+        timeout=_REMOTE_VIDEO_FETCH_TIMEOUT, sniff=_sniff_video_ext,
+        content_hint="不是有效视频容器（按内容魔数判定，非扩展名；支持 mp4 / mov / webm）",
+        local_ext_default=".mp4", sniff_local=True)
+
+
+async def check_ref_video_durations(paths: list[str], model: str) -> str | None:
+    """物化后用 ffprobe 前置校验参考视频时长；越界返回中文说明，合规返回 None。
+
+    CLI 口径 "each **and total** video/audio duration 2-30s"（2.0 家族 2-15s）：每条与合计
+    各自都要在窗口内，故两道都判。放在服务端做是为了**省一次白跑**——不判的话越界要等 CLI
+    在 worker 侧拒收，那时行已建、素材已下载，运营看到的是一条要人回头清理的 error 行。
+
+    ``probe_duration`` 探不出（ffprobe 缺失 / 容器怪异）时**跳过那一条不拦**，与
+    ``get_video_clip_frame`` 的越界判定同一条纪律：把「探测器不给力」变成拒绝服务是本末倒置，
+    真越界了 CLI 那边还有一道。
+    """
+    if not paths:
+        return None
+    ceiling = max_ref_video_seconds(model)
+    seconds = await asyncio.gather(*(probe_duration(Path(p)) for p in paths))
+    total = 0.0
+    for index, value in enumerate(seconds):
+        if value is None:
+            continue                 # 探不出：不拦（真越界由 CLI 兜底）
+        if not (REF_VIDEO_SECONDS_MIN <= value <= ceiling):
+            return (f"第 {index + 1} 条参考视频时长 {value:.1f}s 越界：{model} 要求每条 "
+                    f"{REF_VIDEO_SECONDS_MIN:.0f}-{ceiling:.0f}s"
+                    f"（仅 seedance2.5 支持到 {REF_VIDEO_SECONDS_MAX:.0f}s）")
+        total += value
+    if total > ceiling:
+        return (f"参考视频合计时长 {total:.1f}s 越界：{model} 要求合计也在 "
+                f"{REF_VIDEO_SECONDS_MIN:.0f}-{ceiling:.0f}s 内"
+                "（CLI 口径 each and total video duration）")
+    return None
 
 
 # ── 提交参数组装 ────────────────────────────────────────────────────────────
@@ -579,6 +716,22 @@ def ref_paths(clip: VideoClip) -> list[str]:
         if isinstance(paths, list) and paths:
             return [str(p) for p in paths]
     return [clip.image_path] if clip.image_path else []
+
+
+def ref_video_paths(clip: VideoClip) -> list[str]:
+    """这条 clip 的参考视频本地副本路径（**顺序即语义**，见 VideoClip.video_paths_json）。
+
+    没有 ``image_path`` 那种单列回落：本列上线前的老行一律没有参考视频，空列表就是它们的
+    正确答案。坏 JSON 同样按空处理——理由与 ``ref_paths`` 一样，一个坏值不该让一条已建好的
+    任务永远提交不出去（少一路参考的片仍是可用产出，而卡死的行要人来收）。
+    """
+    if not clip.video_paths_json:
+        return []
+    try:
+        paths = json.loads(clip.video_paths_json)
+    except json.JSONDecodeError:
+        return []
+    return [str(p) for p in paths] if isinstance(paths, list) else []
 
 
 def transitions(clip: VideoClip) -> list[dict]:
@@ -653,9 +806,12 @@ def build_submit_args(clip: VideoClip) -> list[str]:
         # 换了就是让镜头倒着走，而且 ratio 也会按错的那张图推断。
         return ["frames2video", f"--first={paths[0]}", f"--last={paths[1]}", *common]
     if clip.operation == "multimodal2video":
-        # --image 是 stringArray（CLI help：repeat for each local input image path），
-        # 每张一个 flag；张数闸在 REST 层按模型分档拦过（2.5≤30 / 2.0 家族≤9）。
-        args = ["multimodal2video", *(f"--image={p}" for p in paths), *common]
+        # --image / --video 都是 stringArray（CLI help：repeat for each local input
+        # image/video path），每份素材一个 flag，**顺序即 prompt 里的 @图片N / @视频N**。
+        # 条数闸在 REST 层按模型分档拦过（图 2.5≤30 / 2.0 家族≤9，视频 ≤10 / ≤3，
+        # 总输入 ≤50 / ≤12）。图在前视频在后，与 CLI 自己的示例同序。
+        args = ["multimodal2video", *(f"--image={p}" for p in paths),
+                *(f"--video={p}" for p in ref_video_paths(clip)), *common]
         if clip.ratio:
             args.append(f"--ratio={clip.ratio}")
         return args
