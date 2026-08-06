@@ -1300,3 +1300,303 @@ async def test_non_multiframe_clip_has_null_transitions(tmp_path, monkeypatch):
         body = (await client.get(f"/api/video-clips/{r.json()['clip_id']}",
                                  headers=h)).json()
         assert body["transitions"] is None
+
+
+# ── 预估费用回显（estimated_credits）─────────────────────────────────────────
+async def test_single_clip_returns_estimated_credits(tmp_path, monkeypatch):
+    """提交前就能知道这一镜大概烧多少：默认档 2.5 按 130/5s 线性折算。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        r = await client.post("/api/video-clips",
+                              json=_shot(model="seedance2.5", duration=10), headers=h)
+        assert r.status_code == 202, r.text
+        assert r.json()["estimated_credits"] == 260
+
+        cheap = await client.post("/api/video-clips",
+                                  json=_shot(model="seedance2.0fast", duration=5), headers=h)
+        assert cheap.json()["estimated_credits"] == 25
+
+
+async def test_estimated_credits_is_null_for_unmeasured_tier(tmp_path, monkeypatch):
+    """估不出就**回 null**，不回 0——0 会被读成「这镜不要钱」，正好是最危险的误读。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clips",
+                              json=_shot(model="seedance2.0mini", duration=5),
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert r.json()["estimated_credits"] is None
+
+
+async def test_replay_estimates_zero_new_spend(tmp_path, monkeypatch):
+    """口径是「**本次新增**的预估消耗」：纯重放零新建零扣分，故为 0。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        payload = _shot(model="seedance2.5", duration=10, client_ref="est-replay")
+        first = await client.post("/api/video-clips", json=payload, headers=h)
+        second = await client.post("/api/video-clips", json=payload, headers=h)
+        assert first.json()["estimated_credits"] == 260
+        assert second.json()["estimated_credits"] == 0
+        assert await _clip_count() == 1
+
+
+async def test_batch_returns_total_and_per_shot_estimates(tmp_path, monkeypatch):
+    """整批合计 + 逐镜，逐镜与 shots 等长同序（下标即 shot-NN）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={"shots": [
+            _shot(model="seedance2.5", duration=10),      # 260
+            _shot(model="seedance2.0fast", duration=5),   # 25
+            _shot(model="seedance2.0fast_vip", duration=8),  # ceil(8/5)=2 档 × 55
+        ]}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["estimated_credits_per_shot"] == [260, 25, 110]
+        assert body["estimated_credits"] == 395
+        assert len(body["estimated_credits_per_shot"]) == len(body["clip_ids"])
+
+
+async def test_batch_total_is_null_when_any_shot_unpriced(tmp_path, monkeypatch):
+    """批里有估不出的镜 → **合计回 null**：给一个漏算了几镜的数当总账比没有更危险。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={"shots": [
+            _shot(model="seedance2.5", duration=5),
+            _shot(model="seedance2.0mini", duration=5),
+        ]}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert r.json()["estimated_credits_per_shot"] == [130, None]
+        assert r.json()["estimated_credits"] is None
+
+
+async def test_batch_replayed_shots_count_zero(tmp_path, monkeypatch):
+    """重放命中的镜在逐镜里是 0（那笔钱首发时就算过了），合计只含本次新增。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        first = _shot(model="seedance2.5", duration=5, client_ref="mix-1")
+        second = _shot(model="seedance2.5", duration=5, client_ref="mix-2")
+        await client.post("/api/video-clip-batches", json={"shots": [first]}, headers=h)
+        again = await client.post("/api/video-clip-batches",
+                                  json={"shots": [first, second]}, headers=h)
+        assert again.status_code == 202, again.text
+        assert again.json()["estimated_credits_per_shot"] == [0, 130]
+        assert again.json()["estimated_credits"] == 130
+
+
+# ── 预算护栏 max_credits ─────────────────────────────────────────────────────
+async def test_max_credits_rejects_whole_batch_with_zero_rows(tmp_path, monkeypatch):
+    """超预算 → **整批 409，一镜都不建**（查库确认零行）。
+
+    这道闸的意义就在「零副作用」：拒绝之后留下半批任务，比没有护栏更糟——运营以为没提交，
+    队列里却在烧分，且排队中的即梦任务无法取消。
+    """
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        shots = [_shot(model="seedance2.5", duration=10)] * 2      # 预估 520
+        r = await client.post("/api/video-clip-batches",
+                              json={"shots": shots, "max_credits": 519},
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 409, r.text
+        assert "520" in r.text and "519" in r.text
+        assert await _clip_count() == 0, "预算护栏拒绝后不许留下任何任务行"
+
+
+async def test_max_credits_exactly_equal_passes(tmp_path, monkeypatch):
+    """恰好等于预估 → 放行（上限是「不许超」，不是「必须留余量」）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        shots = [_shot(model="seedance2.5", duration=10)] * 2      # 预估 520
+        r = await client.post("/api/video-clip-batches",
+                              json={"shots": shots, "max_credits": 520},
+                              headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert r.json()["estimated_credits"] == 520
+        assert await _clip_count() == 2
+
+
+async def test_max_credits_refuses_batch_containing_unpriceable_shot(tmp_path, monkeypatch):
+    """批内含估不出价的镜 → **409 并说清是哪一镜**，绝不「按能估的部分」放行。
+
+    护栏对运营的承诺是「绝不超支」；含未知项时兑现不了这个承诺，悄悄放行等于卖假保证。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="guard")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={
+            "shots": [_shot(model="seedance2.5", duration=5),
+                      _mf(images=two, prompt="空椅转向窗", duration=5)],
+            "max_credits": 10000,
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 409, r.text
+        assert "multiframe2video" in r.text and "第 2 镜" in r.text
+        assert "拆分" in r.text and "max_credits" in r.text
+        assert await _clip_count() == 0
+
+
+async def test_without_max_credits_batch_behaves_exactly_as_before(tmp_path, monkeypatch):
+    """回归锁：**不传 max_credits 就一步预算判定都不做**。
+
+    同样这批（远超任何合理预算、且含估不出价的 multiframe）在不带上限时照旧全部入队——
+    护栏是显式的可选闸，不是偷偷加上的新默认。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    two = _seed_uploads(tmp_path, 2, folder="noguard")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={
+            "shots": [_shot(model="seedance2.5", duration=30)] * 3
+                     + [_mf(images=two, prompt="空椅转向窗", duration=5)],
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+        assert len(r.json()["clip_ids"]) == 4 and all(r.json()["clip_ids"])
+        assert r.json()["batch_id"].startswith("vcb_")
+        assert await _clip_count() == 4
+
+
+async def test_max_credits_guard_runs_before_login_and_materialization(tmp_path, monkeypatch):
+    """闸排在**一切副作用之前**：掉登录（503）与坏参考图（400）都轮不到，先 409。
+
+    顺序错了就会先物化图、先跑 CLI 查登录，再来说「超预算」——那时钱和时间都花过了。
+    """
+    _stub_credit(monkeypatch, logged_in=False)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post("/api/video-clip-batches", json={
+            "shots": [_shot(operation="image2video", ratio=None,
+                            image="/uploads/gone/01.png",
+                            model="seedance2.5", duration=10)],
+            "max_credits": 1,
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 409, r.text
+        assert await _clip_count() == 0
+
+
+async def test_max_credits_ignores_pure_replay(tmp_path, monkeypatch):
+    """纯重放不花新钱 → 预估 0，**再小的预算也放行**（否则重放会被自己的护栏卡死）。"""
+    _stub_credit(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        shots = [_shot(model="seedance2.5", duration=10, client_ref="guard-replay")]
+        first = await client.post("/api/video-clip-batches",
+                                  json={"shots": shots, "max_credits": 260}, headers=h)
+        assert first.status_code == 202, first.text
+        again = await client.post("/api/video-clip-batches",
+                                  json={"shots": shots, "max_credits": 1}, headers=h)
+        assert again.status_code == 202, again.text
+        assert again.json()["estimated_credits"] == 0
+        assert await _clip_count() == 1
+
+
+# ── 段尾帧提取 ──────────────────────────────────────────────────────────────
+def _make_mp4(path: Path, seconds: int = 2) -> Path:
+    """真跑 ffmpeg 造一段素材（与 test_video_muxer 同款）。"""
+    import subprocess
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i",
+         f"testsrc=duration={seconds}:size=160x120:rate=10", "-pix_fmt", "yuv420p", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+async def _seed_done_clip(client, headers, *, seconds: int = 2) -> tuple[str, Path]:
+    """建一条 clip 并落成 done + 一段真 mp4（调用方须先把 DATA_DIR 指到 tmp_path）。"""
+    r = await client.post("/api/video-clips", json=_shot(), headers=headers)
+    clip_id = r.json()["clip_id"]
+    video = _make_mp4(dreamina.clip_dir(clip_id) / "clip.mp4", seconds=seconds)
+    async with db_module.async_session() as s:
+        clip = (await s.execute(
+            select(VideoClip).where(VideoClip.clip_id == clip_id))).scalars().one()
+        clip.status = "done"
+        clip.video_path = str(video)
+        clip.video_url = dreamina.clip_public_url(clip_id, "clip.mp4")
+        clip.expires_at = datetime.utcnow() + timedelta(days=7)
+        await s.commit()
+    return clip_id, video
+
+
+async def test_frame_last_returns_direct_link_reusable_as_reference(tmp_path, monkeypatch):
+    """回直链而不是图片流：它能**原样当下一镜的首帧参考**传回来，省一个下载+上传来回。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        clip_id, _video = await _seed_done_clip(client, h)
+        r = await client.get(f"/api/video-clips/{clip_id}/frame", headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["t"] == "last"
+        assert body["frame_url"].endswith("/frame_last.png")
+        assert (dreamina.clip_dir(clip_id) / "frame_last.png").stat().st_size > 0
+
+        # 免鉴权直链能取回，且 Content-Type 是 PNG（MP4 白名单不能把它当视频回）
+        raw = await client.get(body["frame_url"])
+        assert raw.status_code == 200 and raw.headers["content-type"] == "image/png"
+        assert raw.content.startswith(b"\x89PNG")
+
+        # 真正的目的：这条路径直接作下一段的 first_image
+        nxt = await client.post("/api/video-clips", json=_shot(
+            operation="frames2video", ratio=None,
+            first_image=body["frame_url"], last_image=body["frame_url"]), headers=h)
+        assert nxt.status_code == 202, nxt.text
+
+
+async def test_frame_at_second_and_idempotent(tmp_path, monkeypatch):
+    """t=秒数取指定时刻；同 t 重复请求复用已抽的帧（不重跑 ffmpeg）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        clip_id, _video = await _seed_done_clip(client, h)
+        r = await client.get(f"/api/video-clips/{clip_id}/frame?t=1", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["frame_url"].endswith("/frame_1.000.png")
+        frame = dreamina.clip_dir(clip_id) / "frame_1.000.png"
+        stamp = frame.stat().st_mtime_ns
+
+        again = await client.get(f"/api/video-clips/{clip_id}/frame?t=1.0", headers=h)
+        assert again.status_code == 200 and again.json()["frame_url"] == r.json()["frame_url"]
+        assert frame.stat().st_mtime_ns == stamp, "同 t 不该重抽"
+
+
+async def test_frame_error_branches(tmp_path, monkeypatch):
+    """每种「拿不到帧」各有各的码，**绝不回半张图**：没跑完 409 / 产物没了 410 / t 越界 422。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        queued = await client.post("/api/video-clips", json=_shot(), headers=h)
+        pending_id = queued.json()["clip_id"]
+        not_done = await client.get(f"/api/video-clips/{pending_id}/frame", headers=h)
+        assert not_done.status_code == 409, not_done.text
+
+        clip_id, video = await _seed_done_clip(client, h)
+        for bad_t in ("abc", "-1", "", "00:00:01"):
+            bad = await client.get(f"/api/video-clips/{clip_id}/frame?t={bad_t}", headers=h)
+            assert bad.status_code == 422, f"t={bad_t!r} → {bad.status_code}"
+        over = await client.get(f"/api/video-clips/{clip_id}/frame?t=99", headers=h)
+        assert over.status_code == 422 and "超出视频时长" in over.text
+        assert not (dreamina.clip_dir(clip_id) / "frame_99.000.png").exists()
+
+        missing = await client.get("/api/video-clips/vc_00000000ff/frame", headers=h)
+        assert missing.status_code == 404, missing.text
+
+        video.unlink()          # 仿 TTL 清理：行还在、产物没了
+        gone = await client.get(f"/api/video-clips/{clip_id}/frame", headers=h)
+        assert gone.status_code == 410, gone.text
+
+
+async def test_frame_respects_ownership(tmp_path, monkeypatch):
+    """归属照旧：别人的片段抽不了帧（帧就是内容本身）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        clip_id, _video = await _seed_done_clip(client, h)
+        await make_operator("other-key")
+        r = await client.get(f"/api/video-clips/{clip_id}/frame", headers=bearer("other-key"))
+        assert r.status_code == 403, r.text

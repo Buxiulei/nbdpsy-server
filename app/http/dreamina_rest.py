@@ -24,10 +24,11 @@ router + MANIFEST_ENTRIES 接线 ``app.http.__init__`` 的 ALL_ROUTERS / ALL_MAN
 
 import asyncio
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -51,6 +52,9 @@ router = APIRouter()
 # 双保险，结构性排除 ../、空段与隐藏路径。
 _TOKEN_DIR_RE = re.compile(r"^vc_[0-9a-f]{10}-[0-9a-f]{16}$")
 _NAME_RE = re.compile(r"^clip(_[0-9]{1,2})?\.mp4$")
+# 抽出来的段帧 PNG（services.dreamina.frame_name 的两种形态）。与 MP4 分开一条正则而不是
+# 并进 _NAME_RE：媒体类型要按它区分，混一条就得再解析一次文件名才知道回什么 Content-Type。
+_FRAME_NAME_RE = re.compile(r"^frame_(last|[0-9]{1,6}\.[0-9]{3})\.png$")
 # 批次号形态（GET batch 的入参闸，与 services.dreamina.new_batch_id 同形）
 _BATCH_ID_RE = re.compile(r"^vcb_[0-9a-f]{10}$")
 
@@ -71,15 +75,41 @@ _POLL_NOTE = (
     "旧任务保留，谁先出用谁。"
 )
 
+
+def _price_note() -> str:
+    """价格文案**由 ``_PRICE_PER_5S`` 现算**，不手写。
+
+    手写那版在 seedance2.5 回填实测价之后整整落后了一版（还挂着「2.5 未实测故不估」），
+    而 2.5 是双端默认档——运营照这段文案做预算、并据此提了缺口。文档与表同源就没有第二次。
+    """
+    priced = "、".join(f"{m}={dreamina.price_per_5s(m)}" for m in dreamina.priced_models())
+    unpriced = "、".join(m for m in get_args(_MODELS) if dreamina.price_per_5s(m) is None)
+    return (
+        f"**积分估算 = 该档 5s/720p 实测单价 × 时长（按 5s 档向上取整）线性折算**。"
+        f"有实测价的档：{priced}（seedance2.5=130 由三次生产实测互证：5s=130、10s=260×2）。"
+        f"**未实测故不估的档：{unpriced}**——用这些档提交时 estimated_credits 为 null、"
+        "也不会带低积分 warning，那是「估不出」不是「余额充足」。"
+        "**multiframe2video 恒不估**（模型由平台下发，本表不适用）。"
+        "**frames2video 的价格从未实测**，估算沿用同 model 的 5s 档粗估，可能有偏差。"
+    )
+
+
 _MODEL_NOTE = (
     "模型全集 seedance2.0 | seedance2.0fast | seedance2.0fast_vip | seedance2.0_vip | "
     "seedance2.0mini | seedance2.5，**默认 seedance2.5**（2.5 没有 fast / vip 变体）。"
     "**seedance2.5 是 VIP-only**，时长 4-30s；其余模型 4-15s，超了 422。"
     "**2.5 首次使用可能需先到即梦网页端完成一次生成**做账号级合规授权，否则回 "
     "AigcComplianceConfirmationRequired——那是要人去点的一次性动作，服务端重试无意义。"
-    "积分只有两档有实测值（5s/720p：fast=25、fast_vip=55），**2.5 与 mini 未实测故不估**："
-    "用这两档提交时不会带低积分 warning，那是「估不出」不是「余额充足」。"
-    "**frames2video 的价格从未实测**，估算沿用同 model 的 5s 档粗估，可能有偏差。"
+    + _price_note()
+)
+
+_ESTIMATE_NOTE = (
+    "**estimated_credits 是估算不是账单**：按上面的线性折算给出，**实际扣分一律以 "
+    "success 后回填的 `credit_count` 为准**，两者可能有偏差（排队期换档、平台调价、"
+    "frames2video 这类没实测过的形态都会让估算偏）。口径是**本次请求新增的预估消耗**："
+    "纯重放命中（零新建零扣分）与物化失败的 error 行都计 0；"
+    "重放命中一条被**复活**回 queued 的 error 行会真去提交，故按实价计入。"
+    "估不出的镜为 null。"
 )
 
 _REF_NOTE = (
@@ -148,7 +178,8 @@ MANIFEST_ENTRIES = [
                                     "同样 N-1 段，每段 1-8s、总时长 ≥2s；整个省略则 CLI 每段默认 3s)",
             "client_ref": "body,str|None(1-64，幂等键)",
         },
-        "returns": "{clip_id, status(重放命中时带当前状态), warning?(低积分提示，不拦截)}",
+        "returns": "{clip_id, status(重放命中时带当前状态), estimated_credits(本次新增预估消耗，"
+                   "估不出为 null、纯重放为 0), warning?(低积分提示，不拦截)}",
         "errors": "422=参数校验失败（含 image2video/frames2video/multiframe2video+ratio、"
                   "text2video+参考图、image 与 images 同给、多图超模型张数上限、"
                   "frames2video 缺首帧或尾帧、multiframe2video 段数不符 / 传了 model / "
@@ -156,7 +187,8 @@ MANIFEST_ENTRIES = [
                   "400=参考图下载失败或不是图片（**多张里坏一张即整镜失败**）；"
                   "409=积分不足以再提交任何一镜；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
-        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE + " " + _POLL_NOTE
+        "notes": _MODEL_NOTE + " " + _ESTIMATE_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
+                 + " " + _POLL_NOTE
                  + " client_ref 幂等：同一运营用同 ref 重发返回**原 clip_id**、"
                  "零新建零扣分（幂等键按运营隔离，跨运营同 ref 互不影响）。"
                  "**重放不过登录闸/积分闸**：ref 命中时即使掉登录或余额见底也照回原 clip_id，"
@@ -194,12 +226,28 @@ MANIFEST_ENTRIES = [
         "method": "POST", "path": "/api/video-clip-batches",
         "summary": "批量提交多镜（逐镜独立，一镜失败不连坐）",
         "admin_only": False,
-        "params": {"shots": f"body,list[同单镜入参]（1-{settings.CLIP_MAX_BATCH} 镜）"},
+        "params": {
+            "shots": f"body,list[同单镜入参]（1-{settings.CLIP_MAX_BATCH} 镜）",
+            "max_credits": "body,int|None(**预算护栏**：整批预估超过它就整批 409 拒绝，"
+                           "一镜都不建；不传 = 不设预算线，行为与从前逐字节一致)",
+        },
         "returns": "{batch_id(**纯重放批可能为 null**，见 notes), "
-                   "clip_ids[](与 shots **等长同序**，可直接按下标映射 shot-NN), warning?}",
-        "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜；"
+                   "clip_ids[](与 shots **等长同序**，可直接按下标映射 shot-NN), "
+                   "estimated_credits(整批新增预估合计；**批内有估不出的镜时为 null**), "
+                   "estimated_credits_per_shot[](与 shots 等长同序，逐镜；不新提交的镜为 0、"
+                   "估不出的为 null), warning?}",
+        "errors": "422=结构校验失败或镜数越界；409=积分不足以再提交任何一镜，"
+                  "**或整批预估超 max_credits**，**或批内含无法估价的镜致护栏无法执行**；"
                   "503=即梦登录态失效；401=apikey 无效",
-        "notes": _MODEL_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
+        "notes": _MODEL_NOTE + " " + _ESTIMATE_NOTE
+                 + " **max_credits 预算护栏**：给了就按估算表算整批预估，超了**整批 409**，"
+                 "此时一镜未创建、零参考图物化、零 CLI 调用、零扣分（闸排在一切副作用之前，"
+                 "与「余额不足以提交任何一镜」那道 409 同族）。"
+                 "**批内只要有一镜估不出价（如 multiframe2video、未实测档），一律 409 而不是"
+                 "按能估的部分放行**——护栏的承诺是「绝不超支」，含未知项时兑现不了这个承诺，"
+                 "响应文案会指出是第几镜、哪个 operation/model；处置是把不可估的镜拆出来单独"
+                 "提交，或本批不带 max_credits。**不传 max_credits 时不做任何预算判定**。"
+                 + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
                  + " **shots[] 与单镜入参逐字段同构**，多图 images / 首尾帧 first_image+"
                  "last_image / 多帧故事 transition_prompts 在批量端点一样可用"
                  "（电影化的 25-30 镜只能走这里）。"
@@ -227,6 +275,23 @@ MANIFEST_ENTRIES = [
                  "故重放批的汇总可能比 clip_ids 短，按 clip_ids 逐条查最准。"
                  "**纯重放批的 batch_id 是 null，本端点对它不适用**——那种批没有属于自己的"
                  "新建行，拿 clip_ids 逐条 GET 单镜即可。",
+    },
+    {
+        "method": "GET", "path": "/api/video-clips/{clip_id}/frame",
+        "summary": "抽一帧成 PNG（分段续接：上一段的尾帧当下一段的首帧参考）",
+        "admin_only": False,
+        "params": {"clip_id": "path,str(vc_ 开头，须 status=done 且产物未过期)",
+                   "t": "query,str(**默认 last**=末帧；也可给秒数如 t=3 / t=2.5)"},
+        "returns": "{clip_id, t, frame_url(免鉴权 PNG 直链), expires_at}",
+        "errors": "409=片段尚未完成（没有可抽帧的视频）；410=产物已过 TTL 被清理；"
+                  "422=t 形态非法或超出视频时长；403=非本人任务且非 admin；404=clip 不存在；"
+                  "500=ffmpeg 抽帧失败（服务端故障，文案带 ffmpeg 原文）",
+        "notes": "**回的是直链不是图片流**：这个 `/uploads/...` 路径可以直接当下一镜的 "
+                 "`image` / `first_image` 传回来（本服务的参考图物化认自家 /uploads 路径），"
+                 "省掉「拉 mp4 → 本地抽帧 → 再上传」一个来回。"
+                 "帧 PNG 落在 clip 自己的工作目录里，**与 clip 同 TTL**（产物过期时一起清）。"
+                 "**幂等**：同一个 t 重复请求复用已抽好的那张，不会重跑 ffmpeg。"
+                 "t 越界当场 422（**绝不回半张图 / 空图**），错误文案带视频真实时长。",
     },
     {
         "method": "GET", "path": "/api/video-credits",
@@ -486,6 +551,10 @@ class CreateBatchRequest(BaseModel):
     """批量入参：整批结构校验（结构错 = 调用方 bug，整批 422 可接受）。"""
 
     shots: list[CreateClipRequest]
+    # 预算护栏（可选）。**不传就完全不做预算判定**——这条端点在电影化产线上一次就是 20-50 镜，
+    # 调用方侧任何一个循环 bug 都能把积分烧穿，而原有的闸只在「余额连一镜都不够」时才响，
+    # 那是破产线不是预算线。给了它就按估算表算整批预估，超了整批拒（见 _guard_max_credits）。
+    max_credits: int | None = Field(default=None, ge=1)
 
     @field_validator("shots")
     @classmethod
@@ -584,6 +653,69 @@ def _guard_credit(credit: int | None) -> None:
             409,
             f"即梦积分余额 {credit} 不足以再提交任何一镜（最低一镜约 "
             f"{dreamina.MIN_CLIP_CREDIT} 积分），请先充值",
+        )
+
+
+def _shot_estimate(req: CreateClipRequest) -> int | None:
+    """一镜的预估消耗（None = 该档没实测价，估不出）。
+
+    按**落库口径**取 model / duration（``_stored_*``）而不是请求原文：multiframe 长式的整片
+    时长是各段之和、model 是占位符，拿请求里那个字段默认值去查价会算出一个凭空的数。
+    """
+    return dreamina.estimate_credit(_stored_model(req), _stored_duration(req), req.operation)
+
+
+def _incremental_estimate(clip: VideoClip, *, will_submit: bool) -> int | None:
+    """这一镜在**本次请求**里新增的预估消耗。
+
+    ``will_submit=False`` 恒 0：纯重放命中的镜早就在队里（这次零新建零扣分），物化失败的
+    error 行则根本不会被提交。把它们算进预估等于把已花的钱或不会花的钱再报一遍。
+    """
+    if not will_submit:
+        return 0
+    return dreamina.estimate_credit(clip.model, clip.duration, clip.operation)
+
+
+def _total_estimate(per_shot: list[int | None]) -> int | None:
+    """整批合计；**只要有一镜估不出就回 None**——一个漏算了几镜的数字当总账比没有更危险。"""
+    if any(v is None for v in per_shot):
+        return None
+    return sum(per_shot)
+
+
+def _guard_max_credits(max_credits: int | None,
+                       chargeable: list[tuple[int, CreateClipRequest]]) -> None:
+    """预算护栏：整批预估超上限 → 整批 409，**一镜不建、零物化、零 CLI 调用、零扣分**。
+
+    调用点必须排在一切副作用之前（建行、参考图物化、error 行复活都算），与 ``_guard_credit``
+    同族——护栏拒绝之后留下半批任务，比没有护栏更糟。
+
+    **批里只要有一镜估不出价就一律 409**，不按「能估的那部分」放行：护栏对运营的承诺是
+    「绝不超支」，含未知项时这个承诺兑现不了，悄悄放行等于卖一个假保证。处置写进文案
+    （拆分提交 / 去掉 max_credits），不让人对着 409 猜。
+    """
+    if max_credits is None:
+        return                       # 不传 = 不设预算线，判定一步都不做
+    total = 0
+    for index, shot in chargeable:
+        estimate = _shot_estimate(shot)
+        if estimate is None:
+            raise HTTPException(
+                409,
+                f"批内第 {index + 1} 镜（operation={shot.operation}、"
+                f"model={_stored_model(shot)}）无法估价：该档单价从未实测，"
+                f"服务端不瞎编价格，因而无法保证整批不超 max_credits={max_credits}。"
+                "整批已拒绝，一镜未创建、未提交、未扣分。"
+                "处置：把无法估价的镜拆分提交（单独发一批），或本批不带 max_credits。",
+            )
+        total += estimate
+    if total > max_credits:
+        raise HTTPException(
+            409,
+            f"本批预估消耗 {total} 积分，超过预算上限 max_credits={max_credits}："
+            "整批已拒绝，一镜未创建、未提交、未扣分。"
+            "预估按各档 5s 实测单价×时长线性折算，**实际扣分以 success 后的 credit_count "
+            "为准**；请下调镜数/时长、或确认后提高 max_credits 重发。",
         )
 
 
@@ -802,10 +934,14 @@ async def create_video_clip(req: CreateClipRequest) -> dict:
         # 幂等优先：命中即原样返回，零新建、零 CLI 调用、零扣分
         existing = await dreamina.find_by_client_ref(session, op.id, req.client_ref)
         if existing is not None:
-            if dreamina.is_revivable(existing):
+            revived = dreamina.is_revivable(existing)
+            if revived:
                 await _revive_clips(session, [(existing, req)])
+            # 复活成功（回到 queued）的镜会真去提交、真扣分，故按实价报；其余重放新增消耗为 0。
             return {"clip_id": existing.clip_id, "status": _public_status(existing),
-                    "reused": True}
+                    "reused": True,
+                    "estimated_credits": _incremental_estimate(
+                        existing, will_submit=revived and existing.status == "queued")}
     status = await _require_login()
     _guard_credit(status.get("credit"))
     async with get_session() as session:
@@ -813,13 +949,14 @@ async def create_video_clip(req: CreateClipRequest) -> dict:
         image_paths, img_error = await _materialize(clip_id, req)
         if img_error:
             raise ValueError(img_error)  # → 400（宿主 ValueError 处理器）
-        clip, _created = await _insert_clip(
+        clip, created = await _insert_clip(
             session, op, req, clip_id=clip_id, image_paths=image_paths)
-        payload = {"clip_id": clip.clip_id}
-        # 估价按**落库后的行**取（multiframe 长式的 duration 是派生值，请求里根本没有）
+        # 估价按**落库后的行**取（multiframe 长式的 duration 是派生值，请求里根本没有）。
+        # created=False 是并发同 ref 撞唯一约束后拿到的别人那条行——那笔钱记在先到者头上，本次 0。
+        estimate = _incremental_estimate(clip, will_submit=created)
+        payload = {"clip_id": clip.clip_id, "estimated_credits": estimate}
         warning = _merge_warning(
-            _low_credit_warning(status.get("credit"), dreamina.estimate_credit(
-                clip.model, clip.duration, clip.operation)),
+            _low_credit_warning(status.get("credit"), estimate),
             _UNPRICED_NOTE if clip.operation == "multiframe2video" else None)
         if warning:
             payload["warning"] = warning
@@ -839,6 +976,71 @@ async def get_video_clip(clip_id: str) -> dict:
         return _clip_payload(clip)
 
 
+def _parse_frame_t(t: str) -> str | float:
+    """``t`` 入参 → ``"last"`` 或非负秒数；形态不合法当场 422。
+
+    只认这两种形态：分段续接要的就是「上一段的末帧」或「某个确定时刻」，别的写法（负数、
+    时间码 00:00:03、空串）与其猜一个语义，不如让调用方当场知道自己写错了。
+    """
+    raw = (t or "").strip()
+    if raw.lower() == dreamina.FRAME_LAST:
+        return dreamina.FRAME_LAST
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise HTTPException(422, f"t={t!r} 形态不合法：只接受 last 或非负秒数（如 t=3 / t=2.5）")
+    if not math.isfinite(seconds) or seconds < 0:
+        raise HTTPException(422, f"t={t!r} 不是有效的秒数（须 ≥ 0 的有限值）")
+    return seconds
+
+
+@router.get("/api/video-clips/{clip_id}/frame")
+async def get_video_clip_frame(clip_id: str, t: str = dreamina.FRAME_LAST) -> dict:
+    """抽一帧成 PNG 直链（分段续接：上一段的尾帧当下一段的首帧参考）。
+
+    回**直链而不是图片流**：这个 ``/uploads/...`` 路径能原样当下一镜的 ``image`` /
+    ``first_image`` 传回来（参考图物化认自家 /uploads 路径），省掉「拉 mp4 → 本地抽帧 →
+    再上传」一个来回，正是这条端点存在的理由。
+
+    每一种「拿不到帧」都给自己的码，**绝不回半张图**：没跑完 409、产物被 TTL 清了 410、
+    t 越界 422。帧落在 clip 工作目录里，跟着 clip 一起过期。
+    """
+    op = current_operator()
+    target = _parse_frame_t(t)
+    async with get_session() as session:
+        clip = await dreamina.get_by_clip_id(session, clip_id)
+        if clip is None:
+            raise NotFoundError(f"片段任务 {clip_id} 不存在")
+        if not _can_access(clip, op):
+            raise AccessDenied("无权访问该片段任务")
+        status, video_path, expires_at = clip.status, clip.video_path, clip.expires_at
+        public_status = _public_status(clip)
+    if status != "done":
+        raise HTTPException(
+            409, f"片段 {clip_id} 尚未完成（status={public_status}），没有可抽帧的视频；"
+                 "轮询到 status=done 再来取")
+    video = Path(video_path) if video_path else None
+    if video is None or not video.is_file():
+        raise HTTPException(
+            410, f"片段 {clip_id} 的产物已过 TTL 被清理（{settings.CLIP_TTL_DAYS} 天），"
+                 "无法抽帧；任务本身仍是 done，credit_count 保留供对账")
+    if target != dreamina.FRAME_LAST:
+        duration = await dreamina.probe_duration(video)
+        if duration is not None and target >= duration:
+            raise HTTPException(
+                422, f"t={target} 超出视频时长（{duration:.3f}s）；要末帧请用 t=last")
+    out = dreamina.clip_dir(clip_id) / dreamina.frame_name(target)
+    error = await dreamina.extract_frame(video, out, target)
+    if error:
+        raise HTTPException(500, f"抽帧失败：{error}")
+    return {
+        "clip_id": clip_id,
+        "t": target,
+        "frame_url": dreamina.clip_public_url(clip_id, out.name),
+        "expires_at": expires_at.isoformat() if expires_at else None,
+    }
+
+
 @router.post("/api/video-clip-batches", status_code=202)
 async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
     """批量提交（202）：逐镜独立，clip_ids 与 shots **等长同序**。
@@ -855,8 +1057,10 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
     """
     op = current_operator()
     clip_ids: list[str | None] = [None] * len(req.shots)
+    # 逐镜预估，**默认 0 = 本次不会新提交**（纯重放命中、物化失败的 error 行都不花钱）
+    per_shot: list[int | None] = [0] * len(req.shots)
     pending: list[tuple[int, CreateClipRequest]] = []
-    revivable: list[tuple[VideoClip, CreateClipRequest]] = []
+    revivable: list[tuple[int, VideoClip, CreateClipRequest]] = []
     hit_batches: set[str | None] = set()
     async with get_session() as session:
         for index, shot in enumerate(req.shots):
@@ -865,18 +1069,28 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
                 clip_ids[index] = existing.clip_id     # 重放：原 clip_id，零新增任务
                 hit_batches.add(existing.batch_id)
                 if dreamina.is_revivable(existing):
-                    revivable.append((existing, shot))
+                    revivable.append((index, existing, shot))
             else:
                 pending.append((index, shot))
+        # 预算护栏挡在**一切副作用之前**：复活会重新物化参考图并把行改回 queued（=真会去提交、
+        # 真会扣分），所以它和新建镜一样计入预估，而这道闸必须排在 _revive_clips 前面。
+        _guard_max_credits(
+            req.max_credits,
+            sorted(pending + [(i, s) for i, _c, s in revivable], key=lambda p: p[0]))
         # 复活「从没跑过 submit CLI」的 error 行（图源瞬时故障留下的那种）：重物化 + 回 queued，
         # 保同 clip_id。不复活的话那些镜被自己的幂等键永久烧死，修好图重放也生不出来。
-        await _revive_clips(session, revivable)
+        await _revive_clips(session, [(clip, shot) for _i, clip, shot in revivable])
+        for index, clip, _shot in revivable:
+            # 复活失败的仍是 error 行（图源还是坏的），不会提交 → 留 0。
+            per_shot[index] = _incremental_estimate(clip, will_submit=clip.status == "queued")
     if not pending:
         # 整批纯重放（零新建），闸一律不挂。**batch_id 不再现编一个**：那会是一个数据库里
         # 一行都没有的号，调用方拿去 GET batch 必 404，比 null 更难排查。命中镜同属一批时
         # 回那个真批次号，否则 null——定位一律以 clip_ids 为准。
         return {"batch_id": hit_batches.pop() if len(hit_batches) == 1 else None,
-                "clip_ids": clip_ids}
+                "clip_ids": clip_ids,
+                "estimated_credits": _total_estimate(per_shot),
+                "estimated_credits_per_shot": per_shot}
 
     status = await _require_login()
     _guard_credit(status.get("credit"))
@@ -884,7 +1098,6 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
     new_ids = [dreamina.new_clip_id() for _ in pending]
     materialized = await asyncio.gather(
         *(_materialize(cid, shot) for cid, (_i, shot) in zip(new_ids, pending)))
-    estimate = 0
     unpriced = False
     async with get_session() as session:
         for clip_id, (index, shot), (image_paths, img_error) in zip(
@@ -894,12 +1107,16 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
                 image_paths=image_paths, error=img_error,
             )
             clip_ids[index] = clip.clip_id
+            per_shot[index] = _incremental_estimate(
+                clip, will_submit=created and not img_error)
             if created and not img_error:
-                estimate += dreamina.estimate_credit(
-                    clip.model, clip.duration, clip.operation) or 0
                 unpriced = unpriced or clip.operation == "multiframe2video"
-    payload = {"batch_id": batch_id, "clip_ids": clip_ids}
-    # 批里只要有一镜估不出价，整批的估算就是不完整的——必须说，别让人拿它当总账
+    payload = {"batch_id": batch_id, "clip_ids": clip_ids,
+               "estimated_credits": _total_estimate(per_shot),
+               "estimated_credits_per_shot": per_shot}
+    # 批里只要有一镜估不出价，整批的估算就是不完整的——必须说，别让人拿它当总账。
+    # warning 用「能估出来的那部分之和」比余额（合计为 null 时它仍是有用的下界）。
+    estimate = sum(v for v in per_shot if v)
     warning = _merge_warning(_low_credit_warning(status.get("credit"), estimate),
                              _UNPRICED_NOTE if unpriced else None)
     if warning:
@@ -968,17 +1185,23 @@ async def get_dreamina_status() -> dict:
 
 @router.get("/uploads/clips/{token_dir}/{name}")
 async def serve_clip_product(token_dir: str, name: str) -> FileResponse:
-    """取回片段产物 MP4（白名单免鉴权：HMAC token 目录即访问控制，与 video_rest 同款）。
+    """取回片段产物：成片 MP4 或抽出来的段帧 PNG（白名单免鉴权：HMAC token 目录即访问控制）。
 
     ``/uploads`` 前缀在鉴权中间件白名单内，故本路由免 apikey——不可猜的
     ``{clip_id}-{hmac16}`` 目录名（SECRET_KEY 派生）承担访问控制。skill 侧不带
     Authorization 直接拉这个链接落盘成 shot-NN.mp4 进 ffmpeg 合成。
     正则白名单 + resolve/is_relative_to 双保险挡路径穿越；非文件 404。
     """
-    if not _TOKEN_DIR_RE.fullmatch(token_dir) or not _NAME_RE.fullmatch(name):
+    if not _TOKEN_DIR_RE.fullmatch(token_dir):
+        raise HTTPException(status_code=404, detail="资源不存在")
+    if _NAME_RE.fullmatch(name):
+        media_type = "video/mp4"
+    elif _FRAME_NAME_RE.fullmatch(name):
+        media_type = "image/png"
+    else:
         raise HTTPException(status_code=404, detail="资源不存在")
     root = (Path(settings.DATA_DIR) / "uploads" / "clips").resolve()
     file_path = (root / token_dir / name).resolve()
     if not file_path.is_relative_to(root) or not file_path.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")
-    return FileResponse(file_path, media_type="video/mp4")
+    return FileResponse(file_path, media_type=media_type)

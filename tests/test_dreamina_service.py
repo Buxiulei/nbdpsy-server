@@ -688,3 +688,97 @@ async def test_compliance_models_exclude_multiframe_rows(db_factory):
                      model=dreamina.MULTIFRAME_MODEL_PLACEHOLDER)
     async with db_factory() as s:
         assert await dreamina.compliance_confirmed_models(s) == ["seedance2.0fast_vip"]
+
+
+# ── 单价表：三次实测互证的 seedance2.5 线性折算 ─────────────────────────────
+def test_seedance25_price_is_linear_across_measured_durations():
+    """2.5 = 130/5s，**三次独立生产实测互证**（vc_3e1260f8ce 5s=130、vc_9090b4f40b 10s=260、
+    vc_5d0ec24ff7 10s=260），因此按 5s 档线性折算成立。
+
+    这条锁的是「默认档必须能估价」：2.5 是双端默认档，它估不出等于估算表对绝大多数提交无效。
+    """
+    assert dreamina.estimate_credit("seedance2.5", 5) == 130
+    assert dreamina.estimate_credit("seedance2.5", 10) == 260
+    assert dreamina.estimate_credit("seedance2.5", 30) == 780
+    assert dreamina.price_per_5s("seedance2.5") == 130
+
+
+def test_unmeasured_tiers_stay_unpriced():
+    """没实测过的档**一律不估**（回归锁）：编一个「看着合理」的数会让预算护栏与 warning
+    建立在一个没人验证过的常量上，而这条产线里每个估算都会被拿去做花钱决策。"""
+    for model in ("seedance2.0", "seedance2.0_vip", "seedance2.0mini"):
+        assert dreamina.estimate_credit(model, 5) is None
+        assert dreamina.price_per_5s(model) is None
+    assert dreamina.priced_models() == [
+        "seedance2.0fast", "seedance2.0fast_vip", "seedance2.5"]
+
+
+def test_multiframe_never_priced_even_on_a_priced_model():
+    """回归锁：multiframe2video 恒 None，**哪怕 model 列是有价的档**。
+
+    它的档由平台下发、CLI 不接受 --model_version，库里那列是占位符；本表对它不适用。
+    """
+    assert dreamina.estimate_credit("seedance2.5", 10, "multiframe2video") is None
+    assert dreamina.estimate_credit(
+        dreamina.MULTIFRAME_MODEL_PLACEHOLDER, 10, "multiframe2video") is None
+
+
+# ── 段帧提取（分段续接）──────────────────────────────────────────────────────
+def _make_video(path: Path, seconds: int = 2) -> Path:
+    """真跑 ffmpeg 造一段 testsrc 视频（与 test_video_muxer 同款做法）。"""
+    import subprocess
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i",
+         f"testsrc=duration={seconds}:size=160x120:rate=10", "-pix_fmt", "yuv420p", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+def test_frame_name_is_stable_per_t():
+    """文件名即幂等键：同一个 t 必须映射到同一个名字，且形态被直链白名单认得。"""
+    assert dreamina.frame_name("last") == "frame_last.png"
+    assert dreamina.frame_name(3) == dreamina.frame_name(3.0) == "frame_3.000.png"
+    assert dreamina.frame_name(2.5) == "frame_2.500.png"
+
+
+async def test_extract_frame_last_and_at_second(tmp_path):
+    video = _make_video(tmp_path / "clip.mp4")
+    last = tmp_path / dreamina.frame_name("last")
+    assert await dreamina.extract_frame(video, last, "last") is None
+    assert last.stat().st_size > 0 and last.read_bytes().startswith(b"\x89PNG")
+
+    at_one = tmp_path / dreamina.frame_name(1)
+    assert await dreamina.extract_frame(video, at_one, 1) is None
+    assert at_one.stat().st_size > 0
+    # **t=last 必须是真末帧**，不是「末尾前 1s 那一帧」。2s 的片里 t=1 恰好落在尾部窗口的
+    # 起点：两张一模一样就说明尾帧取法退化成了取窗口首帧（分段续接会因此跳掉一秒）。
+    assert last.read_bytes() != at_one.read_bytes()
+    tail = tmp_path / "tail-1.9.png"
+    assert await dreamina.extract_frame(video, tail, 1.9) is None
+    assert last.read_bytes() == tail.read_bytes(), "t=last 应等于片尾那一帧"
+
+
+async def test_extract_frame_is_idempotent(tmp_path):
+    """同 t 重复请求复用磁盘上那张，不再跑 ffmpeg（分段续接里重取是常态）。"""
+    video = _make_video(tmp_path / "clip.mp4")
+    out = tmp_path / dreamina.frame_name("last")
+    assert await dreamina.extract_frame(video, out, "last") is None
+    stamp = out.stat().st_mtime_ns
+    assert await dreamina.extract_frame(video, out, "last") is None
+    assert out.stat().st_mtime_ns == stamp, "已抽过的帧不该被重抽"
+
+
+async def test_extract_frame_beyond_end_reports_error_and_leaves_no_half_image(tmp_path):
+    """t 落在末帧之后：**返回错误且不留半张图**——留个 0 字节 PNG 会被下次幂等复用命中。"""
+    video = _make_video(tmp_path / "clip.mp4")
+    out = tmp_path / dreamina.frame_name(99)
+    error = await dreamina.extract_frame(video, out, 99)
+    assert error and not out.exists()
+
+
+async def test_probe_duration_reads_real_length_and_tolerates_garbage(tmp_path):
+    video = _make_video(tmp_path / "clip.mp4", seconds=2)
+    assert abs(await dreamina.probe_duration(video) - 2.0) < 0.3
+    junk = tmp_path / "not-a-video.mp4"
+    junk.write_bytes(b"nope")
+    assert await dreamina.probe_duration(junk) is None

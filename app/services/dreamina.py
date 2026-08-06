@@ -100,8 +100,12 @@ MULTIFRAME_DEFAULT_SEGMENT = 3.0
 MULTIFRAME_MODEL_PLACEHOLDER = "platform_fixed"
 
 # 5s/720p 单镜实测价（仅实测档有值；未知档不估、不给 warning，绝不瞎猜）。
-# seedance2.5 = 130（2026-08-05 生产实测 vc_3e1260f8ce，credit_count 与余额扣减对账精确；
-# maestro 会员秒级出片，无排队）。**seedance2.0mini 仍不编价**（未实测）。
+# seedance2.5 = 130，**三次独立生产实测一致，线性折算成立**（credit_count 与余额扣减逐次对账）：
+#   - 2026-08-05 vc_3e1260f8ce  5s  → 130
+#   - 2026-08-06 vc_9090b4f40b  10s → 260
+#   - 2026-08-06 vc_5d0ec24ff7  10s → 260
+# **seedance2.0mini / seedance2.0 / seedance2.0_vip 仍不编价**（从未实测）；
+# multiframe2video 恒不估（模型由平台下发，本表不适用，见 estimate_credit）。
 _PRICE_PER_5S = {"seedance2.0fast": 25, "seedance2.0fast_vip": 55, "seedance2.5": 130}
 # 已知最便宜的一镜（5s fast）。余额低于它 = 连一镜都提交不起 → 409。
 MIN_CLIP_CREDIT = 25
@@ -389,6 +393,20 @@ def estimate_credit(model: str, duration: int, operation: str | None = None) -> 
     if unit is None:
         return None
     return unit * max(1, math.ceil(duration / 5))
+
+
+def price_per_5s(model: str) -> int | None:
+    """该档的 5s 实测单价；没实测过返回 None。
+
+    manifest 的价格文案由它 + ``priced_models`` 生成，**不再手写**：手写那份在 2.5 回填后
+    整整落后了一版（还挂着「2.5 未实测故不估」），运营照它做预算、照它提意见。
+    """
+    return _PRICE_PER_5S.get(model)
+
+
+def priced_models() -> list[str]:
+    """有实测单价的档位（有序，供 manifest 文案生成）。"""
+    return sorted(_PRICE_PER_5S)
 
 
 # ── 参考图物化（POST 时同步做：坏图当场 4xx，绝不建了任务再失败）──────────────
@@ -1068,6 +1086,95 @@ def _rename_products(data: dict, workdir: Path) -> list[str]:
             os.replace(src_path, target)
         names.append(name)
     return names
+
+
+# ── 段帧提取（分段续接：上一段的尾帧当下一段的首帧参考）──────────────────────
+# 帧 PNG 落在 clip 自己的工作目录里，**因此与 clip 同 TTL**（reaper 删的是整个目录，
+# 见 reap_clips_once）——不另立生命周期，也就没有「视频没了帧还在」的孤儿。
+FRAME_LAST = "last"
+_FRAME_TIMEOUT = 60.0
+# t=last 的取法：从**末尾**回退 1s 开始解一帧（-sseof）。不用 ffprobe 得到的 duration 减
+# epsilon：容器时长与最后一个可解帧的 PTS 常有毫秒级出入，按 duration 去 seek 经常落在
+# 末帧之后抽不出图；-sseof 是 ffmpeg 自己算的尾部窗口，短于 1s 的片也会被它夹到 0。
+_FRAME_TAIL_SEEK = "-1"
+
+
+def frame_name(t: str | float) -> str:
+    """帧文件名：``frame_last.png`` / ``frame_3.000.png``。
+
+    定长三位小数不是洁癖：免鉴权直链的文件名走白名单正则，形态固定才能既放行帧图又不放
+    宽到能撞别的东西；同时它也是**幂等键**——同一个 t 必然映射到同一个文件名，重复请求
+    直接复用磁盘上那张，不再跑第二次 ffmpeg。
+    """
+    if t == FRAME_LAST:
+        return "frame_last.png"
+    return f"frame_{float(t):.3f}.png"
+
+
+async def probe_duration(video: Path) -> float | None:
+    """ffprobe 取视频时长（秒）；探不出返回 None。
+
+    只用来判 ``t`` 越界并把真实时长写进错误文案。探不出时**不拦**（回 None 让调用方放行给
+    ffmpeg），把「探测器不给力」变成拒绝服务是本末倒置。
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(video),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        return None
+    try:
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=_FRAME_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None
+    try:
+        return float((out or b"").decode("utf-8", "replace").strip())
+    except ValueError:
+        return None
+
+
+async def extract_frame(video: Path, out: Path, t: str | float) -> str | None:
+    """抽一帧到 ``out``（PNG）。成功返回 None，失败返回中文错误说明。
+
+    **幂等**：``out`` 已存在且非空即直接复用，不再调 ffmpeg——同一个 t 反复请求是分段续接
+    的常态（重试、换个 agent 再取一次），每次重抽既慢又白占 CPU。
+    """
+    if out.is_file() and out.stat().st_size > 0:
+        return None
+    if t == FRAME_LAST:
+        # 尾帧的取法：seek 到末尾前 1s，然后**解完这段里的每一帧、逐帧覆盖同一个输出**
+        # （-update 1 且**不能加 -frames:v 1**）——最后写进去的那张就是真正的末帧。
+        # 加了 -frames:v 1 只会拿到「末尾前 1s 处的那一帧」，看着也是张图，实测出来的正是
+        # 前一秒的画面：分段续接靠它接第二段，接缝处会跳掉一秒。
+        seek, limit = ["-sseof", _FRAME_TAIL_SEEK], []
+    else:
+        seek, limit = ["-ss", f"{float(t):.3f}"], ["-frames:v", "1"]
+    argv = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            *seek, "-i", str(video), *limit, "-update", "1", str(out)]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except OSError as exc:
+        return f"ffmpeg 不可执行：{exc}"
+    try:
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout=_FRAME_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return f"ffmpeg 抽帧超时({_FRAME_TIMEOUT}s)"
+    if proc.returncode:
+        return f"ffmpeg 抽帧失败(rc={proc.returncode})：" \
+               f"{(err or b'').decode('utf-8', 'replace')[-400:]}"
+    if not (out.is_file() and out.stat().st_size > 0):
+        # rc=0 却没产物：t 落在最后一个可解帧之后是最常见的成因。**不回半张图**，
+        # 空文件也当失败清掉——留着它会让下一次幂等复用直接命中一张 0 字节的 PNG。
+        out.unlink(missing_ok=True)
+        return "ffmpeg 未抽到帧（t 可能落在视频末帧之后）"
+    return None
 
 
 # ── 产物 TTL 清理（仿 ArchiveReaper）────────────────────────────────────────
