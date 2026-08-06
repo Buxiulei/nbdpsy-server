@@ -808,25 +808,36 @@ def test_video_caps_are_per_model():
     image<=9, video<=3, audio<=3, total inputs<=12``（时长 2-15s）。
     """
     assert dreamina.max_ref_videos("seedance2.5") == 10
+    assert dreamina.max_ref_audios("seedance2.5") == 10
     assert dreamina.max_total_inputs("seedance2.5") == 50
-    assert dreamina.max_ref_video_seconds("seedance2.5") == 30.0
+    assert dreamina.max_ref_media_seconds("seedance2.5") == 30.0
+    assert dreamina.allows_audio_only("seedance2.5") is True
     for model in ("seedance2.0", "seedance2.0fast", "seedance2.0fast_vip",
                   "seedance2.0_vip", "seedance2.0mini", "seedance9.9"):
         assert dreamina.max_ref_videos(model) == 3
+        assert dreamina.max_ref_audios(model) == 3
         assert dreamina.max_total_inputs(model) == 12
-        assert dreamina.max_ref_video_seconds(model) == 15.0
+        assert dreamina.max_ref_media_seconds(model) == 15.0
+        # 纯音频只有 2.5 允许（2.0 家族 help 明写 at least one --image or --video）
+        assert dreamina.allows_audio_only(model) is False
 
 
-def test_total_inputs_cap_is_implied_by_per_kind_caps():
-    """总输入闸（≤50 / ≤12）**不可达**，故 REST 层不单设一道——这条守住那个推导。
+def test_total_inputs_cap_is_reachable_now_that_three_kinds_pass_through():
+    """总输入闸**真会响**——videos 那一轮它还不可达，audio 一开就可达了。
 
-    audio 不透传，总输入 = 参考图 + 参考视频；分项上限已把上界钉死在 30+10=40≤50、
-    9+3=12≤12。哪天分项被放宽、或 audio 开了透传，这条立刻红，届时必须回 REST 层补总输入闸
-    （否则「分项都合法、合计超了」的组合会一路放行到 CLI 才被拒，白下一次素材白建一行）。
+    上一轮（只有图 + 视频）分项上限把合计钉死在 30+10=40≤50、9+3=12≤12，故当时没设闸、
+    只留了一条推导守护测试。三类齐了之后 2.0 家族 9 图 + 3 视频 + 3 音频 = 15 > 12，
+    分项条条合法而合计超限——这条断言那个组合确实越界，REST 层的总输入闸不是摆设
+    （闸本身的行为由 test_total_inputs_ceiling_across_three_kinds 在端点上验）。
     """
-    for model in ("seedance2.5", "seedance2.0fast", "seedance2.0mini", "seedance9.9"):
-        assert (dreamina.max_ref_images(model) + dreamina.max_ref_videos(model)
-                <= dreamina.max_total_inputs(model)), model
+    widest = ("seedance2.0fast", "seedance2.0mini")
+    for model in widest:
+        full = (dreamina.max_ref_images(model) + dreamina.max_ref_videos(model)
+                + dreamina.max_ref_audios(model))
+        assert full > dreamina.max_total_inputs(model), model
+    # 2.5 那档三类拉满仍在总闸内（30+10+10=50 恰好顶格），故它只会被分项闸拦
+    assert (dreamina.max_ref_images("seedance2.5") + dreamina.max_ref_videos("seedance2.5")
+            + dreamina.max_ref_audios("seedance2.5")) == dreamina.max_total_inputs("seedance2.5")
 
 
 def test_video_magic_whitelist_is_separate_from_image_whitelist():
@@ -899,19 +910,19 @@ def _stub_probe(monkeypatch, values: dict):
 async def test_ref_video_duration_window_is_per_model(monkeypatch):
     """每条 2-30s（2.0 家族 2-15s）：越界当场给说明，省掉一次必被 CLI 拒的提交。"""
     _stub_probe(monkeypatch, {"vid.mp4": 20.0})
-    assert await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5") is None
-    over = await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.0fast")
-    assert over and "15" in over and "第 1 条" in over
+    assert await dreamina.check_ref_media_durations(["/w/vid.mp4"], "seedance2.5") is None
+    over = await dreamina.check_ref_media_durations(["/w/vid.mp4"], "seedance2.0fast")
+    assert over and "15" in over and "第 1 份" in over
 
     _stub_probe(monkeypatch, {"vid.mp4": 1.2})
-    short = await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5")
+    short = await dreamina.check_ref_media_durations(["/w/vid.mp4"], "seedance2.5")
     assert short and "越界" in short
 
 
 async def test_ref_video_total_duration_is_also_capped(monkeypatch):
     """CLI 口径是 "each **and total**"：每条都合规、合计超了照样拦。"""
     _stub_probe(monkeypatch, {"vid.mp4": 20.0, "vid_2.mp4": 15.0})
-    bad = await dreamina.check_ref_video_durations(
+    bad = await dreamina.check_ref_media_durations(
         ["/w/vid.mp4", "/w/vid_2.mp4"], "seedance2.5")
     assert bad and "合计" in bad
 
@@ -919,8 +930,8 @@ async def test_ref_video_total_duration_is_also_capped(monkeypatch):
 async def test_unprobeable_video_is_not_blocked(monkeypatch):
     """探不出时长不拦：把「探测器不给力」变成拒绝服务是本末倒置，真越界 CLI 那边还有一道。"""
     _stub_probe(monkeypatch, {"vid.mp4": None})
-    assert await dreamina.check_ref_video_durations(["/w/vid.mp4"], "seedance2.5") is None
-    assert await dreamina.check_ref_video_durations([], "seedance2.5") is None
+    assert await dreamina.check_ref_media_durations(["/w/vid.mp4"], "seedance2.5") is None
+    assert await dreamina.check_ref_media_durations([], "seedance2.5") is None
 
 
 # ── 提交参数组装：--video 与 --image 同序拼接 ────────────────────────────────
@@ -970,3 +981,122 @@ async def test_materialize_ref_video_sniffs_local_uploads_too(tmp_path, monkeypa
     (src / "mislabeled.bin").write_bytes(_MOV)
     got = await dreamina.materialize_ref_video("/uploads/mixed/mislabeled.bin", tmp_path / "w")
     assert got.suffix == ".mov"
+
+
+# ── 参考音频物化（CLI 的 --audio 输入面）────────────────────────────────────
+_MP3_ID3 = b"ID3\x04\x00\x00" + b"\x00" * 32          # 带 ID3v2 标签的 MP3
+_MP3_BARE = b"\xff\xfb\x90\x00" + b"\x00" * 32        # 无标签 MP3（裸帧同步）
+_WAV = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 16
+_M4A = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 32     # ISO BMFF，但 brand 是 M4A（音频）
+_FLAC = b"fLaC" + b"\x00" * 32
+_OGG = b"OggS" + b"\x00" * 32
+_AAC = b"\xff\xf1\x50\x80" + b"\x00" * 32             # ADTS AAC
+
+
+def test_audio_magic_whitelist_is_its_own_channel():
+    """音频是**第三条独立白名单**：三类各认各的，绝不为了收一类去放宽另一类。"""
+    assert dreamina._sniff_audio_ext(_MP3_ID3) == ".mp3"
+    assert dreamina._sniff_audio_ext(_MP3_BARE) == ".mp3"
+    assert dreamina._sniff_audio_ext(_WAV) == ".wav"
+    assert dreamina._sniff_audio_ext(_M4A) == ".m4a"
+    assert dreamina._sniff_audio_ext(_FLAC) == ".flac"
+    assert dreamina._sniff_audio_ext(_OGG) == ".ogg"
+    assert dreamina._sniff_audio_ext(_AAC) == ".aac"
+    for junk in (_PNG, _MP4, _WEBM, b"<html>404</html>", b""):
+        assert dreamina._sniff_audio_ext(junk) is None, junk[:8]
+    # 反向两条：图片、视频两条白名单都没有因此认音频
+    for audio in (_MP3_ID3, _WAV, _M4A, _FLAC, _OGG, _AAC):
+        assert dreamina._sniff_ext(audio) is None, audio[:8]
+        assert dreamina._sniff_video_ext(audio) is None, audio[:8]
+
+
+def test_m4a_is_audio_not_video_despite_sharing_iso_bmff_header():
+    """mp4 与 m4a 的头一模一样，只有 major brand 能分——视频通道必须显式排掉 M4A/M4B。
+
+    不排的话一条 m4a 传进 videos 会被当 .mp4 收下，送给 CLI 的是一个「视频输入」里塞了
+    纯音频——CLI 侧拒了是白跑一次，没拒就是出一条我们没打算要的片。
+    """
+    assert _M4A[4:8] == _MP4[4:8] == b"ftyp"          # 头确实一样
+    assert dreamina._sniff_video_ext(_M4A) is None
+    assert dreamina._sniff_audio_ext(_M4A) == ".m4a"
+    assert dreamina._sniff_video_ext(_MP4) == ".mp4"
+    assert dreamina._sniff_audio_ext(_MP4) is None
+
+
+async def test_materialize_ref_audio_http_ok_and_rejects_non_audio(tmp_path, monkeypatch):
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP3_ID3[:4], _MP3_ID3[4:]]))
+    got = await dreamina.materialize_ref_audio("https://cdn.example/bgm.mp3", tmp_path / "w")
+    assert got.suffix == ".mp3" and got.read_bytes() == _MP3_ID3
+
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP4]))
+    with pytest.raises(ValueError, match="不是有效音频容器"):
+        await dreamina.materialize_ref_audio("https://cdn.example/fake.mp3", tmp_path / "w")
+
+
+async def test_materialize_ref_audio_from_uploads_sniffs_and_copies(tmp_path, monkeypatch):
+    """本地 /uploads 来源同样过魔数 + **复制**而非引用（与参考视频同款）。"""
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    src = tmp_path / "uploads" / "bgm"
+    src.mkdir(parents=True)
+    (src / "track.wav").write_bytes(_WAV)
+    got = await dreamina.materialize_ref_audio("/uploads/bgm/track.wav", tmp_path / "w")
+    assert got.suffix == ".wav"
+    (src / "track.wav").unlink()
+    assert got.read_bytes() == _WAV
+
+    (src / "notaudio.mp3").write_bytes(_PNG)          # 后缀对、内容是图
+    with pytest.raises(ValueError, match="不是有效音频容器"):
+        await dreamina.materialize_ref_audio("/uploads/bgm/notaudio.mp3", tmp_path / "w")
+
+
+async def test_materialize_ref_audio_has_its_own_size_limit(tmp_path, monkeypatch):
+    """三类素材三个体积闸，各按各的量级（音频比视频窄、比图片宽）。"""
+    _stub_dns(monkeypatch)
+    monkeypatch.setattr(settings, "CLIP_AUDIO_MAX_MB", 1)
+    monkeypatch.setattr(dreamina, "httpx", _FakeHttpx([_MP3_ID3 + b"x" * (1024 * 1024)]))
+    with pytest.raises(ValueError, match="参考音频超过 1MB 上限"):
+        await dreamina.materialize_ref_audio("https://cdn.example/big.mp3", tmp_path / "w")
+
+
+async def test_ref_audio_duration_window_is_per_model(monkeypatch):
+    """音频与视频同一个时长窗口，且**每类各自合计**（两次调用互不相加）。"""
+    _stub_probe(monkeypatch, {"aud.mp3": 20.0})
+    assert await dreamina.check_ref_media_durations(
+        ["/w/aud.mp3"], "seedance2.5", kind="参考音频") is None
+    over = await dreamina.check_ref_media_durations(
+        ["/w/aud.mp3"], "seedance2.0fast", kind="参考音频")
+    assert over and "参考音频" in over and "15" in over
+
+    _stub_probe(monkeypatch, {"aud.mp3": 20.0, "aud_2.mp3": 15.0})
+    total = await dreamina.check_ref_media_durations(
+        ["/w/aud.mp3", "/w/aud_2.mp3"], "seedance2.5", kind="参考音频")
+    assert total and "合计" in total and "参考音频" in total
+
+
+def test_build_submit_args_carries_all_three_kinds_in_order():
+    """三类各自逐份一个 flag，顺序 图 → 视频 → 音频，**每类内部顺序即 @编号**。"""
+    clip = _clip(operation="multimodal2video", model="seedance2.5", ratio=None,
+                 image_paths_json=json.dumps(["/w/ref.png"]),
+                 video_paths_json=json.dumps(["/w/vid.mp4", "/w/vid_2.mp4"]),
+                 audio_paths_json=json.dumps(["/w/aud.mp3", "/w/aud_2.wav"]))
+    args = dreamina.build_submit_args(clip)
+    assert [a for a in args if a.startswith("--audio=")] == [
+        "--audio=/w/aud.mp3", "--audio=/w/aud_2.wav"]
+    assert (args.index("--image=/w/ref.png") < args.index("--video=/w/vid.mp4")
+            < args.index("--audio=/w/aud.mp3"))
+
+
+def test_audio_only_clip_submits_without_image_or_video_flags():
+    """纯音频（2.5 专属）：参数里既没有 --image 也没有 --video，只有 --audio。"""
+    clip = _clip(operation="multimodal2video", model="seedance2.5", ratio=None,
+                 audio_paths_json=json.dumps(["/w/aud.mp3"]))
+    args = dreamina.build_submit_args(clip)
+    assert not any(a.startswith(("--image=", "--video=")) for a in args)
+    assert "--audio=/w/aud.mp3" in args
+
+
+def test_ref_audio_paths_tolerates_old_rows_and_bad_json():
+    assert dreamina.ref_audio_paths(_clip()) == []
+    assert dreamina.ref_audio_paths(_clip(audio_paths_json="{坏的")) == []
+    assert dreamina.ref_audio_paths(_clip(audio_paths_json='["/w/a.mp3"]')) == ["/w/a.mp3"]

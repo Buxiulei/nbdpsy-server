@@ -83,6 +83,12 @@ class VideoClip(Base):
     # 条数闸、时长闸、魔数白名单、提交 flag 全不一样，混一列就得靠猜后缀去分。本列上线前的
     # 老行恒 NULL，读侧 ``dreamina.ref_video_paths()`` 对 NULL 回空列表，语义与改前一致。
     video_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
+    # 参考**音频**本地副本路径的 JSON 数组，**顺序即语义**（= prompt 里的 @音频N）。
+    # 仅 multimodal2video 有值（CLI 的 --audio 同为 stringArray，2.5 收 10 条 / 2.0 家族收
+    # 3 条）。与图 / 视频各占一列的理由相同：三类的条数闸、魔数白名单、提交 flag 全不一样。
+    # **纯音频输入（无图无视频）只有 seedance2.5 允许**，见 dreamina.AUDIO_ONLY_MODELS。
+    # 本列上线前的老行恒 NULL，读侧 ``dreamina.ref_audio_paths()`` 对 NULL 回空列表。
+    audio_paths_json: Mapped[str | None] = mapped_column(Text, default=None)
     # multiframe2video 的逐段转场：JSON 数组 ``[{"prompt": str, "duration": float|null}, …]``，
     # **恰好 N-1 段**（N = image_paths_json 的图数），顺序即段序。``duration`` 全为 null 表示
     # 调用方没指定逐段时长，提交时整个 ``--transition-duration`` flag 不出现，由 CLI 按它自己

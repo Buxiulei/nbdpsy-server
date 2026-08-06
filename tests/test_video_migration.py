@@ -60,8 +60,8 @@ def test_video_clips_reference_columns_come_from_migrations(monkeypatch, tmp_pat
     db_file = str(tmp_path / "cols.db")
     monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
     command.upgrade(Config(str(_REPO_ROOT / "alembic.ini")), "head")
-    assert {"image_paths_json", "video_paths_json", "transitions_json"} <= _column_names(
-        db_file, "video_clips")
+    assert {"image_paths_json", "video_paths_json", "audio_paths_json",
+            "transitions_json"} <= _column_names(db_file, "video_clips")
 
 
 def test_migration_up_creates_and_down_drops(monkeypatch, tmp_path):

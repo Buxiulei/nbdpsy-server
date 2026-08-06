@@ -727,6 +727,12 @@ async def _only_clip() -> VideoClip:
         return (await s.execute(select(VideoClip))).scalars().one()
 
 
+async def _clips_ordered() -> list:
+    """库里全部任务行，按建行序（= 请求序）。"""
+    async with db_module.async_session() as s:
+        return (await s.execute(select(VideoClip).order_by(VideoClip.id))).scalars().all()
+
+
 async def test_multi_reference_images_reach_cli_as_repeated_flags(tmp_path, monkeypatch):
     """多图参考：3 张（场景 + 人物定妆 + 道具）各自物化成独立副本，CLI 收到 3 个 --image。
 
@@ -1895,3 +1901,303 @@ async def test_videos_do_not_change_pricing_or_budget_guard(tmp_path, monkeypatc
             headers=h)
         assert over.status_code == 409, over.text
         assert await _clip_count() == before, "护栏拒绝后不许留下半批任务"
+
+
+# ── 参考音频 audios（CLI 的 --audio 输入面）──────────────────────────────────
+_MP3 = b"ID3\x04\x00\x00" + b"\x00" * 32       # 形态合法但解不出时长的假 MP3（同 _MP4 的用意）
+
+
+def _seed_audio_uploads(tmp_path, count: int, folder: str = "auds") -> list[str]:
+    """在本服务图床里放 count 条假 MP3，返回 /uploads 路径（顺序即返回序，内容各带序号）。"""
+    d = tmp_path / "uploads" / folder
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(count):
+        (d / f"{i:02d}.mp3").write_bytes(_MP3 + str(i).encode())
+        out.append(f"/uploads/{folder}/{i:02d}.mp3")
+    return out
+
+
+async def test_reference_audios_reach_cli_as_repeated_audio_flags(tmp_path, monkeypatch):
+    """参考音频物化成独立副本，CLI 收到逐条 ``--audio``，与图 / 视频三类并存。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 1)
+    videos = _seed_video_uploads(tmp_path, 1)
+    audios = _seed_audio_uploads(tmp_path, 2)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       images=images, videos=videos, audios=audios),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    apaths = dreamina.ref_audio_paths(clip)
+    assert len(apaths) == 2 and len(set(apaths)) == 2, "两条要是两个独立副本，不能互相覆盖"
+    for p in apaths:
+        assert Path(p).is_file() and dreamina.clip_token_dir(clip.clip_id) in p
+    # 三类副本互不撞名（ref* / vid* / aud* 同处一个工作目录）
+    names = {Path(p).name for p in
+             dreamina.ref_paths(clip) + dreamina.ref_video_paths(clip) + apaths}
+    assert len(names) == 4, names
+
+    args = dreamina.build_submit_args(clip)
+    assert [a for a in args if a.startswith("--audio=")] == [f"--audio={p}" for p in apaths]
+    assert any(a.startswith("--image=") for a in args)
+    assert any(a.startswith("--video=") for a in args)
+
+
+async def test_reference_audio_order_is_preserved_exactly(tmp_path, monkeypatch):
+    """**数组顺序 = @音频N 编号顺序**，同一 URL 传两次照样物化两份（与图 / 视频同纪律）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    audios = _seed_audio_uploads(tmp_path, 3, folder="ordered_auds")
+    given = [audios[2], audios[0], audios[0], audios[1]]     # 打乱 + 重复
+    async with rest_client(tmp_path, monkeypatch) as client:
+        r = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=given),
+            headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+    clip = await _only_clip()
+    paths = dreamina.ref_audio_paths(clip)
+    assert len(paths) == 4 and len(set(paths)) == 4, "同一 URL 传两次必须物化两份，绝不合并"
+    for i, expect in enumerate([2, 0, 0, 1]):
+        assert Path(paths[i]).read_bytes() == _MP3 + str(expect).encode(), f"第 {i + 1} 条错位"
+    flags = [a for a in dreamina.build_submit_args(clip) if a.startswith("--audio=")]
+    assert flags == [f"--audio={p}" for p in paths], "CLI 参数顺序必须与数组顺序逐位一致"
+
+
+async def test_ref_audio_count_ceiling_is_per_model(tmp_path, monkeypatch):
+    """条数上限按模型分档（2.5≤10 / 2.0 家族≤3），超限**当场 422**、不留任何行。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    audios = _seed_audio_uploads(tmp_path, 11)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        over25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=audios),
+            headers=h)
+        assert over25.status_code == 422, over25.text
+
+        images = _seed_uploads(tmp_path, 1)
+        over20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images, audios=audios[:4]),
+            headers=h)
+        assert over20.status_code == 422, over20.text
+        assert "3" in over20.text, "文案要说清 2.0 家族的档位"
+
+        ok20 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images, audios=audios[:3]),
+            headers=h)
+        assert ok20.status_code == 202, ok20.text
+        ok25 = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=audios[:10]),
+            headers=h)
+        assert ok25.status_code == 202, ok25.text
+    assert await _clip_count() == 2, "两条 422 都不许留下任务行"
+
+
+async def test_audio_only_is_allowed_for_25_and_rejected_for_20_family(tmp_path, monkeypatch):
+    """**纯音频只有 seedance2.5 合法**：2.0 家族当场 422 且文案写清「仅 seedance2.5 支持」。
+
+    CLI 原文两行摆在一起就是这条规则：2.5 是 "audio-only is allowed"，2.0 家族是
+    "at least one --image or --video is required"。不在这里拦，2.0 的纯音频镜会把音频下完、
+    把行建好，再由 CLI 拒掉。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    audios = _seed_audio_uploads(tmp_path, 1)
+    images = _seed_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        ok = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=audios),
+            headers=h)
+        assert ok.status_code == 202, ok.text
+
+        for model in ("seedance2.0fast", "seedance2.0mini", "seedance2.0_vip"):
+            bad = await client.post(
+                "/api/video-clips",
+                json=_shot(operation="multimodal2video", model=model, audios=audios),
+                headers=h)
+            assert bad.status_code == 422, (model, bad.text)
+            assert "仅 seedance2.5 支持" in bad.text, model
+
+        # 2.0 家族**补一张图**就合法（拦的是「纯音频」，不是「带音频」）
+        with_image = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images, audios=audios),
+            headers=h)
+        assert with_image.status_code == 202, with_image.text
+        # 补一条视频同样合法
+        videos = _seed_video_uploads(tmp_path, 1)
+        with_video = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       videos=videos, audios=audios),
+            headers=h)
+        assert with_video.status_code == 202, with_video.text
+
+    clip = (await _clips_ordered())[0]
+    assert dreamina.ref_paths(clip) == [] and dreamina.ref_video_paths(clip) == []
+    assert len(dreamina.ref_audio_paths(clip)) == 1
+
+
+async def test_total_inputs_ceiling_across_three_kinds(tmp_path, monkeypatch):
+    """**总输入闸**：三类分项条条合法、合计超限 → 422（2.0 家族 9+3+3=15 > 12）。
+
+    videos 那一轮这道闸不可达（图 + 视频最多 9+3=12 恰好顶格），audio 一开就可达了。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 9)
+    videos = _seed_video_uploads(tmp_path, 3)
+    audios = _seed_audio_uploads(tmp_path, 3)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        over = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images, videos=videos, audios=audios),
+            headers=h)
+        assert over.status_code == 422, over.text
+        assert "总输入" in over.text and "12" in over.text
+        assert "参考视频 3 条超出" not in over.text, "分项都合法，报的必须是合计那道闸"
+
+        # 减到 12 份即合法（9+3+0）
+        ok = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.0fast",
+                       images=images, videos=videos),
+            headers=h)
+        assert ok.status_code == 202, ok.text
+    assert await _clip_count() == 1
+
+
+async def test_audios_only_belong_to_multimodal(tmp_path, monkeypatch):
+    """``audios`` 用在别的 operation 一律 422（那些子命令没有 --audio 输入面）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2)
+    audios = _seed_audio_uploads(tmp_path, 1)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        for payload in (
+            _shot(audios=audios),                                   # text2video
+            _shot(operation="image2video", ratio=None, image=images[0], audios=audios),
+            _shot(operation="frames2video", ratio=None, first_image=images[0],
+                  last_image=images[1], audios=audios),
+            {"operation": "multiframe2video", "images": images, "prompt": "两帧",
+             "duration": 5, "audios": audios},
+        ):
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == 422, (payload["operation"], r.text)
+    assert await _clip_count() == 0
+
+
+async def test_existing_operation_combos_still_hold_after_audio_matrix_change(
+        tmp_path, monkeypatch):
+    """回归锁：改 ``_check_media_matrix`` 收 audios 之后，**其余 operation 的既有组合规则一条没坏**。
+
+    这条把 videos 之前就存在的规矩逐条再钉一遍——加一类输入最容易顺手弄坏的就是这些分支。
+    """
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    images = _seed_uploads(tmp_path, 2)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        cases = [
+            (_shot(operation="image2video", image=images[0]), 422),        # image2video+ratio
+            (_shot(operation="image2video", ratio=None), 422),             # 缺 image
+            (_shot(operation="image2video", ratio=None, images=images), 422),   # 该用 multimodal
+            (_shot(image=images[0]), 422),                                 # text2video+参考图
+            (_shot(operation="multimodal2video", image=images[0], images=images), 422),
+            (_shot(operation="frames2video", ratio=None, first_image=images[0]), 422),
+            (_shot(operation="frames2video", first_image=images[0],
+                   last_image=images[1]), 422),                            # frames2video+ratio
+            (_shot(first_image=images[0], last_image=images[1]), 422),      # 首尾帧用错 operation
+            (_shot(operation="multimodal2video", ratio=None), 422),         # 三类一份都没给
+            # 正例：老的单图 multimodal / 首尾帧 / 纯文生视频照旧 202
+            (_shot(operation="multimodal2video", image=images[0]), 202),
+            (_shot(operation="frames2video", ratio=None, first_image=images[0],
+                   last_image=images[1]), 202),
+            (_shot(), 202),
+        ]
+        for payload, expect in cases:
+            r = await client.post("/api/video-clips", json=payload, headers=h)
+            assert r.status_code == expect, (payload, r.status_code, r.text)
+
+
+async def test_bad_audio_content_and_duration_block_before_any_row(tmp_path, monkeypatch):
+    """内容不是音频容器 / 时长越界 → 当场 400，**不建行**（与图、视频同一条通道）。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    d = tmp_path / "uploads" / "fakeaud"
+    d.mkdir(parents=True)
+    (d / "not-audio.mp3").write_bytes(_PNG)
+    audios = _seed_audio_uploads(tmp_path, 1, folder="longaud")
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        bad = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=["/uploads/fakeaud/not-audio.mp3"]),
+            headers=h)
+        assert bad.status_code == 400, bad.text
+        assert "不是有效音频容器" in bad.text
+
+        async def _fake_probe(_path):
+            return 40.0                       # 超过 2.5 的 30s 上限
+
+        monkeypatch.setattr(dreamina, "probe_duration", _fake_probe)
+        long_audio = await client.post(
+            "/api/video-clips",
+            json=_shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                       audios=audios),
+            headers=h)
+        assert long_audio.status_code == 400, long_audio.text
+        assert "参考音频" in long_audio.text and "越界" in long_audio.text
+    assert await _clip_count() == 0
+
+
+async def test_batch_carries_audios_and_budget_guard_is_unchanged(tmp_path, monkeypatch):
+    """批量端点透传 audios；**计价只看 model × duration**，带音频不改估算、护栏照常。"""
+    _stub_credit(monkeypatch)
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    audios = _seed_audio_uploads(tmp_path, 2)
+    shot = _shot(operation="multimodal2video", model="seedance2.5", duration=5,
+                 audios=audios)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        h = bearer(ADMIN_KEY)
+        ok = await client.post(
+            "/api/video-clip-batches",
+            json={"shots": [dict(shot), dict(shot)], "max_credits": 260}, headers=h)
+        assert ok.status_code == 202, ok.text
+        assert ok.json()["estimated_credits"] == 260
+        assert ok.json()["estimated_credits_per_shot"] == [130, 130]
+
+        before = await _clip_count()
+        over = await client.post(
+            "/api/video-clip-batches",
+            json={"shots": [dict(shot), dict(shot)], "max_credits": 259}, headers=h)
+        assert over.status_code == 409, over.text
+        assert await _clip_count() == before, "护栏拒绝后不许留下半批任务"
+
+    rows = await _clips_ordered()
+    assert all(len(dreamina.ref_audio_paths(r)) == 2 for r in rows)

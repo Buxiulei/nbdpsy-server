@@ -28,7 +28,7 @@ import math
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Literal, NamedTuple, get_args
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -117,29 +117,38 @@ _ESTIMATE_NOTE = (
 )
 
 _REF_NOTE = (
-    "参考图三种给法：单张 `image`、多张 `images`（multimodal2video 专用）、首尾两帧 "
-    "`first_image`+`last_image`（frames2video 专用）。**image 与 images 只能给一个**，"
-    "同给 422（本层不静默丢字段）。"
-    "**多图张数按模型分档**：seedance2.5 最多 30 张，seedance2.0 家族 / mini 最多 9 张，"
-    "超限当场 422 不白跑（网上流传的「Seedance 最多 9 张」是 2.0 的数字，别套到 2.5 上）。"
-    "多图用途是锁跨镜一致性——一镜同时给「本镜场景图 + 全片人物定妆图 + 关键道具图」。"
+    "**multimodal2video 收三类参考输入：图 `images` / 视频 `videos` / 音频 `audios`**"
+    "（CLI 的 --image / --video / --audio 三个 flag 都是可重复的 stringArray，"
+    "本服务已全部透传）。另有单张 `image`（老字段）与首尾两帧 `first_image`+`last_image`"
+    "（frames2video 专用）。**image 与 images 只能给一个**，同给 422（本层不静默丢字段）；"
+    "**videos / audios 只属于 multimodal2video**，给别的 operation 一律 422"
+    "（那些子命令没有这两个输入面，收下也送不出去）。"
+    "**三类条数各自按模型分档，超限当场 422 不白跑**："
+    "图 seedance2.5≤30 / 2.0 家族 / mini≤9（网上流传的「Seedance 最多 9 张」是 2.0 的数字，"
+    "别套到 2.5 上）；视频与音频各 seedance2.5≤10 / 2.0 家族≤3。"
+    "**外加一道总输入闸**：三类合计 seedance2.5≤50 份、2.0 家族≤12 份——"
+    "分项条条合法而合计超限是真会发生的（2.0 家族 9 图 + 3 视频 + 3 音频 = 15 > 12）。"
+    "三类各自的用途：多图锁跨镜一致性（一镜同时给「本镜场景图 + 全片人物定妆图 + 关键道具图」）；"
+    "参考视频把上一部片里成立的运镜 / 风格 / 节奏带到下一部片；参考音频给片子配乐 / 定节奏。"
+    "**纯音频输入（只给 audios，一张图一条视频都不给）只有 seedance2.5 合法**"
+    "（CLI 原文 2.5 是 audio-only is allowed、2.0 家族是 at least one --image or --video "
+    "is required），2.0 家族纯音频当场 422 并在文案里写明「仅 seedance2.5 支持」。"
+    "**参考视频 / 音频每份时长须 2-30s（2.0 家族 2-15s），每类合计也在同一窗口内**；"
+    "服务端在物化后用 ffprobe 前置校验，越界与坏素材同档处置（单镜 400、批量只让该镜落 "
+    "error 行，不连坐整批）——探不出时长的容器不拦，交 CLI 兜底。"
+    "**一处已知的口径不确定**：CLI help 把 video/audio 并称，「合计」是每类各自合计还是两类"
+    "相加，从 help 断不出来；本服务按**每类各自合计**判（宽的那一侧），真相若是两类相加，"
+    "超限会在 CLI 提交时被拒（任务未入队、不扣分）。"
+    "三类来源相同：图床直链（http/https）或本服务 /uploads 路径"
+    "（**本服务生成的成片 video_url、视频资产库直链都能直接回传当参考**），"
+    "**按内容魔数判类型**（图 png/jpg/gif/bmp/webp、视频 mp4/mov/webm、"
+    "音频 mp3/wav/m4a/aac/flac/ogg），三条白名单彼此独立、各认各的，"
+    "单份体积上限见服务端 CLIP_IMAGE_MAX_MB / CLIP_VIDEO_MAX_MB / CLIP_AUDIO_MAX_MB。"
+    "**顺序即语义**：images / videos / audios 的数组第 N 项就是 prompt 里的 "
+    "@图片N / @视频N / @音频N，服务端**不去重、不重排、不合并**，同一 URL 传两次照样物化两份。"
     "**frames2video 是分镜级运动控制**（精确指定镜头从哪一帧开始、到哪一帧结束，中间过渡"
     "交给模型）：两帧必须都给，缺一帧 422；**不接受 ratio**——画幅由首帧图推断，CLI 不收"
     "该参数，传了 422 免得调用方以为设置生效；时长仍按模型分档（2.5 到 30s、其余 15s）。"
-    "**参考视频 `videos`（multimodal2video 专用）**：把上一部片里成立的运镜 / 风格 / 节奏"
-    "当下一部片的参考。**条数按模型分档**——seedance2.5 最多 10 条、2.0 家族 / mini 最多 3 条，"
-    "超限 422。（CLI 另有「总输入 ≤50 / ≤12 份」，在本服务的输入面上**恒不可达**：audio 未透传，"
-    "图 + 视频最多 30+10=40 / 9+3=12 份，故没有第二道闸会响。）"
-    "**每条参考视频时长须 2-30s（2.0 家族 2-15s），合计也在同一窗口内**；服务端在物化后用 "
-    "ffprobe 前置校验，越界与坏图同档处置（单镜 400、批量只让该镜落 error 行，不连坐整批）"
-    "——探不出时长的容器不拦，交 CLI 兜底。videos 只属于 multimodal2video，"
-    "给别的 operation 一律 422（那些子命令没有 --video 输入面）。"
-    "参考视频来源与图一样：图床直链（http/https）或本服务 /uploads 路径"
-    "（**本服务生成的成片 video_url 可直接回传当参考**），"
-    "按**内容魔数**判容器（mp4 / mov / webm），单条体积上限见服务端 CLIP_VIDEO_MAX_MB。"
-    "**顺序即语义**：images / videos 的数组第 N 项就是 prompt 里的 @图片N / @视频N，"
-    "服务端**不去重、不重排、不合并**，同一 URL 传两次照样物化两份。"
-    "**audio 仍未透传**：CLI 有 --audio 输入面，是本服务尚未开放，不是 CLI 缺能力。"
 )
 
 _MULTIFRAME_NOTE = (
@@ -190,6 +199,9 @@ MANIFEST_ENTRIES = [
             "videos": "body,list[str]|None(参考视频，**仅 multimodal2video**；顺序即 @视频N，"
                       "seedance2.5 最多 10 条、其余模型最多 3 条；"
                       "每条时长 2-30s（2.0 家族 2-15s）、合计同窗口)",
+            "audios": "body,list[str]|None(参考音频，**仅 multimodal2video**；顺序即 @音频N，"
+                      "seedance2.5 最多 10 条、其余模型最多 3 条；时长口径同 videos；"
+                      "**纯音频输入仅 seedance2.5 合法**，2.0 家族缺图缺视频即 422)",
             "first_image": "body,str|None(首帧；**仅 frames2video**，与 last_image 必须成对)",
             "last_image": "body,str|None(尾帧；**仅 frames2video**，与 first_image 必须成对)",
             "transition_prompts": "body,list[str]|None(逐段转场提示词，**仅 multiframe2video**；"
@@ -202,11 +214,12 @@ MANIFEST_ENTRIES = [
                    "估不出为 null、纯重放为 0), warning?(低积分提示，不拦截)}",
         "errors": "422=参数校验失败（含 image2video/frames2video/multiframe2video+ratio、"
                   "text2video+参考图、image 与 images 同给、多图超模型张数上限、"
-                  "**videos 用在非 multimodal2video / 超模型条数上限**、"
+                  "**videos / audios 用在非 multimodal2video、超模型条数上限、"
+                  "三类合计超总输入上限、2.0 家族纯音频输入**、"
                   "frames2video 缺首帧或尾帧、multiframe2video 段数不符 / 传了 model / "
                   "长式传了 prompt 或 duration、duration 越界，**含「非 2.5 模型传了 >15s」**）；"
-                  "400=参考素材下载失败 / 不是图片 / 不是视频容器 / **参考视频时长越界**"
-                  "（**多份里坏一份即整镜失败**）；"
+                  "400=参考素材下载失败 / 不是图片 / 不是视频容器 / 不是音频容器 / "
+                  "**参考视频或音频时长越界**（**多份里坏一份即整镜失败**）；"
                   "409=积分余额低于提交下限（保守线，具体数值见响应体）；"
                   "503=即梦登录态失效（**不会静默排队**）；401=apikey 无效",
         "notes": _MODEL_NOTE + " " + _ESTIMATE_NOTE + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
@@ -271,7 +284,8 @@ MANIFEST_ENTRIES = [
                  "提交，或本批不带 max_credits。**不传 max_credits 时不做任何预算判定**。"
                  + " " + _REF_NOTE + " " + _MULTIFRAME_NOTE
                  + " **shots[] 与单镜入参逐字段同构**，多图 images / 参考视频 videos / "
-                 "首尾帧 first_image+last_image / 多帧故事 transition_prompts 在批量端点一样可用"
+                 "参考音频 audios / 首尾帧 first_image+last_image / 多帧故事 "
+                 "transition_prompts 在批量端点一样可用"
                  "（电影化的 25-30 镜只能走这里）。"
                  " **逐镜按 client_ref 去重**：整批重放（同 shots 同 refs）返回原 clip_ids、"
                  "零新增任务、积分零新增；整批全命中时**登录闸/积分闸都不挂**（掉登录或余额"
@@ -284,8 +298,9 @@ MANIFEST_ENTRIES = [
                  "这类 error 行**没进过即梦队列**，图源修好后用同 ref 重放会原地复活它"
                  "（同 clip_id 回 queued，零新建）——不必换 ref、也不会双倍扣分。"
                  "带远程素材（http/https）的批在请求内并发下载，单张图最多 30s、"
-                 "**单条参考视频最多 60s**（视频体积大一到两个量级，与图共用 30s 会全数超时），"
-                 "**调用方超时建议 ≥90s、带 videos 的批 ≥120s**；纯 text2video 批秒级返回。轮询按单镜 GET 逐条查，"
+                 "**单份参考视频 / 音频最多 60s**（体积大一到两个量级，与图共用 30s 会全数超时），"
+                 "**调用方超时建议 ≥90s、带 videos / audios 的批 ≥120s**；"
+                 "纯 text2video 批秒级返回。轮询按单镜 GET 逐条查，"
                  "或用 GET /api/video-clip-batches/{batch_id} 汇总。",
     },
     {
@@ -364,6 +379,10 @@ class CreateClipRequest(BaseModel):
     # 字段界同样取全家族最宽的 10，逐模型收紧在 _check_ref_video_ceiling 里。
     videos: list[str] | None = Field(default=None, min_length=1,
                                      max_length=dreamina.REF_VIDEO_MAX)
+    # 参考音频（multimodal2video 专用，顺序即传给 CLI 的 --audio 顺序 = prompt 里的 @音频N）。
+    # 字段界取全家族最宽的 10，逐模型收紧在 _check_ref_media_ceilings 里。
+    audios: list[str] | None = Field(default=None, min_length=1,
+                                     max_length=dreamina.REF_AUDIO_MAX)
     # 首尾帧（frames2video 专用，两者必须成对出现）
     first_image: str | None = None
     last_image: str | None = None
@@ -430,26 +449,38 @@ class CreateClipRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_ref_video_ceiling(self) -> "CreateClipRequest":
-        """参考视频条数上限按模型收紧（CLI help：``video<=10``；2.0 家族 / mini ``video<=3``）。
+    def _check_ref_media_ceilings(self) -> "CreateClipRequest":
+        """参考视频 / 音频的条数上限 + **总输入**上限，全部按模型收紧。
 
-        理由与图的张数闸逐字相同：不在这里拦，超限的镜会先把几十 MB 视频下载物化、把行建好，
-        再由 CLI 拒掉。
+        分项照 CLI help：``seedance2.5 -> video<=10, audio<=10``；
+        ``seedance2.0 family/mini -> video<=3, audio<=3``。理由与图的张数闸逐字相同：
+        不在这里拦，超限的镜会先把几十 MB 素材下载物化、把行建好，再由 CLI 拒掉。
 
-        **总输入闸（≤50 / ≤12）没有单独一道**，因为在本服务的输入面上它**不可达**：audio 不
-        透传，故总输入 = 图 + 视频，而分项闸已经把上界钉死在 30+10=40≤50、9+3=12≤12。写一道
-        永远不会响的闸是给读代码的人制造「这里可能超」的错觉。这个推导由
-        ``test_total_inputs_cap_is_implied_by_per_kind_caps`` 守着：哪天分项上限被放宽、或
-        audio 开了透传，那条测试立刻红，届时再补闸。
+        **总输入闸（≤50 / ≤12）是三类齐了之后才真会响的那一道**：2.0 家族 9 图 + 3 视频 +
+        3 音频 = 15 > 12，分项条条合法而合计超限。videos 那一轮它还不可达（图 + 视频最多
+        9+3=12 恰好顶格），故当时只留了一条推导守护测试；audio 一开，守护测试按设计变红，
+        这道闸就是它换来的。
         """
         if self.operation == "multiframe2video":
             return self               # 它只吃 images 的 2-20 张，见 _check_multiframe
-        count = len(self.videos or [])
-        ceiling = dreamina.max_ref_videos(self.model)
-        if count > ceiling:
+        for count, ceiling, label, widest in (
+            (len(self.videos or []), dreamina.max_ref_videos(self.model),
+             "参考视频", dreamina.REF_VIDEO_MAX),
+            (len(self.audios or []), dreamina.max_ref_audios(self.model),
+             "参考音频", dreamina.REF_AUDIO_MAX),
+        ):
+            if count > ceiling:
+                raise ValueError(
+                    f"{label} {count} 条超出 {self.model} 的上限：该模型最多 "
+                    f"{ceiling} 条，仅 seedance2.5 支持到 {widest} 条")
+        total = (len(self.images or []) + (1 if self.image else 0)
+                 + len(self.videos or []) + len(self.audios or []))
+        total_ceiling = dreamina.max_total_inputs(self.model)
+        if total > total_ceiling:
             raise ValueError(
-                f"参考视频 {count} 条超出 {self.model} 的上限：该模型最多 "
-                f"{ceiling} 条，仅 seedance2.5 支持到 {dreamina.REF_VIDEO_MAX} 条")
+                f"总输入 {total} 份（参考图 + 参考视频 + 参考音频）超出 {self.model} 的上限："
+                f"该模型总输入最多 {total_ceiling} 份，仅 seedance2.5 支持到 "
+                f"{dreamina.TOTAL_INPUTS_MAX} 份")
         return self
 
     @model_validator(mode="after")
@@ -461,10 +492,12 @@ class CreateClipRequest(BaseModel):
         - ``image2video``：必须有 image（CLI 的 ``--image`` 在这个子命令下是单张）；
           **有 ratio 就 422**——画幅由输入图推断，CLI 不收该参数。
         - ``text2video``：不收任何参考图。语义清晰优于静默忽略。
-        - ``multimodal2video``：image / images / videos 至少给一个（CLI 的 ``--image`` 与
-          ``--video`` 都是 stringArray；2.0 家族的 help 原文更是 "at least one --image or
-          --video is required"）。**``videos`` 只属于这一种 operation**：另四个子命令根本没有
-          ``--video`` 这个 flag，收下就只能丢掉。
+        - ``multimodal2video``：image / images / videos / audios 至少给一个（三个 flag 都是
+          stringArray）。**纯音频（只给 audios）只有 seedance2.5 合法**——CLI help 里 2.5 那
+          行写着 "audio-only is allowed"，而 2.0 家族那行写的是 "at least one --image or
+          --video is required"，故 2.0 家族纯音频当场 422 而不是等 CLI 拒。
+          **``videos`` / ``audios`` 只属于这一种 operation**：另四个子命令根本没有
+          ``--video`` / ``--audio`` 这两个 flag，收下就只能丢掉。
         - ``frames2video``：首尾两帧都必须给（缺一帧 CLI 就退化成别的形态，不是我们要的
           镜头调度）；**不收 ratio**——CLI help 原文 "ratio is inferred from the first frame
           image size"，传了会被它严格校验拒收，我们提前 422 免得调用方以为设置生效。
@@ -476,10 +509,15 @@ class CreateClipRequest(BaseModel):
             )
         if self.operation != "frames2video" and (self.first_image or self.last_image):
             raise ValueError("first_image / last_image 只属于 frames2video")
-        if self.videos and self.operation != "multimodal2video":
-            raise ValueError(
-                "videos（参考视频）只属于 multimodal2video："
-                "另四个子命令没有 --video 输入面，收下也送不出去")
+        if self.operation != "multimodal2video":
+            if self.videos:
+                raise ValueError(
+                    "videos（参考视频）只属于 multimodal2video："
+                    "另四个子命令没有 --video 输入面，收下也送不出去")
+            if self.audios:
+                raise ValueError(
+                    "audios（参考音频）只属于 multimodal2video："
+                    "另四个子命令没有 --audio 输入面，收下也送不出去")
         if self.operation == "image2video":
             # images 的判定排在「必须有 image」之前：只给 images 的调用方是在用错 operation，
             # 回「必须提供 image」等于让他去补一个本就不该在这里出现的字段。
@@ -506,8 +544,17 @@ class CreateClipRequest(BaseModel):
             if self.ratio:
                 raise ValueError(
                     "multiframe2video 的画幅由**第一张图**推断，不接受 ratio（CLI 不收该参数）")
+        elif not (self.image or self.images or self.videos or self.audios):
+            raise ValueError(
+                "multimodal2video 必须提供 image / images / videos / audios 至少一项")
         elif not (self.image or self.images or self.videos):
-            raise ValueError("multimodal2video 必须提供 image / images / videos 至少一项")
+            # 走到这里 = 只有 audios（纯音频输入）。CLI 只给 2.5 开了这条路。
+            if not dreamina.allows_audio_only(self.model):
+                raise ValueError(
+                    f"{self.model} 不支持纯音频输入：该模型档要求至少一个图片或视频输入"
+                    "（CLI 原文 at least one --image or --video is required），"
+                    "**纯音频仅 seedance2.5 支持**。处置：补一张参考图 / 一条参考视频，"
+                    "或把 model 换成 seedance2.5")
         return self
 
     @model_validator(mode="after")
@@ -816,14 +863,14 @@ def _ref_specs(req: CreateClipRequest) -> list[tuple[str, str]]:
     return [(s, "ref" if i == 0 else f"ref_{i + 1}") for i, s in enumerate(sources)]
 
 
-def _video_specs(req: CreateClipRequest) -> list[tuple[str, str]]:
-    """本镜要物化的参考视频 ``(来源, 副本名主干)`` 列表，**顺序即落库顺序 = @视频N 编号**。
+def _media_specs(sources: list[str] | None, prefix: str) -> list[tuple[str, str]]:
+    """参考视频 / 音频的 ``(来源, 副本名主干)`` 列表，**顺序即落库顺序 = @视频N / @音频N 编号**。
 
-    主干 ``vid`` / ``vid_2`` / ``vid_3``…（与参考图的 ``ref*`` / ``first`` / ``last`` 不撞名，
-    两类素材同处一个 clip 工作目录）。同名会互相覆盖，故逐条给不同主干。
+    主干 ``vid`` / ``vid_2``…、``aud`` / ``aud_2``…（与参考图的 ``ref*`` / ``first`` /
+    ``last`` 都不撞名，三类素材同处一个 clip 工作目录）。同名会互相覆盖，故逐份给不同主干。
     """
-    return [(s, "vid" if i == 0 else f"vid_{i + 1}")
-            for i, s in enumerate(req.videos or [])]
+    return [(s, prefix if i == 0 else f"{prefix}_{i + 1}")
+            for i, s in enumerate(sources or [])]
 
 
 def _segments_json(req: CreateClipRequest) -> str | None:
@@ -887,53 +934,70 @@ def _first_ref_source(req: CreateClipRequest) -> str | None:
     return specs[0][0] if specs else None
 
 
-async def _materialize(clip_id: str,
-                       req: CreateClipRequest) -> tuple[list[str], list[str], str | None]:
-    """物化本镜的全部参考素材 → (图路径列表, 视频路径列表, 错误说明)。无素材时 ``([], [], None)``。
+class _Refs(NamedTuple):
+    """一镜物化后的三类参考素材本地路径 + 错误说明（``error`` 非空时三个列表都空）。
+
+    三类齐了之后位置元组已经排不清（谁是图谁是音），故给个具名的——调用点四处，
+    错一个位次就是把音频当视频落库，而那种 bug 不报错、只默默出错片。
+    """
+
+    images: list[str]
+    videos: list[str]
+    audios: list[str]
+    error: str | None
+
+
+async def _materialize(clip_id: str, req: CreateClipRequest) -> _Refs:
+    """物化本镜的全部参考素材（图 / 视频 / 音频三类）。无素材时三个列表都空。
 
     **一份失败即整镜失败**：少一份参考素材生成出来的镜是废片，却照样占队列位、照样扣积分。
-    镜内也并发（多图参考可达 30 张 + 10 条视频，逐份串行 30s 上限会顶穿调用方超时）。
+    镜内也并发（可达 30 张图 + 10 条视频 + 10 条音频，逐份串行 30-60s 上限会顶穿调用方超时）。
 
-    视频落盘后再用 ffprobe 前置判时长（CLI 要求每条及合计 2-30s / 2-15s）：越界当**物化失败**
-    处置，与「图不是有效图片」同一条通道——单镜 400、批量只让该镜落 error 行。它不是 422
-    是因为时长要下载完才知道，而批量端点里一镜的素材问题**绝不能连坐整批**。
+    视频与音频落盘后各自用 ffprobe 前置判时长（CLI 要求每份及合计 2-30s / 2-15s）：越界当
+    **物化失败**处置，与「图不是有效图片」同一条通道——单镜 400、批量只让该镜落 error 行。
+    它不是 422 是因为时长要下载完才知道，而批量端点里一镜的素材问题**绝不能连坐整批**。
     """
-    img_specs, vid_specs = _ref_specs(req), _video_specs(req)
-    if not img_specs and not vid_specs:
-        return [], [], None
+    img_specs = _ref_specs(req)
+    vid_specs = _media_specs(req.videos, "vid")
+    aud_specs = _media_specs(req.audios, "aud")
+    if not (img_specs or vid_specs or aud_specs):
+        return _Refs([], [], [], None)
     workdir = dreamina.clip_dir(clip_id)
     try:
         materialized = await asyncio.gather(
             *(dreamina.materialize_ref_image(src, workdir, stem=stem)
               for src, stem in img_specs),
             *(dreamina.materialize_ref_video(src, workdir, stem=stem)
-              for src, stem in vid_specs))
+              for src, stem in vid_specs),
+            *(dreamina.materialize_ref_audio(src, workdir, stem=stem)
+              for src, stem in aud_specs))
     except ValueError as exc:
-        return [], [], str(exc)
+        return _Refs([], [], [], str(exc))
     paths = [str(p) for p in materialized]
-    image_paths, video_paths = paths[:len(img_specs)], paths[len(img_specs):]
-    if video_paths:
-        bad = await dreamina.check_ref_video_durations(video_paths, req.model)
+    cut1, cut2 = len(img_specs), len(img_specs) + len(vid_specs)
+    image_paths, video_paths, audio_paths = paths[:cut1], paths[cut1:cut2], paths[cut2:]
+    for media, kind in ((video_paths, "参考视频"), (audio_paths, "参考音频")):
+        bad = await dreamina.check_ref_media_durations(media, req.model, kind=kind)
         if bad:
-            return [], [], bad
-    return image_paths, video_paths, None
+            return _Refs([], [], [], bad)
+    return _Refs(image_paths, video_paths, audio_paths, None)
 
 
-def _apply_revive(clip: VideoClip, req: CreateClipRequest, image_paths: list[str],
-                  video_paths: list[str], img_error: str | None) -> None:
+def _apply_revive(clip: VideoClip, req: CreateClipRequest, refs: _Refs) -> None:
     """把复活的物化结果落到行上（**同一行同一 clip_id**，不新建）。
 
     物化再失败就维持 error、只更新文案——图源还是坏的，重置回 queued 只会让调度器提交一条
     没有参考图的任务。行仍然是可复活的（没碰过 CLI），下次再重放还有机会。
     """
-    if img_error:
-        clip.error = img_error
+    if refs.error:
+        clip.error = refs.error
         clip.finished_at = datetime.utcnow()
         return
     clip.image_source = _first_ref_source(req)
-    clip.image_path = image_paths[0] if image_paths else None
-    clip.image_paths_json = json.dumps(image_paths) if image_paths else None
-    clip.video_paths_json = json.dumps(video_paths) if video_paths else None
+    clip.image_path = refs.images[0] if refs.images else None
+    clip.image_paths_json = json.dumps(refs.images) if refs.images else None
+    clip.video_paths_json = json.dumps(refs.videos) if refs.videos else None
+    clip.audio_paths_json = json.dumps(refs.audios) if refs.audios else None
     clip.status = "queued"
     clip.error = None
     clip.finished_at = None
@@ -948,16 +1012,14 @@ async def _revive_clips(session, items: list[tuple[VideoClip, CreateClipRequest]
         return
     results = await asyncio.gather(
         *(_materialize(clip.clip_id, req) for clip, req in items))
-    for (clip, req), (image_paths, video_paths, img_error) in zip(items, results):
-        _apply_revive(clip, req, image_paths, video_paths, img_error)
+    for (clip, req), refs in zip(items, results):
+        _apply_revive(clip, req, refs)
     await session.commit()
 
 
 async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id: str,
                        batch_id: str | None = None, batch_index: int | None = None,
-                       image_paths: list[str] | None = None,
-                       video_paths: list[str] | None = None,
-                       error: str | None = None) -> tuple[VideoClip, bool]:
+                       refs: _Refs | None = None) -> tuple[VideoClip, bool]:
     """落一行任务；返回 (clip, 是否真新建)。
 
     ``clip_id`` 由调用方先生成（参考图要先物化进 ``clip_dir(clip_id)``，两者必须是同一个 id，
@@ -966,6 +1028,8 @@ async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id
     ``(created_by, client_ref)`` 唯一约束是幂等的最后一道闸：并发同 ref 双发时先到者建成、
     后到者撞 IntegrityError → 回滚重查拿到同一条（**绝不新建第二条**，那就是双倍扣分）。
     """
+    refs = refs or _Refs([], [], [], None)
+    error = refs.error
     clip = VideoClip(
         clip_id=clip_id,
         batch_id=batch_id,
@@ -979,10 +1043,11 @@ async def _insert_clip(session, op: Operator, req: CreateClipRequest, *, clip_id
         ratio=req.ratio,
         image_source=_first_ref_source(req),
         # 两列都写：image_paths_json 是权威全集，image_path 存第一张（老读者与老行的回落口）
-        image_path=image_paths[0] if image_paths else None,
-        image_paths_json=json.dumps(image_paths) if image_paths else None,
-        # 参考视频只有 multimodal2video 会有；老行与其余 operation 恒 NULL
-        video_paths_json=json.dumps(video_paths) if video_paths else None,
+        image_path=refs.images[0] if refs.images else None,
+        image_paths_json=json.dumps(refs.images) if refs.images else None,
+        # 参考视频 / 音频只有 multimodal2video 会有；老行与其余 operation 恒 NULL
+        video_paths_json=json.dumps(refs.videos) if refs.videos else None,
+        audio_paths_json=json.dumps(refs.audios) if refs.audios else None,
         transitions_json=_segments_json(req),
         status="error" if error else "queued",
         error=error,
@@ -1035,12 +1100,10 @@ async def create_video_clip(req: CreateClipRequest) -> dict:
     _guard_credit(status.get("credit"))
     async with get_session() as session:
         clip_id = dreamina.new_clip_id()
-        image_paths, video_paths, img_error = await _materialize(clip_id, req)
-        if img_error:
-            raise ValueError(img_error)  # → 400（宿主 ValueError 处理器）
-        clip, created = await _insert_clip(
-            session, op, req, clip_id=clip_id,
-            image_paths=image_paths, video_paths=video_paths)
+        refs = await _materialize(clip_id, req)
+        if refs.error:
+            raise ValueError(refs.error)  # → 400（宿主 ValueError 处理器）
+        clip, created = await _insert_clip(session, op, req, clip_id=clip_id, refs=refs)
         # 估价按**落库后的行**取（multiframe 长式的 duration 是派生值，请求里根本没有）。
         # created=False 是并发同 ref 撞唯一约束后拿到的别人那条行——那笔钱记在先到者头上，本次 0。
         estimate = _incremental_estimate(clip, will_submit=created)
@@ -1190,16 +1253,15 @@ async def create_video_clip_batch(req: CreateBatchRequest) -> dict:
         *(_materialize(cid, shot) for cid, (_i, shot) in zip(new_ids, pending)))
     unpriced = False
     async with get_session() as session:
-        for clip_id, (index, shot), (image_paths, video_paths, img_error) in zip(
-                new_ids, pending, materialized):
+        for clip_id, (index, shot), refs in zip(new_ids, pending, materialized):
             clip, created = await _insert_clip(
                 session, op, shot, clip_id=clip_id, batch_id=batch_id, batch_index=index,
-                image_paths=image_paths, video_paths=video_paths, error=img_error,
+                refs=refs,
             )
             clip_ids[index] = clip.clip_id
             per_shot[index] = _incremental_estimate(
-                clip, will_submit=created and not img_error)
-            if created and not img_error:
+                clip, will_submit=created and not refs.error)
+            if created and not refs.error:
                 unpriced = unpriced or clip.operation == "multiframe2video"
     payload = {"batch_id": batch_id, "clip_ids": clip_ids,
                "estimated_credits": _total_estimate(per_shot),

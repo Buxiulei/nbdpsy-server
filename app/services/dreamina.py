@@ -78,26 +78,42 @@ _REF_IMAGE_MAX_BY_MODEL = {"seedance2.5": REF_IMAGE_MAX}
 # multimodal2video 的参考**视频**条数上限（CLI help 原文：``seedance2.5 -> video<=10``；
 # ``seedance2.0 family/seedance2.0mini -> video<=3``）。CLI 的 ``--video stringArray``
 # 一直都在，是本服务此前没透传——参考视频的用途是把上一部片里成立的运镜/风格当下一部片的
-# 参考，与参考图各占一路输入面。**audio 仍未透传**（运营未要求，本模块也没有 --audio 的组装）。
+# 参考，与参考图各占一路输入面。
 REF_VIDEO_MAX = 10
 _REF_VIDEO_MAX_DEFAULT = 3
 _REF_VIDEO_MAX_BY_MODEL = {"seedance2.5": REF_VIDEO_MAX}
 
-# 总输入上限（CLI help：``total inputs<=50``/``<=12``）。**本服务不为它单设闸**——audio 不
-# 透传，总输入 = 图 + 视频，而分项闸已把上界钉死在 30+10=40≤50、9+3=12≤12，那道闸永远不会响。
-# 常量仍照 CLI 原文留着，由 test_total_inputs_cap_is_implied_by_per_kind_caps 守住这个推导：
-# 分项上限被放宽 / audio 开了透传时它立刻红，提醒补闸。
+# 参考**音频**条数上限（CLI help 原文：``seedance2.5 -> audio<=10``；
+# ``seedance2.0 family/seedance2.0mini -> audio<=3``）。用途是给片子配乐 / 定节奏。
+REF_AUDIO_MAX = 10
+_REF_AUDIO_MAX_DEFAULT = 3
+_REF_AUDIO_MAX_BY_MODEL = {"seedance2.5": REF_AUDIO_MAX}
+
+# 总输入上限（CLI help：``total inputs<=50``/``<=12``）。**三类透传齐了之后这道闸才真会响**：
+# 2.0 家族 9 图 + 3 视频 + 3 音频 = 15 > 12，分项全合法而合计超限——没有这道闸，这种组合会
+# 一路放行到 CLI 才被拒（素材已下完、行已建好）。REST 层的 ``_check_total_inputs`` 是它的落点。
 TOTAL_INPUTS_MAX = 50
 _TOTAL_INPUTS_MAX_DEFAULT = 12
 _TOTAL_INPUTS_MAX_BY_MODEL = {"seedance2.5": TOTAL_INPUTS_MAX}
 
-# 参考视频的时长窗口（CLI help 原文："each and total video/audio duration 2-30s"，
-# 2.0 家族是 2-15s）。**每条**与**合计**同一个窗口——数字与出片时长上限撞巧一样，但那是
+# **纯音频输入**（一张图一条视频都不给）只有 2.5 允许：CLI help 原文
+# ``seedance2.5 -> audio-only is allowed``，而 2.0 家族那行写的是
+# ``at least one --image or --video is required``。
+AUDIO_ONLY_MODELS = ("seedance2.5",)
+
+# 参考视频 / 音频的时长窗口（CLI help 原文："each and total video/audio duration 2-30s"，
+# 2.0 家族是 2-15s）。**每份**与**合计**同一个窗口——数字与出片时长上限撞巧一样，但那是
 # 两件事（一个是输入素材有多长，一个是出片有多长），故各存各的表，不互相引用。
-REF_VIDEO_SECONDS_MIN = 2.0
-REF_VIDEO_SECONDS_MAX = 30.0
-_REF_VIDEO_SECONDS_MAX_DEFAULT = 15.0
-_REF_VIDEO_SECONDS_MAX_BY_MODEL = {"seedance2.5": REF_VIDEO_SECONDS_MAX}
+#
+# 一处**已知的口径不确定**：help 把 "video/audio" 并称，「合计」到底是每类各自合计、还是两类
+# 相加，从 help 断不出来（也没有免费的验证途径——试一次就是一次真提交）。本服务按**每类各自
+# 合计**判：真相若是两类相加，超限会在 CLI 提交时被拒（rc≠0 落 error 行、任务没入队不扣分），
+# 代价是一次失败提交；反过来按两类相加判则会 422 掉一批 CLI 本来接受的合法组合，那是拿运营
+# 的正常用法去赌我们的猜测。manifest 里如实写了这条不确定。
+REF_MEDIA_SECONDS_MIN = 2.0
+REF_MEDIA_SECONDS_MAX = 30.0
+_REF_MEDIA_SECONDS_MAX_DEFAULT = 15.0
+_REF_MEDIA_SECONDS_MAX_BY_MODEL = {"seedance2.5": REF_MEDIA_SECONDS_MAX}
 
 # multiframe2video（多图连贯故事）的口径，全部照 CLI help 原文，**与上面几档无关**：
 # "inputs: 2-20 images"、"for N images, the transition count is N-1"、
@@ -410,14 +426,28 @@ def max_ref_videos(model: str) -> int:
     return _REF_VIDEO_MAX_BY_MODEL.get(model, _REF_VIDEO_MAX_DEFAULT)
 
 
+def max_ref_audios(model: str) -> int:
+    """该模型 multimodal2video 的参考音频条数上限（未知模型按家族默认 3 判，理由同上）。"""
+    return _REF_AUDIO_MAX_BY_MODEL.get(model, _REF_AUDIO_MAX_DEFAULT)
+
+
 def max_total_inputs(model: str) -> int:
-    """该模型 multimodal2video 的**总输入**上限（本服务口径 = 参考图 + 参考视频）。"""
+    """该模型 multimodal2video 的**总输入**上限（参考图 + 参考视频 + 参考音频）。"""
     return _TOTAL_INPUTS_MAX_BY_MODEL.get(model, _TOTAL_INPUTS_MAX_DEFAULT)
 
 
-def max_ref_video_seconds(model: str) -> float:
-    """该模型对参考视频的时长上限（每条及合计各自适用；未知模型按家族默认 15s 判）。"""
-    return _REF_VIDEO_SECONDS_MAX_BY_MODEL.get(model, _REF_VIDEO_SECONDS_MAX_DEFAULT)
+def allows_audio_only(model: str) -> bool:
+    """该模型是否允许**纯音频输入**（一张图一条视频都不给）。
+
+    只有 seedance2.5 允许；2.0 家族 / mini 的 help 明写 "at least one --image or --video
+    is required"。未知模型按不允许判（宁可窄不宜宽，与本模块其余分档同纪律）。
+    """
+    return model in AUDIO_ONLY_MODELS
+
+
+def max_ref_media_seconds(model: str) -> float:
+    """该模型对参考视频 / 音频的时长上限（每份及每类合计各自适用；未知模型按 15s 判）。"""
+    return _REF_MEDIA_SECONDS_MAX_BY_MODEL.get(model, _REF_MEDIA_SECONDS_MAX_DEFAULT)
 
 
 def estimate_credit(model: str, duration: int, operation: str | None = None) -> int | None:
@@ -489,9 +519,46 @@ def _sniff_video_ext(data: bytes) -> str | None:
     转码即可），放宽的代价是把「是不是视频」这道闸糊掉。
     """
     if data[4:8] == b"ftyp":
+        if data[8:11] in (b"M4A", b"M4B"):
+            return None      # 同是 ISO BMFF，但 M4A/M4B 是**音频**——那是音频通道的活
         return ".mov" if data[8:10] == b"qt" else ".mp4"
     if data[:4] == b"\x1a\x45\xdf\xa3":
         return ".webm"
+    return None
+
+
+# 音频容器魔数（**第三条独立白名单**，与图片、视频两条互不相通）
+_AUDIO_MAGICS = (
+    (b"ID3", ".mp3"),       # 带 ID3v2 标签的 MP3（绝大多数音乐文件）
+    (b"fLaC", ".flac"),
+    (b"OggS", ".ogg"),
+)
+# 无标签 MP3 / ADTS AAC 的帧同步字（11 位全 1 起头，按第 2 字节区分层与保护位）
+_MPEG_AUDIO_SYNC = (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xfa")
+_ADTS_AAC_SYNC = (b"\xff\xf1", b"\xff\xf9")
+
+
+def _sniff_audio_ext(data: bytes) -> str | None:
+    """按容器魔数判音频扩展名；不是已知容器返回 None。
+
+    **各通道各认各的**：图片、视频、音频三条白名单彼此独立，绝不为了收一类去放宽另一类
+    ——每一条都是「这个字节流确实是那种东西」的闸，糊掉任何一条都会让另外两个入口一起松。
+    ISO BMFF 这一族尤其要当心：mp4 与 m4a 的头长得一模一样，只有 major brand 能分开，
+    故视频那条显式排掉 ``M4A``/``M4B``、音频这条只认它们。
+
+    认六种：mp3（ID3 标签或裸帧同步）、wav、flac、ogg、m4a、ADTS aac。
+    """
+    for magic, ext in _AUDIO_MAGICS:
+        if data.startswith(magic):
+            return ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return ".wav"
+    if data[4:8] == b"ftyp" and data[8:11] in (b"M4A", b"M4B"):
+        return ".m4a"
+    if data[:2] in _MPEG_AUDIO_SYNC:
+        return ".mp3"
+    if data[:2] in _ADTS_AAC_SYNC:
+        return ".aac"
     return None
 
 
@@ -515,16 +582,17 @@ def _uploads_local_file(path: str) -> Path | None:
 # 慢速滴流的服务端（每 29s 吐一个字节）能把单次下载拖到无限长，故整段再包一层
 # ``asyncio.wait_for``——批量端点「单张最多 30s」的承诺靠的就是这一层。
 _REMOTE_FETCH_TIMEOUT = 30.0
-# 参考视频的那一份预算：同样的 30s 对一条几十 MB 的视频是**够不着的**（30MB 要 1MB/s 才能
-# 在 30s 内拉完），照搬会让体积上限形同虚设——所有正常参考视频都在下载超时上失败。
+# 参考视频 / 音频的那一份预算：同样的 30s 对一条几十 MB 的视频是**够不着的**（30MB 要
+# 1MB/s 才能在 30s 内拉完），照搬会让体积上限形同虚设——所有正常参考视频都在下载超时上失败。
+# 音频比视频小但同属「大素材」，共用这一档（不为它再劈一个只差几十秒的常量）。
 # 仍然有硬上限（不是无限等）：批量端点的超时建议按它换算。
-_REMOTE_VIDEO_FETCH_TIMEOUT = 60.0
+_REMOTE_MEDIA_FETCH_TIMEOUT = 60.0
 
 
 def _assert_public_host(host: str | None) -> None:
     """拒绝指向内网/环回/链路本地的参考素材 URL（SSRF 闸）；不合规抛 ValueError。
 
-    话术说「参考素材」而不是「参考图」：这道闸同时服务参考图与参考视频两条物化通道。
+    话术说「参考素材」而不是「参考图」：这道闸同时服务参考图 / 视频 / 音频三条物化通道。
 
     参考素材 URL 由调用方给，服务端会**主动去 GET**——不设闸就是一个任意内网探测器：
     ``http://127.0.0.1:8000/api/...``、``http://169.254.169.254/``（云元数据）、
@@ -672,39 +740,59 @@ async def materialize_ref_video(source: str, workdir: Path, *, stem: str = "vid"
     """
     return await _materialize_ref(
         source, workdir, stem, kind="参考视频", limit_mb=settings.CLIP_VIDEO_MAX_MB,
-        timeout=_REMOTE_VIDEO_FETCH_TIMEOUT, sniff=_sniff_video_ext,
+        timeout=_REMOTE_MEDIA_FETCH_TIMEOUT, sniff=_sniff_video_ext,
         content_hint="不是有效视频容器（按内容魔数判定，非扩展名；支持 mp4 / mov / webm）",
         local_ext_default=".mp4", sniff_local=True)
 
 
-async def check_ref_video_durations(paths: list[str], model: str) -> str | None:
-    """物化后用 ffprobe 前置校验参考视频时长；越界返回中文说明，合规返回 None。
+async def materialize_ref_audio(source: str, workdir: Path, *, stem: str = "aud") -> Path:
+    """把参考音频落成 clip 工作目录内的**独立副本**，返回本地路径；非法来源抛 ValueError。
 
-    CLI 口径 "each **and total** video/audio duration 2-30s"（2.0 家族 2-15s）：每条与合计
+    第三条通道，与图 / 视频**各认各的魔数**（``_sniff_audio_ext``）、各有各的体积上限
+    （``CLIP_AUDIO_MAX_MB``）。``stem`` 默认 ``aud``，多条时 ``aud``/``aud_2``…，与
+    ``ref*`` / ``vid*`` / ``first`` / ``last`` 都不撞名。
+    """
+    return await _materialize_ref(
+        source, workdir, stem, kind="参考音频", limit_mb=settings.CLIP_AUDIO_MAX_MB,
+        timeout=_REMOTE_MEDIA_FETCH_TIMEOUT, sniff=_sniff_audio_ext,
+        content_hint="不是有效音频容器（按内容魔数判定，非扩展名；"
+                     "支持 mp3 / wav / m4a / aac / flac / ogg）",
+        local_ext_default=".mp3", sniff_local=True)
+
+
+async def check_ref_media_durations(paths: list[str], model: str, *,
+                                    kind: str = "参考视频") -> str | None:
+    """物化后用 ffprobe 前置校验参考视频 / 音频时长；越界返回中文说明，合规返回 None。
+
+    CLI 口径 "each **and total** video/audio duration 2-30s"（2.0 家族 2-15s）：每份与合计
     各自都要在窗口内，故两道都判。放在服务端做是为了**省一次白跑**——不判的话越界要等 CLI
     在 worker 侧拒收，那时行已建、素材已下载，运营看到的是一条要人回头清理的 error 行。
 
-    ``probe_duration`` 探不出（ffprobe 缺失 / 容器怪异）时**跳过那一条不拦**，与
+    **按类各调一次**（视频一次、音频一次），故这里的「合计」是**每类各自合计**。help 把
+    "video/audio" 并称，合计是否跨两类相加断不出来；按每类判的取舍见 ``REF_MEDIA_SECONDS_MIN``
+    上面那段注释。
+
+    ``probe_duration`` 探不出（ffprobe 缺失 / 容器怪异）时**跳过那一份不拦**，与
     ``get_video_clip_frame`` 的越界判定同一条纪律：把「探测器不给力」变成拒绝服务是本末倒置，
     真越界了 CLI 那边还有一道。
     """
     if not paths:
         return None
-    ceiling = max_ref_video_seconds(model)
+    ceiling = max_ref_media_seconds(model)
     seconds = await asyncio.gather(*(probe_duration(Path(p)) for p in paths))
     total = 0.0
     for index, value in enumerate(seconds):
         if value is None:
             continue                 # 探不出：不拦（真越界由 CLI 兜底）
-        if not (REF_VIDEO_SECONDS_MIN <= value <= ceiling):
-            return (f"第 {index + 1} 条参考视频时长 {value:.1f}s 越界：{model} 要求每条 "
-                    f"{REF_VIDEO_SECONDS_MIN:.0f}-{ceiling:.0f}s"
-                    f"（仅 seedance2.5 支持到 {REF_VIDEO_SECONDS_MAX:.0f}s）")
+        if not (REF_MEDIA_SECONDS_MIN <= value <= ceiling):
+            return (f"第 {index + 1} 份{kind}时长 {value:.1f}s 越界：{model} 要求每份 "
+                    f"{REF_MEDIA_SECONDS_MIN:.0f}-{ceiling:.0f}s"
+                    f"（仅 seedance2.5 支持到 {REF_MEDIA_SECONDS_MAX:.0f}s）")
         total += value
     if total > ceiling:
-        return (f"参考视频合计时长 {total:.1f}s 越界：{model} 要求合计也在 "
-                f"{REF_VIDEO_SECONDS_MIN:.0f}-{ceiling:.0f}s 内"
-                "（CLI 口径 each and total video duration）")
+        return (f"{kind}合计时长 {total:.1f}s 越界：{model} 要求合计也在 "
+                f"{REF_MEDIA_SECONDS_MIN:.0f}-{ceiling:.0f}s 内"
+                "（CLI 口径 each and total video/audio duration）")
     return None
 
 
@@ -727,20 +815,29 @@ def ref_paths(clip: VideoClip) -> list[str]:
     return [clip.image_path] if clip.image_path else []
 
 
-def ref_video_paths(clip: VideoClip) -> list[str]:
-    """这条 clip 的参考视频本地副本路径（**顺序即语义**，见 VideoClip.video_paths_json）。
+def _json_paths(raw: str | None) -> list[str]:
+    """JSON 数组列 → 路径列表；空列 / 坏 JSON / 非数组一律回空列表。
 
-    没有 ``image_path`` 那种单列回落：本列上线前的老行一律没有参考视频，空列表就是它们的
-    正确答案。坏 JSON 同样按空处理——理由与 ``ref_paths`` 一样，一个坏值不该让一条已建好的
-    任务永远提交不出去（少一路参考的片仍是可用产出，而卡死的行要人来收）。
+    坏值不抛：这类列只装路径，一个坏值不该让一条已建好的任务永远提交不出去（少一路参考的
+    片仍是可用产出，而卡死的行要人来收）。这也是本列上线前老行的正确答案。
     """
-    if not clip.video_paths_json:
+    if not raw:
         return []
     try:
-        paths = json.loads(clip.video_paths_json)
+        paths = json.loads(raw)
     except json.JSONDecodeError:
         return []
     return [str(p) for p in paths] if isinstance(paths, list) else []
+
+
+def ref_video_paths(clip: VideoClip) -> list[str]:
+    """这条 clip 的参考视频本地副本路径（**顺序即语义**，见 VideoClip.video_paths_json）。"""
+    return _json_paths(clip.video_paths_json)
+
+
+def ref_audio_paths(clip: VideoClip) -> list[str]:
+    """这条 clip 的参考音频本地副本路径（**顺序即语义**，见 VideoClip.audio_paths_json）。"""
+    return _json_paths(clip.audio_paths_json)
 
 
 def transitions(clip: VideoClip) -> list[dict]:
@@ -815,12 +912,13 @@ def build_submit_args(clip: VideoClip) -> list[str]:
         # 换了就是让镜头倒着走，而且 ratio 也会按错的那张图推断。
         return ["frames2video", f"--first={paths[0]}", f"--last={paths[1]}", *common]
     if clip.operation == "multimodal2video":
-        # --image / --video 都是 stringArray（CLI help：repeat for each local input
-        # image/video path），每份素材一个 flag，**顺序即 prompt 里的 @图片N / @视频N**。
-        # 条数闸在 REST 层按模型分档拦过（图 2.5≤30 / 2.0 家族≤9，视频 ≤10 / ≤3，
-        # 总输入 ≤50 / ≤12）。图在前视频在后，与 CLI 自己的示例同序。
+        # --image / --video / --audio 三个都是 stringArray（CLI help：repeat for each
+        # local input image/video/audio path），每份素材一个 flag，**顺序即 prompt 里的
+        # @图片N / @视频N / @音频N**。条数闸在 REST 层按模型分档拦过（图 2.5≤30 / 2.0 家族≤9，
+        # 视频与音频各 ≤10 / ≤3，总输入 ≤50 / ≤12）。图 → 视频 → 音频，与 CLI 示例同序。
         args = ["multimodal2video", *(f"--image={p}" for p in paths),
-                *(f"--video={p}" for p in ref_video_paths(clip)), *common]
+                *(f"--video={p}" for p in ref_video_paths(clip)),
+                *(f"--audio={p}" for p in ref_audio_paths(clip)), *common]
         if clip.ratio:
             args.append(f"--ratio={clip.ratio}")
         return args

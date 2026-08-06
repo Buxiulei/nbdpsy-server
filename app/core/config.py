@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     # 参考视频物化的单条大小上限(MB)。视频比图片大一到两个量级(2-30s 的 720p 片常在
     # 10-60MB),共用图片那个 15MB 的闸会把正常参考视频全拒掉,故单列一档。
     CLIP_VIDEO_MAX_MB: int = 200
+    # 参考音频物化的单条大小上限(MB)。2-30s 的无损音频撑死几十 MB,比视频窄得多,
+    # 但仍远超图片那档,故也单列一档(三类素材三个闸,各按各的量级)。
+    CLIP_AUDIO_MAX_MB: int = 50
 
     # ── 内容资产库(content_archive,设计 2026-07-25-content-archive-design.md)──
     # 发布成功自动归档;取详情即刷新 last_used_at;距最后使用超 TTL 天由 ArchiveReaper 删除。
