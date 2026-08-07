@@ -224,6 +224,42 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-07",
+        "title": "排队可见性:轮询直接告诉你排第几、在等什么、还要等多久",
+        "kind": "feature",
+        "summary": "14 个轮询端点的排队态一律带 queue 段:position / ahead / "
+                   "account_queue_depth / running(当前执行那条)/ blocked_by + detail。"
+                   "blocked_by 四态:session_cap(附 used/cap/window_resets_at,精确算出额度"
+                   "何时重新有位)、account_busy、global_concurrency、null(没被闸住或排期未"
+                   "到点,附 not_before)。**看到 queued 不要重试**——重试只会再灌一条进同一个队列。",
+        "endpoints": [
+            "/api/publish-jobs/{job_id}",
+            "/api/cookie-checks/{check_id}",
+            "/api/note-exports/{export_id}",
+            "/api/note-deletions/{deletion_id}",
+            "/api/note-components/{job_id}",
+            "/api/note-component-reads/{job_id}",
+            "/api/note-comments/{comment_id}",
+            "/api/note-extracts/{job_id}",
+            "/api/collection-batches/{job_id}",
+            "/api/interaction-backfills/{job_id}",
+            "/api/podcast-collections/{job_id}",
+        ],
+        "notes": "起因是会话总闸上线后出现过全矩阵 9 个号满帽、11 条排队、running=0,单条排 "
+                 "40 分钟以上,而调用方只看得到 status=queued。顺带修了一处真缺陷:"
+                 "not_before 带时区偏移时会撞 TypeError 被当成「立即可派」静默放行,排期直接失效。",
+    },
+    {
+        "date": "2026-08-07",
+        "title": "矩阵互动扇出改一轮一会话做多篇",
+        "kind": "fix",
+        "summary": "发布成功后的矩阵互动此前按「每篇一条任务」登记,同号待互动的多篇会摊成多次"
+                   "浏览器会话,在会话总闸下既占额度又排长队。改为同号待互动笔记合并登记,"
+                   "一轮会话做多篇。调用方无参数变化,表现为发布后的互动扇出不再霸占队列。",
+        "endpoints": ["/api/publish-jobs"],
+        "notes": None,
+    },
+    {
+        "date": "2026-08-07",
         "title": "统一指南接口 + 版本号补齐到 0.20.0",
         "kind": "fix",
         "summary": "新增 GET /api/guide(本接口):能力域分组 + 变更记录 + 已知边界。"
@@ -599,8 +635,10 @@ KNOWN_LIMITATIONS = [
     {
         "area": "interact",
         "what": "同号浏览器会话有滚动小时窗硬帽(系统任务默认 4/时,运营触发默认 12/时)。"
-                "超帽的任务**停在 queued 不动**,既不失败也不报错。看到 queued 变长先想到这条,"
-                "别当卡死重发——重发只会把队列堆得更满。",
+                "超帽的任务**停在 queued 不动**,既不失败也不报错,实测出现过全矩阵满帽、"
+                "单条排 40 分钟以上。**别当卡死重发**——重发只会再灌一条进同一个队列。"
+                "轮询响应的 queue 段会直接告诉你排第几、被什么闸住(blocked_by=session_cap 时"
+                "附 window_resets_at)、还要等多久,判断前先读它,别靠猜。",
         "why": "风控红线是同号一小时 ≤4-5 次会话,实测一小时 5 次就把号弹上验证墙。"
                "各子系统只守自己的闸,必须在派发层做第二层防御。",
         "since": "2026-08-07",

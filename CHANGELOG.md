@@ -2,7 +2,7 @@
 
 ## 0.20.0 (2026-08-07)
 
-**统一指南接口 `GET /api/guide` + 8 月 6-7 日十二次上线补录(8-07 九次 + 8-06 三次)。**
+**统一指南接口 `GET /api/guide` + 8 月 6-7 日十四次上线补录(8-07 十一次 + 8-06 三次)。**
 版本号自 0.17.0 起就没跟上(一路落后到 0.19.1 发布仍写着 0.17.0),本版一并收口,
 并加 `tests/test_version_changelog.py`
 把 `app.__version__` 与本文件最新条目钉死——以后漏改在 CI 就红。
@@ -31,7 +31,13 @@ manifest 回答的是「这个端点怎么调」,答不了消费方真正卡住�
 就是把 guide 撑成第二份长文档。机械钉住的只有**真正会静默腐烂又真正误导人的那一项**——
 版本号。
 
-### 8 月 7 日九次上线(补录,均已在 main;PATCH 硬拒单列成一条,故下面十条)
+### 8 月 7 日十一次上线(补录,均已在 main;PATCH 硬拒单列成一条,故下面十二条)
+
+- **排队可见性**:14 个轮询端点的排队态带 `queue` 段(position / ahead /
+  account_queue_depth / running / blocked_by + detail),`blocked_by=session_cap` 时附
+  `window_resets_at`,精确算出额度何时重新有位。**看到 queued 不要重试**——重试只会再灌
+  一条进同一个队列。判据收口在 `app/services/queue_status.py` 一处,worker 与读侧都只调它。
+- **矩阵互动扇出改一轮一会话做多篇**:同号待互动笔记合并登记,不再摊成多次会话霸占队列。
 
 - **他人笔记提取**:`POST /api/notes/extract` + `GET /api/note-extracts/{job_id}`。正文/图片/
   互动数纯 HTTP 零会话;带 `with_comments` 才起一次浏览器会话。当天即整改三条:`wall_` 开头
