@@ -427,3 +427,47 @@ def test_backlog_silent_below_threshold():
         done()
 
     assert "积压" not in "".join(buf)
+
+
+# ---------------- 大视频:账号子进程硬超时按载荷伸缩 ----------------
+
+
+def test_proc_timeout_unchanged_for_ordinary_jobs():
+    """普通任务(没有 video_path)算出来**恒等于**基准 1800 —— 行为逐字节不变。
+
+    这条是防回归的主锁:伸缩只该给大视频加时,绝不能顺手改动其余所有任务的硬超时。
+    """
+    from app.worker import Supervisor as S
+
+    assert S._spawn_timeout_for(1800, []) == 1800
+    assert S._spawn_timeout_for(1800, [None, None]) == 1800
+    assert S._spawn_timeout_for(1800, [0]) == 1800
+
+
+def test_proc_timeout_extends_for_large_video(monkeypatch):
+    """携带大视频的 publish job → 在基准之上按体积加时(与 step3v 同一公式)。"""
+    from app.core.config import settings
+    from app.worker import Supervisor as S
+
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_BASE_S", 300)
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_PER_100MB_S", 120)
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_CAP_S", 3600)
+
+    gb = 1024 * 1024 * 1024
+    # 1GB:媒体侧要 300 + 1228 = 1528s,叠在基准之上 → 1800 + 1528
+    assert S._spawn_timeout_for(1800, [gb]) == 1800 + 1528
+
+
+def test_proc_timeout_takes_the_largest_payload(monkeypatch):
+    """一次派多条 job 时按**最大**那个文件算 —— 按最小算等于给大的那条判了死刑。"""
+    from app.core.config import settings
+    from app.worker import Supervisor as S
+
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_BASE_S", 300)
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_PER_100MB_S", 120)
+    monkeypatch.setattr(settings, "VIDEO_UPLOAD_TIMEOUT_CAP_S", 3600)
+
+    mb = 1024 * 1024
+    small, big = 100 * mb, 500 * mb
+    assert S._spawn_timeout_for(1800, [small, big]) == S._spawn_timeout_for(1800, [big])
+    assert S._spawn_timeout_for(1800, [small, big]) > S._spawn_timeout_for(1800, [small])

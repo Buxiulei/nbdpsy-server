@@ -13,6 +13,7 @@
 - 重试耗尽 → failed。
 """
 
+import os
 import random
 from datetime import datetime
 from typing import Callable, Optional, Sequence
@@ -121,3 +122,47 @@ def video_ext_allowed(video_path: str) -> bool:
     """视频路径的扩展名是否在平台白名单内(纯函数,大小写不敏感)。"""
     lowered = (video_path or "").lower()
     return any(lowered.endswith(ext) for ext in XHS_VIDEO_EXTENSIONS)
+
+
+# ── 视频笔记封面:平台接受的图片扩展名 ──
+# 封面走图片而非视频那套白名单;与既有图片上传服务(upload_service._FORMAT_EXT)
+# 放行的格式一致,多带一个 .jpeg 写法。
+XHS_COVER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def cover_ext_allowed(cover_path: str) -> bool:
+    """封面路径的扩展名是否在白名单内(纯函数,大小写不敏感)。"""
+    lowered = (cover_path or "").lower()
+    return any(lowered.endswith(ext) for ext in XHS_COVER_EXTENSIONS)
+
+
+# ── 大媒体:等待/硬超时按文件体积伸缩 ──
+# 用户会传 15-30 分钟的 GB 级视频,上传到小红书 + 平台转码可能到 10-30 分钟级。
+# 固定超时在这个量级上必错:给小了大文件永远发不出去,给大了一条坏视频占死进程几小时。
+# **一处定义两处用**:step3v 等上传转码、supervisor 的账号子进程硬超时,共用本公式
+# (语义都是"这么大的文件合理要多久"),避免两边各写一份然后漂移。
+
+
+def media_timeout_s(
+    size_bytes: int | None, *, base_s: int, per_100mb_s: int, cap_s: int
+) -> int:
+    """按媒体文件体积算超时秒数:``base + 大小/100MB * per_100mb``,封顶 ``cap``。
+
+    - 大小未知(``None``)或非正数 → 退回 ``base``:**不假装知道**,给个保守基数。
+    - 结果**永不低于 base**:``cap`` 配得比 ``base`` 还小(配置写错)时也不许把超时
+      塌缩成比基数还短,那会让所有任务无差别地被砍在半路。
+    """
+    if not size_bytes or size_bytes <= 0:
+        return base_s
+    scaled = base_s + int(size_bytes / (100 * 1024 * 1024) * per_100mb_s)
+    return max(base_s, min(scaled, cap_s))
+
+
+def media_file_size(path: str | None) -> int | None:
+    """读文件字节数;路径为空/读不到一律 None(交给 ``media_timeout_s`` 退回基数)。"""
+    if not path:
+        return None
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None

@@ -39,6 +39,7 @@ from app.browser.note_components import (
     ComponentResponses,
     apply_components,
     apply_original_declaration,
+    apply_video_cover,
 )
 from app.browser.profile_guard import (
     clean_locks,
@@ -594,12 +595,15 @@ class SyncClient:
         components: Optional[Dict[str, Any]] = None,
         job_tag: Optional[str] = None,
         video_path: Optional[str] = None,
+        cover_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """走 step1-6 录入内容 + 三组件(可选)+ step7 真发布。
 
         ``video_path``:给了就是**视频笔记**,媒体那一段改走 step2v(灌视频)+ step3v
         (等上传+转码),并跳过图文专属的 step2/3/4;不给则一行不变走图文老路。
         视频与图片二选一(入口 POST /api/publish-jobs 已把互斥钉死),这里只按有无路由。
+        ``cover_path``:视频笔记的自定义封面图(仅 video_path 存在时有意义);不给就用平台
+        自动截取的第一帧。封面失败**只告警不阻断发布**(语义对齐三组件)。
 
         ``job_tag``:发布任务 id,只用来给失败现场截图打标,让运营能按 job 取回
         (见 ``XHSPublishAtomicTasks._take_screenshot``);不传则行为与上线前一致。
@@ -644,7 +648,7 @@ class SyncClient:
                 r = atomic.step2v_upload_video(video_path)
                 if not r.get("success"):
                     return {"success": False, "error": r.get("error")}
-                r = atomic.step3v_wait_for_video_processing()
+                r = atomic.step3v_wait_for_video_processing(video_path=video_path)
                 if not r.get("success"):
                     return {"success": False, "error": r.get("error")}
                 logger.info(f"✓ 视频已上传并转码完成(等待 {r.get('wait_time')}s)")
@@ -704,12 +708,32 @@ class SyncClient:
                         f"{r6.get('topics_failed')}"
                     )
 
+            # step6.4 视频封面(仅视频 + 传了 cover_path 才跑):必须排在 step3v 转码完成
+            # 之后(封面 UI 在上传未完成时不可交互),又必须赶在发布门之前。
+            # 失败**只告警不阻断发布** —— 平台自动截取的第一帧就是兜底,不值得为它废掉
+            # 一条已经传完转好的视频。
+            cover_result = None
+            if video_path and cover_path:
+                try:
+                    cover_result = apply_video_cover(
+                        atomic.page, SyncHumanActions(atomic.page), cover_path
+                    )
+                except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
+                    cover_result = {"status": "error", "reason": f"cover_exception: {exc}"}
+                if cover_result.get("status") == "error":
+                    logger.warning(
+                        f"[SyncClient] 封面未设上(不阻断发布,退回平台自动封面): "
+                        f"{cover_result.get('reason')} | 取证: {cover_result.get('observed')}"
+                    )
+
             # step6.5 三组件(设计 3.1:step6 之后、step7 之前);失败仅告警,不阻断发布
             component_result = self._apply_components(atomic, responses, components)
 
             # step6.6 原创声明:**每次发布无条件打开**(运营裁定 2026-08-05);
             # 失败仅告警不阻断——辅助声明不值得废掉一篇图都传完的笔记。
             component_result = dict(component_result or {})
+            if cover_result is not None:
+                component_result["cover"] = cover_result
             try:
                 component_result["original_declaration"] = apply_original_declaration(
                     atomic.page, SyncHumanActions(atomic.page)
@@ -835,12 +859,14 @@ def publish_once(
     components: Optional[Dict[str, Any]] = None,
     job_tag: Optional[str] = None,
     video_path: Optional[str] = None,
+    cover_path: Optional[str] = None,
 ) -> PublishResult:
     """一次性:建 client → start → 录入内容 → 三组件(可选)→ step7 真发布 → stop。
 
     供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。任何阶段失败都落到 ``PublishResult``。
     ``components`` 为 None / 全空时完全跳过组件那一步(默认值,行为不变)。
-    ``video_path`` 给了就发**视频笔记**(此时 ``image_paths`` 应为空列表)。
+    ``video_path`` 给了就发**视频笔记**(此时 ``image_paths`` 应为空列表);
+    ``cover_path`` 是它的自定义封面(可空 = 平台自动封面)。
     """
     client = SyncClient(account_id, cookies)
     try:
@@ -850,7 +876,7 @@ def publish_once(
 
         result = client.publish_note(
             title, content, image_paths, topics, components,
-            job_tag=job_tag, video_path=video_path,
+            job_tag=job_tag, video_path=video_path, cover_path=cover_path,
         )
         return PublishResult(
             success=bool(result.get("success")),

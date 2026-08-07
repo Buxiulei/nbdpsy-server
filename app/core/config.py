@@ -56,10 +56,22 @@ class Settings(BaseSettings):
     # 顺延时间在窗口起点 + random.uniform(0, JITTER) 内落点,避免整点节律。
     PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR: int = 1
     PUBLISH_ACTIVE_WINDOW_JITTER_SEC: int = 7200
-    # 视频笔记:上传 + 平台转码的等待上限(秒)。真实业务视频几十~几百 MB,转码耗时
-    # 由平台侧决定、我们观测不到上界,故给足余量并留成可配置项 —— 超时宁可报错带取证,
-    # 也不能因为等不够就把一条已上传大半的视频判失败(重试要从头再传一遍)。
-    PUBLISH_VIDEO_UPLOAD_TIMEOUT: int = 600
+    # 视频/音频:上传 + 平台转码的等待上限,**按文件体积伸缩**(公式见
+    # app/publish/policy.py::media_timeout_s,step3v 与账号子进程硬超时共用一套)。
+    # 用户会传 15-30 分钟的 GB 级视频:固定超时在这个量级上必错 —— 给小了大文件永远
+    # 发不出去,给大了一条坏视频占死进程几小时。基数 + 每 100MB 加时,封顶兜底。
+    VIDEO_UPLOAD_TIMEOUT_BASE_S: int = 300
+    VIDEO_UPLOAD_TIMEOUT_PER_100MB_S: int = 120
+    VIDEO_UPLOAD_TIMEOUT_CAP_S: int = 3600
+    # 大媒体分片上传(视频/音频通用)。分片是硬需求不是优化:mcp 反代走 Cloudflare
+    # Tunnel,单请求体上限 100MB,GB 级文件单发必死在隧道层。UPLOAD_CHUNK_MB 是服务端
+    # 下发给客户端的分片大小(会被 media_upload.MAX_CHUNK_BYTES=90MB 再压一道);
+    # 两个体积上限按 kind 分开(平台侧:视频 20GB 但我们保守封 4GB,音频 1GB),0=不限。
+    UPLOAD_CHUNK_MB: int = 50
+    UPLOAD_MEDIA_MAX_MB: int = 4096
+    UPLOAD_AUDIO_MAX_MB: int = 1024
+    # 未完成的分片会话保留多久(小时);超期目录连同碎片一起清掉,0=不清理
+    UPLOAD_SESSION_TTL_HOURS: int = 24
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0
 

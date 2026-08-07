@@ -27,7 +27,12 @@ from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
-from app.publish.policy import XHS_VIDEO_EXTENSIONS, video_ext_allowed
+from app.publish.policy import (
+    XHS_COVER_EXTENSIONS,
+    XHS_VIDEO_EXTENSIONS,
+    cover_ext_allowed,
+    video_ext_allowed,
+)
 from app.publish.runtime import get_active_scheduler
 from app.services import counselor_quote
 from app.services.quota import assert_operator_quota
@@ -199,6 +204,12 @@ MANIFEST_ENTRIES = [
                       "支持 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts;"
                       "扩展名不在此列 → 422,路径不存在/不可读 → 422;"
                       "**与 images 互斥,二选一必填**(同时给或都不给都 422)",
+            "cover": "body,str|None(**仅视频任务**的自定义封面图,服务器侧图片路径,语义同 "
+                      "video)。支持 .jpg/.jpeg/.png/.webp;扩展名不在此列或文件不存在 → 422;"
+                      "**图文任务传 cover → 422**(图文的封面就是第一张图,没有独立封面这个概念)。"
+                      "**不传 = 用平台自动截取的第一帧**(默认行为)。封面图很小,不必走分片:"
+                      "POST /api/uploads/images 传完即落在 DATA_DIR/uploads/{batch_id}/NN.ext,"
+                      "把那个服务器侧路径填进来即可",
             "topics": "body,list[str]|None(默认[];去重后截断 ≤10,静默不报错)",
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
@@ -213,7 +224,8 @@ MANIFEST_ENTRIES = [
         },
         "returns": "{job_id, status:'pending'}",
         "errors": "400=显式给了 images 但为空数组或超 18 张;"
-                  "422=images 与 video 同时给 / 都不给 / video 格式不支持 / video 文件不存在;"
+                  "422=images 与 video 同时给 / 都不给 / video 或 cover 格式不支持 / "
+                  "video 或 cover 文件不存在 / 图文任务传了 cover;"
                   "403=无该账号 access",
         "notes": "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
@@ -223,8 +235,10 @@ MANIFEST_ENTRIES = [
                  "activity_id / related_counselor / note_purpose **全部照常生效**,语义、"
                  "截断规则、引用推导四条规则(见下)、重试退避、账号串行、每日上限一字不差。"
                  "唯一区别是媒体那一步:视频要等平台上传+转码完成才能继续录入,故 publishing "
-                 "阶段比图文长(取决于文件大小,等待上限由服务端 PUBLISH_VIDEO_UPLOAD_TIMEOUT "
-                 "控制,默认 10 分钟)。封面用平台自动截取的第一帧(本接口不支持自定义封面);"
+                 "阶段比图文长(取决于文件大小,服务端等待上限按体积自动伸缩,见 "
+                 "VIDEO_UPLOAD_TIMEOUT_* 配置)。**封面**:传 cover 用你的自定义封面,不传用"
+                 "平台自动截取的第一帧;封面设置失败**不阻断发布**(与三组件同语义),笔记照发、"
+                 "退回平台自动封面,逐项结果在 applied.components.cover 里;"
                  "视频页独有的「添加章节 / 关联直播预告」不设置。"
                  "**关联活动**:视频页与图文页同源(内联区渲染约 2 张推荐活动卡 + 区标题右侧"
                  "「更多」入口)。传的 activity_id 若不在推荐位,服务端会自动点开「更多活动」"
@@ -356,6 +370,9 @@ class PublishNoteRequest(BaseModel):
     # 视频笔记的**服务器侧**文件路径(不是 URL、不是 base64:视频动辄几百 MB,
     # 走请求体传输不现实,由调用方先落到服务器再把路径给我们)。与 images 互斥。
     video: str | None = None
+    # 视频笔记的自定义封面图,同样是**服务器侧路径**。不传 = 用平台自动截取的第一帧。
+    # 只对视频任务有意义:图文笔记的封面就是首图,没有独立封面这个概念。
+    cover: str | None = None
     topics: list[str] = []
     schedule_time: str | None = None
     # 笔记三组件(全可选,字段名与 POST /api/accounts/{id}/note-components 一致):
@@ -400,6 +417,21 @@ class PublishNoteRequest(BaseModel):
                 )
             if not Path(video).is_file():
                 raise ValueError(f"video 文件不存在(需为本服务器可读的绝对路径):{video}")
+        cover = (self.cover or "").strip()
+        if cover:
+            if not video:
+                raise ValueError(
+                    "cover 只对视频笔记有效:图文笔记的封面就是第一张图,"
+                    "没有独立封面这个概念,请去掉 cover"
+                )
+            if not cover_ext_allowed(cover):
+                raise ValueError(
+                    f"cover 封面图格式不支持:{cover};只接受 "
+                    f"{'/'.join(XHS_COVER_EXTENSIONS)}"
+                )
+            if not Path(cover).is_file():
+                raise ValueError(
+                    f"cover 封面图文件不存在(需为本服务器可读的绝对路径):{cover}")
         return self
 
 
@@ -450,6 +482,7 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             content=payload.content,
             images_json=json.dumps(payload.images or [], ensure_ascii=False),
             video_path=video_path,
+            cover_path=(payload.cover or "").strip() or None,
             topics_json=json.dumps(payload.topics or [], ensure_ascii=False),
             schedule_time=scheduled_at,
             status="pending",

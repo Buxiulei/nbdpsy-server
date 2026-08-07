@@ -146,3 +146,49 @@ def test_daily_cap_boundaries():
     assert daily_cap_reached(7, 8) is False
     assert daily_cap_reached(8, 8) is True
     assert daily_cap_reached(9, 8) is True
+
+
+# ---------------- 大视频:超时按体积伸缩(step3v 与 worker 进程硬超时共用) ----------------
+
+
+def test_media_timeout_scales_linearly_with_size():
+    """基数 + 每 100MB 线性加时。检验点故意选**公式取值互不相同**的点。
+
+    (踩过的坑:即梦按秒计费那次,检验点选在公式恰好同值的位置,ceil 与线性两个
+    完全不同的公式都能过测,等于没测。)
+    """
+    from app.publish.policy import media_timeout_s
+
+    mb = 1024 * 1024
+    # 0 字节 = 只有基数
+    assert media_timeout_s(0, base_s=300, per_100mb_s=120, cap_s=3600) == 300
+    # 100MB → 300 + 120
+    assert media_timeout_s(100 * mb, base_s=300, per_100mb_s=120, cap_s=3600) == 420
+    # 250MB → 300 + 300(线性,不是按 100MB 向上取整成 360)
+    assert media_timeout_s(250 * mb, base_s=300, per_100mb_s=120, cap_s=3600) == 600
+    # 1GB → 300 + 1228.8 → 1528(取整)
+    assert media_timeout_s(1024 * mb, base_s=300, per_100mb_s=120, cap_s=3600) == 1528
+
+
+def test_media_timeout_capped():
+    """再大也不超封顶 —— 否则一条坏视频能把账号进程占死几小时。"""
+    from app.publish.policy import media_timeout_s
+
+    assert media_timeout_s(
+        100 * 1024 * 1024 * 1024, base_s=300, per_100mb_s=120, cap_s=3600) == 3600
+
+
+def test_media_timeout_unknown_size_falls_back_to_base():
+    """文件读不到大小(None / 负数)→ 退回基数,不假装知道。"""
+    from app.publish.policy import media_timeout_s
+
+    assert media_timeout_s(None, base_s=300, per_100mb_s=120, cap_s=3600) == 300
+    assert media_timeout_s(-1, base_s=300, per_100mb_s=120, cap_s=3600) == 300
+
+
+def test_media_timeout_never_below_base():
+    """封顶配得比基数还小也不许低于基数(配置写错不该让超时塌缩成秒级)。"""
+    from app.publish.policy import media_timeout_s
+
+    assert media_timeout_s(
+        500 * 1024 * 1024, base_s=300, per_100mb_s=120, cap_s=60) == 300

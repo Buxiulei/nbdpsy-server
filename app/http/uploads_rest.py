@@ -18,12 +18,15 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
 
 from app.auth.context import current_operator
 from app.core.config import settings
 from app.core.db import get_session
+from app.core.errors import NotFoundError
+from app.services import media_upload
 from app.services.upload_service import list_batches, save_images
 
 router = APIRouter()
@@ -63,7 +66,76 @@ MANIFEST_ENTRIES = [
         "errors": "401=apikey 无效",
         "notes": "按创建时间倒序;只含调用者本人的批次,过期批次已被懒清理不再列出。",
     },
+    {
+        "method": "POST", "path": "/api/uploads/media-sessions",
+        "summary": "开一个大媒体分片上传会话(视频/音频通用),拿 upload_id 与服务端定的 chunk_size",
+        "admin_only": False,
+        "params": {
+            "filename": "body,str(带扩展名;**按扩展名自动归类** video/audio,不用你传 kind)",
+            "total_size": "body,int(文件总字节数,用于分片数与完整性校验)",
+            "chunk_size": "body,int|None(**建议值,服务端说了算**——会被压到 90MB 以下)",
+        },
+        "returns": "{upload_id, chunk_size, chunk_count, kind, filename, total_size}",
+        "errors": "422=扩展名不在白名单 / total_size 超该 kind 的体积上限;401=apikey 无效",
+        "notes": "**为什么必须分片**:本服务的反代是 Cloudflare Tunnel,**单请求体上限 100MB**,"
+                 "GB 级文件单发 POST 必死在隧道层且报的是网关错误(查不到我们这儿)。"
+                 "所以 chunk 别自己拍脑袋定——用返回的 chunk_size(默认 50MB,硬上限 90MB)。"
+                 "视频接受 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts,"
+                 "音频接受 .m4a/.mp3/.wav/.flac/.aac;体积上限视频/音频各自配置(默认 4GB / 1GB)。"
+                 "拿到 upload_id 后按 chunk_size 切片逐片 PUT,最后 POST complete 拿服务器侧路径,"
+                 "那个路径可直接当 POST /api/publish-jobs 的 video 参数。"
+                 "未完成的会话默认 24 小时后连同碎片清理,别攒着。",
+    },
+    {
+        "method": "PUT", "path": "/api/uploads/media-sessions/{upload_id}/chunks/{index}",
+        "summary": "上传第 index 片(**裸二进制请求体**,不是 multipart)",
+        "admin_only": False,
+        "params": {
+            "upload_id": "path,str", "index": "path,int(从 0 开始,< chunk_count)",
+            "(body)": "**裸二进制**;非末片长度必须恰好等于 chunk_size,末片可短",
+        },
+        "returns": "{index, size, chunk_count}",
+        "errors": "422=index 越界 / 分片长度不符;403=会话不属于你;404=会话不存在或已过期",
+        "notes": "**同 index 重传直接覆盖(幂等)**——网络抖动重发是常态,放心重传。"
+                 "分片可**乱序/并发**上传,服务端按 index 拼,不要求顺序。"
+                 "长度校验会当场逮住客户端切片逻辑错误,别忽略 422。",
+    },
+    {
+        "method": "POST", "path": "/api/uploads/media-sessions/{upload_id}/complete",
+        "summary": "收工:校验分片齐全后拼接,拿服务器侧文件路径",
+        "admin_only": False,
+        "params": {
+            "upload_id": "path,str",
+            "sha256": "body,str|None(给了就逐字节校验,强烈建议给)",
+        },
+        "returns": "{upload_id, path, size, kind, filename, already_completed?}——"
+                    "path 直接当 publish 的 video 参数;already_completed:true 表示这次是"
+                    "幂等重放,不是重新拼的",
+        "errors": "422=分片不齐(报缺哪片)/ 总长与 total_size 不符 / sha256 对不上;"
+                  "403=会话不属于你;404=会话不存在或已过期",
+        "notes": "三道校验都过才产出成品:分片集合齐全、拼接总长一致、sha256(若给)。"
+                 "**任一不过就不产出文件**,不会把半截文件交给你去发布。"
+                 "**complete 是幂等的**:重复调用返回同一个 path(带 already_completed:true),"
+                 "不报错也不重拼 —— 拿不到响应时放心重试。"
+                 "成功后分片碎片**当场**清掉(不等 TTL),只留成品。"
+                 "⚠️ 运维提示:拼接那一刻瞬时磁盘占用 ≈ **2× 文件大小**(碎片 + 成品并存),"
+                 "传 4GB 视频需保证 DATA_DIR 所在盘有 8GB 以上余量。",
+    },
 ]
+
+
+class MediaSessionRequest(BaseModel):
+    """开分片会话的入参;kind 按 filename 扩展名自动判,不需要调用方传。"""
+
+    filename: str
+    total_size: int
+    chunk_size: int | None = None
+
+
+class MediaCompleteRequest(BaseModel):
+    """收工入参;sha256 可选但强烈建议给(唯一能逮住静默损坏的手段)。"""
+
+    sha256: str | None = None
 
 
 @router.post("/api/uploads/images")
@@ -85,6 +157,57 @@ async def list_uploads() -> dict:
     async with get_session() as session:
         batches = await list_batches(session, operator)
     return {"batches": batches}
+
+
+@router.post("/api/uploads/media-sessions", status_code=201)
+async def create_media_session(payload: MediaSessionRequest) -> dict:
+    """开分片上传会话。扩展名/体积不合规 → ValueError,经 app 级处理器转 400→这里显式 422。"""
+    operator = current_operator()
+    try:
+        return media_upload.create_session(
+            payload.filename, payload.total_size, operator.id, payload.chunk_size
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/api/uploads/media-sessions/{upload_id}/chunks/{index}")
+async def upload_media_chunk(upload_id: str, index: int, request: Request) -> dict:
+    """收一个分片(裸二进制体)。
+
+    **流式读进内存再落盘**:单片被 MAX_CHUNK_BYTES(90MB)封顶,这个量级一次性
+    持有是安全的;真正不能整读的是**整个文件**(GB 级),而那正是分片要解决的问题。
+    """
+    operator = current_operator()
+    body = await request.body()
+    try:
+        return media_upload.write_chunk(upload_id, index, body, operator.id)
+    except NotFoundError:
+        # NotFoundError 继承自 ValueError:不先放行就会被下面的 422 吞掉,
+        # 「会话不存在」会伪装成「入参非法」,调用方查错方向。交 app 级处理器转 404。
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/api/uploads/media-sessions/{upload_id}/complete")
+async def complete_media_session(
+    upload_id: str, payload: MediaCompleteRequest
+) -> dict:
+    """校验并拼接分片,返回服务器侧成品路径(可直接当 publish 的 video 参数)。"""
+    operator = current_operator()
+    try:
+        return media_upload.complete_session(upload_id, operator.id, payload.sha256)
+    except NotFoundError:
+        # NotFoundError 继承自 ValueError:不先放行就会被下面的 422 吞掉,
+        # 「会话不存在」会伪装成「入参非法」,调用方查错方向。交 app 级处理器转 404。
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/uploads/{batch_id}/{name}")

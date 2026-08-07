@@ -2295,3 +2295,132 @@ def read_catalog(page, account_id: int, note_id: str) -> Dict[str, Any]:
         return {"collections": collections, "activities": activities}
     finally:
         responses.detach()
+
+
+# ---------------- 视频笔记封面(骨架:选择器待真号 fixtures 落定) ----------------
+#
+# ⚠️ **本段的选择器全部是占位值,一个都没有真号验证过**(fixtures 取证并行进行中,
+# 落在 data/scene_captures/video_cover/)。所以这里刻意写成 fail-loud:任何一步定位不到
+# 就带着**当场取证**报 error,绝不静默往下走、绝不假装设上了。封面失败**不阻断发布**
+# (语义对齐三组件),平台自动截取的第一帧就是兜底。
+#
+# 换真值时要改的就是下面这几个常量 + 补命中路径的单测;控制流本身不必动。
+_COVER_SECTION = ".publish-page-content-cover"          # 封面区容器(视频页 fixtures 实测有)
+_COVER_ENTRY_TEXT = "设置封面"                            # 封面区入口文案(fixtures 实测有)
+_COVER_MODAL = "[class*='cover'][class*='modal'], .d-modal"  # 占位:封面弹窗
+_COVER_UPLOAD_INPUT = "input[type='file'][accept*='image']"  # 占位:弹窗内本地上传 input
+_COVER_CONFIRM_TEXT = "确定"                              # 占位:弹窗确认按钮文案
+# 上传后等封面预览渲染出来的窗口(秒)
+_COVER_APPLY_TIMEOUT_S = 30.0
+
+
+def _cover_probe(page) -> Dict[str, Any]:
+    """回读封面区的当场证据(定位失败时随 error 一起交出去,别只丢一句"没找到")。"""
+    evidence: Dict[str, Any] = {}
+    try:
+        section = page.query_selector(_COVER_SECTION)
+        evidence["cover_section_present"] = section is not None
+        evidence["cover_section_text"] = _norm(section.inner_text())[:200] if section else ""
+    except Exception:  # noqa: BLE001 — 取证本身绝不制造新异常
+        evidence["cover_section_present"] = False
+        evidence["cover_section_text"] = ""
+    try:
+        evidence["cover_modal_present"] = page.query_selector(_COVER_MODAL) is not None
+    except Exception:  # noqa: BLE001
+        evidence["cover_modal_present"] = False
+    try:
+        evidence["file_inputs"] = len(page.query_selector_all("input[type='file']"))
+    except Exception:  # noqa: BLE001
+        evidence["file_inputs"] = 0
+    return evidence
+
+
+def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[str, Any]:
+    """给视频笔记设自定义封面 → ``{"status": "done"|"error", ...}``。
+
+    ⚠️ **骨架实现,选择器未经真号验证**(见本段顶部注释)。控制流是确定的:
+    点开封面区的「设置封面」→ 等弹窗 → 往弹窗内的 file input ``set_input_files``
+    (与视频/图片上传同源:**绝不点上传按钮**,真桌面上会弹原生 GTK 文件框卡死流程)
+    → 点确认 → 回读封面预览确认真换上了。
+
+    每一步失败都立刻返回 error 并附 ``observed`` 当场取证。**绝不返回 done 除非回读到
+    封面真的变了** —— 这条产品线的失败普遍是静默的(合集被服务端丢弃、活动点击不生效
+    都是先例),"没报错"从来不算数。
+
+    调用方(sync_client)对 error 的处理是**告警不阻断**:笔记照发,退回平台自动封面。
+    """
+    entry = _find_text_in_section(page, _COVER_SECTION, _COVER_ENTRY_TEXT)
+    if entry is None:
+        return {"status": "error",
+                "reason": f"cover_entry_not_found: 封面区里没有「{_COVER_ENTRY_TEXT}」入口",
+                "observed": _cover_probe(page)}
+    human.click(entry, reason="打开封面设置弹窗")
+    human.wait(0.8, 1.6, context="等封面弹窗渲染")
+
+    deadline = time.monotonic() + _COVER_APPLY_TIMEOUT_S
+    upload_input = None
+    while time.monotonic() < deadline:
+        try:
+            upload_input = page.query_selector(_COVER_UPLOAD_INPUT)
+        except Exception:  # noqa: BLE001
+            upload_input = None
+        if upload_input is not None:
+            break
+        page.wait_for_timeout(400)
+    if upload_input is None:
+        return {"status": "error",
+                "reason": "cover_upload_input_not_found: 封面弹窗里没找到本地上传的 "
+                          "file input(选择器待真号 fixtures 落定)",
+                "observed": _cover_probe(page)}
+
+    try:
+        upload_input.set_input_files([cover_path])
+    except Exception as exc:  # noqa: BLE001 — 灌文件失败如实报,不静默
+        return {"status": "error",
+                "reason": f"cover_set_input_failed: {exc}",
+                "observed": _cover_probe(page)}
+    human.wait(1.0, 2.0, context="等封面上传渲染")
+
+    confirm = _find_text_in_section(page, _COVER_MODAL, _COVER_CONFIRM_TEXT)
+    if confirm is None:
+        return {"status": "error",
+                "reason": f"cover_confirm_not_found: 封面弹窗里没有「{_COVER_CONFIRM_TEXT}」按钮"
+                          "(弹窗可能还开着并盖住发布按钮,选择器待 fixtures 落定)",
+                "observed": _cover_probe(page)}
+    human.click(confirm, reason="确认封面")
+    human.wait(0.8, 1.5, context="等封面弹窗关闭")
+
+    evidence = _cover_probe(page)
+    if evidence.get("cover_modal_present"):
+        # 弹窗没关掉是**高危**状态:2026-08-02 事故就是残留弹窗盖住发布按钮,
+        # 最后只报一句"发布超时"。如实报错,让调用方的 error 路径去收拾。
+        return {"status": "error",
+                "reason": "cover_modal_not_closed: 点了确认但封面弹窗仍在,"
+                          "它会盖住发布按钮",
+                "observed": evidence}
+    return {"status": "done", "cover_path": cover_path, "observed": evidence}
+
+
+def _find_text_in_section(page, section_selector: str, text: str):
+    """在某个容器**内**找文案精确匹配的可点元素;找不到返回 None。
+
+    收口在容器内而不是全页 ``text=``:同名文案在这个页面上反复咬人
+    (活动区/话题区各有一个「更多」;「确定」更是满页都是)。
+    """
+    try:
+        section = page.query_selector(section_selector)
+    except Exception:  # noqa: BLE001
+        return None
+    if section is None:
+        return None
+    target = _norm(text)
+    try:
+        for el in section.query_selector_all("button, div, span, a, li"):
+            try:
+                if _norm(el.inner_text()) == target:
+                    return el
+            except Exception:  # noqa: BLE001 — 单个元素读失败只跳过它
+                continue
+    except Exception:  # noqa: BLE001
+        return None
+    return None

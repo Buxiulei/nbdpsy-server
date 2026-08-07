@@ -635,6 +635,30 @@ class Supervisor:
             self._operator_governed_accounts.discard(account_id)
         return kept
 
+    @staticmethod
+    def _spawn_timeout_for(base_timeout: float, video_sizes: list) -> float:
+        """本次 spawn 的进程硬超时:基准 + 载荷里**最大**那个视频该给的时间。
+
+        为什么必须伸缩(用户会传 15-30 分钟的 GB 级视频):基准 1800s 是给普通浏览器任务
+        定的,一条 GB 级视频光是上传到小红书 + 平台转码就可能到 10-30 分钟级,发布会话
+        必然被 supervisor 在半路 SIGKILL,而且杀在**已经传完、正在发布**的时刻最亏。
+
+        - 没有视频载荷 → 原样返回基准,**普通任务行为逐字节不变**(这是硬要求);
+        - 有视频 → 基准 + ``media_timeout_s``(与 step3v 共用同一公式,不另造);
+        - 一批多条时按**最大**那个算 —— 按最小算等于给大的那条判死刑。
+        """
+        sizes = [s for s in (video_sizes or []) if s]
+        if not sizes:
+            return base_timeout
+        from app.publish.policy import media_timeout_s
+
+        return base_timeout + media_timeout_s(
+            max(sizes),
+            base_s=settings.VIDEO_UPLOAD_TIMEOUT_BASE_S,
+            per_100mb_s=settings.VIDEO_UPLOAD_TIMEOUT_PER_100MB_S,
+            cap_s=settings.VIDEO_UPLOAD_TIMEOUT_CAP_S,
+        )
+
     async def _spawn_account_worker(
         self, account_id: int, publish_ids: list, browser_ids: list
     ) -> None:
@@ -662,25 +686,62 @@ class Supervisor:
             logger.exception("账号 {} 子进程派生失败(下轮重试)", account_id)
             return
         self._procs[account_id] = proc
-        self._track(self._reap_child(account_id, proc))
+        # 本次载荷带大视频就给这一个子进程加时(普通任务恒等于基准,见 _spawn_timeout_for)
+        timeout = self._spawn_timeout_for(
+            self._proc_timeout, self._publish_video_sizes(publish_ids)
+        )
+        self._track(self._reap_child(account_id, proc, timeout))
         logger.info(
-            "已派生账号 {} 子进程 pid={}(publish={}, browser={})",
+            "已派生账号 {} 子进程 pid={}(publish={}, browser={}, 硬超时={}s)",
             account_id,
             proc.pid,
             publish_ids,
             browser_ids,
+            int(timeout),
         )
 
-    async def _reap_child(self, account_id: int, proc) -> None:
-        """等子进程退出并出表;超硬超时(proc_timeout)SIGKILL 进程组防僵死占坑。"""
+    @staticmethod
+    def _publish_video_sizes(publish_ids: list) -> list:
+        """读这批 publish job 各自视频文件的字节数(没有视频/读不到的位置为 None)。
+
+        直接查库文件而不是把大小塞进队列:队列那层与媒体无关(调研结论),不为这一个
+        用途污染它。读失败一律 None → 伸缩公式退回基准,最坏退化成改动前的行为。
+        """
+        if not publish_ids:
+            return []
+        import sqlite3
+
+        from app.publish.policy import media_file_size
+
+        try:
+            conn = sqlite3.connect(_sqlite_db_path())
+            try:
+                rows = conn.execute(
+                    "SELECT video_path FROM publish_jobs WHERE id IN (%s)"
+                    % ",".join("?" * len(publish_ids)),
+                    [int(i) for i in publish_ids],
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — 取大小是优化,失败就退回基准超时
+            logger.warning("读 publish job 视频体积失败(退回基准硬超时)")
+            return []
+        return [media_file_size(r[0]) for r in rows]
+
+    async def _reap_child(self, account_id: int, proc, timeout: float | None = None) -> None:
+        """等子进程退出并出表;超硬超时 SIGKILL 进程组防僵死占坑。
+
+        ``timeout`` 由 spawn 按本次载荷算好传进来(带大视频的会更长);不传退回基准。
+        """
+        proc_timeout = self._proc_timeout if timeout is None else timeout
         try:
             try:
-                await asyncio.wait_for(proc.wait(), timeout=self._proc_timeout)
+                await asyncio.wait_for(proc.wait(), timeout=proc_timeout)
             except asyncio.TimeoutError:
                 logger.warning(
                     "账号 {} 子进程超硬超时 {}s,SIGKILL 进程组",
                     account_id,
-                    self._proc_timeout,
+                    proc_timeout,
                 )
                 self._kill_process_group(proc)
                 await proc.wait()

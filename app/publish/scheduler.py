@@ -106,6 +106,7 @@ def make_publish_runner(
                     content = job.content
                     raw_images = json.loads(job.images_json or "[]")
                     video_path = job.video_path or None
+                    cover_path = job.cover_path or None
                     topics = json.loads(job.topics_json or "[]")
                     # 三组件(全 None = 不设置,跳过组件那一步)
                     components = {
@@ -143,6 +144,7 @@ def make_publish_runner(
                             topics,
                             components,
                             video_path=video_path,
+                            cover_path=cover_path,
                         )
                     )
 

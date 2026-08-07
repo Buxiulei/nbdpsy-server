@@ -1227,18 +1227,29 @@ class XHSPublishAtomicTasks:
     _VIDEO_READY_CONFIRM_POLLS = 2
 
     def step3v_wait_for_video_processing(
-        self, max_wait: Optional[int] = None
+        self, max_wait: Optional[int] = None, video_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """步骤3v: 等视频上传 + 平台转码完成(判据见 ``classify_video_upload_state``)。
 
-        ``max_wait`` 缺省取 ``settings.PUBLISH_VIDEO_UPLOAD_TIMEOUT``(默认 600s):真实
-        业务视频几十~几百 MB,转码耗时由平台侧决定、我们观测不到上界,给足余量。
+        ``max_wait`` 缺省**按 video_path 的文件体积伸缩**(``policy.media_timeout_s``,
+        与账号子进程硬超时共用同一公式):用户会传 15-30 分钟的 GB 级视频,固定超时在
+        这个量级上必错 —— 给小了大文件永远发不出去。读不到大小就退回基数。
 
         失败一律带**当场取证**(最后一次读到的三路判据原文)。这条路径的失败若只丢一句
         「超时」,运营除了换变量试错什么也做不了 —— 图文那边为此吃过整整一轮排查。
         """
         self.current_step = 3
-        timeout = max_wait if max_wait is not None else settings.PUBLISH_VIDEO_UPLOAD_TIMEOUT
+        if max_wait is not None:
+            timeout = max_wait
+        else:
+            from app.publish.policy import media_file_size, media_timeout_s
+
+            timeout = media_timeout_s(
+                media_file_size(video_path),
+                base_s=settings.VIDEO_UPLOAD_TIMEOUT_BASE_S,
+                per_100mb_s=settings.VIDEO_UPLOAD_TIMEOUT_PER_100MB_S,
+                cap_s=settings.VIDEO_UPLOAD_TIMEOUT_CAP_S,
+            )
         logger.info("=" * 60)
         logger.info(f"步骤3v: 等待视频上传+转码(上限 {timeout}s)")
         logger.info("=" * 60)

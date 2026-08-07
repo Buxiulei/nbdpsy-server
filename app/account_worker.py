@@ -267,6 +267,7 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
     topics = json.loads(job["topics_json"] or "[]")
     # 老库没跑迁移时 SELECT * 出来没有这一列 → .get 兜底成 None,与"图文任务"同义。
     video_path = job.get("video_path") or None
+    cover_path = job.get("cover_path") or None
     workdir = Path(settings.UPLOAD_DIR) / f"job_{job['id']}"
     try:
         if video_path:
@@ -291,6 +292,7 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
             # 截图打上 job 标记,失败现场才能按 job 取回(GET /api/publish-jobs/{id}/artifacts)
             job_tag=str(job["id"]),
             video_path=video_path,
+            cover_path=cover_path,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

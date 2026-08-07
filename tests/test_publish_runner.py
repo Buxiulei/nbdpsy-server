@@ -73,7 +73,7 @@ async def test_runner_materializes_images_and_cleans_workdir(
 
     def fake_publish_once(
         acc_id, cookies, title, content, image_paths, topics, components=None,
-        video_path=None,
+        video_path=None, cover_path=None,
     ):
         # video_path:图文任务恒为 None(视频分支的路由另有用例覆盖)
         captured["image_paths"] = image_paths

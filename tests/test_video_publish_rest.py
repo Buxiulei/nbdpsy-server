@@ -384,3 +384,95 @@ async def test_patch_images_on_image_job_unaffected(tmp_path, monkeypatch):
             job = await s.get(PublishJob, job_id)
             assert json.loads(job.images_json) == [
                 "https://cdn/2.png", "https://cdn/3.png"]
+
+
+# ---------------- 封面图片(cover):仅视频任务有效 ----------------
+
+
+def _make_cover(tmp_path, name: str = "cover.jpg") -> str:
+    """造一个真实存在的封面图文件(校验只看存在性与扩展名)。"""
+    p = tmp_path / name
+    p.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+    return str(p)
+
+
+async def test_video_with_cover_creates_job(tmp_path, monkeypatch):
+    """视频任务给 cover → 202,cover_path 落库。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号C1", "uC1", "op-cover-ok")
+        video, cover = _make_video(tmp_path), _make_cover(tmp_path)
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "video": video, "cover": cover},
+            headers=bearer("op-cover-ok"),
+        )
+        assert r.status_code == 202, r.text
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, r.json()["job_id"])
+            assert job.cover_path == cover
+            assert job.video_path == video
+
+
+async def test_video_without_cover_defaults_to_platform_auto(tmp_path, monkeypatch):
+    """不传 cover → cover_path 落 None(= 用平台自动截取的首帧,现行为不变)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号C2", "uC2", "op-cover-none")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "video": _make_video(tmp_path)},
+            headers=bearer("op-cover-none"),
+        )
+        assert r.status_code == 202, r.text
+        async with db_module.async_session() as s:
+            assert (await s.get(PublishJob, r.json()["job_id"])).cover_path is None
+
+
+async def test_image_job_with_cover_422(tmp_path, monkeypatch):
+    """图文任务给 cover → 422:图文的封面就是首图,这个语义压根不存在。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号C3", "uC3", "op-cover-img")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "images": ["https://cdn/1.png"], "cover": _make_cover(tmp_path)},
+            headers=bearer("op-cover-img"),
+        )
+        assert r.status_code == 422, r.text
+        assert "图文" in r.text and "cover" in r.text
+
+
+async def test_cover_bad_extension_422(tmp_path, monkeypatch):
+    """封面扩展名不在 jpg/jpeg/png/webp 白名单 → 422。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号C4", "uC4", "op-cover-ext")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "video": _make_video(tmp_path),
+                  "cover": _make_cover(tmp_path, "cover.gif")},
+            headers=bearer("op-cover-ext"),
+        )
+        assert r.status_code == 422, r.text
+        assert "封面" in r.text or "cover" in r.text
+
+
+async def test_cover_missing_file_422(tmp_path, monkeypatch):
+    """封面路径不存在 → 422(不建注定失败的 job)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号C5", "uC5", "op-cover-404")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "video": _make_video(tmp_path),
+                  "cover": str(tmp_path / "没有这个封面.png")},
+            headers=bearer("op-cover-404"),
+        )
+        assert r.status_code == 422, r.text
+        assert "不存在" in r.text

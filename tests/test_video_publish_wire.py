@@ -37,7 +37,7 @@ class _FakeAtomicBase:
         self.calls.append(f"step2v:{video_path}")
         return {"success": True, "video_path": video_path}
 
-    def step3v_wait_for_video_processing(self, max_wait=None):
+    def step3v_wait_for_video_processing(self, max_wait=None, video_path=None):
         self.calls.append("step3v")
         return {"success": True, "state": "ready", "edit_page_loaded": True}
 
@@ -119,7 +119,7 @@ def test_publish_note_video_upload_failure_stops_before_fill(patched_sync_client
             super().__init__(page, job_tag)
             holder["atomic"] = self
 
-        def step3v_wait_for_video_processing(self, max_wait=None):
+        def step3v_wait_for_video_processing(self, max_wait=None, video_path=None):
             self.calls.append("step3v")
             return {"success": False, "error": "视频上传/转码超时(600s),最后判定 uploading",
                     "state": "uploading"}
@@ -164,7 +164,8 @@ def test_publish_once_forwards_video_path(monkeypatch):
     monkeypatch.setattr(sc.SyncClient, "stop", lambda self: None)
 
     def _fake_publish_note(self, title, content, image_paths, topics=None,
-                           components=None, job_tag=None, video_path=None):
+                           components=None, job_tag=None, video_path=None,
+                           cover_path=None):
         seen["video_path"] = video_path
         seen["image_paths"] = image_paths
         return {"success": True, "note_url": "u", "note_id": "i"}
@@ -193,7 +194,8 @@ def test_account_worker_video_job_skips_image_pipeline(monkeypatch, tmp_path):
     seen = {}
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
-                           topics=None, components=None, job_tag=None, video_path=None):
+                           topics=None, components=None, job_tag=None, video_path=None,
+                           cover_path=None):
         seen.update(image_paths=image_paths, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -225,7 +227,8 @@ def test_account_worker_image_job_still_materializes(monkeypatch, tmp_path):
     seen = {}
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
-                           topics=None, components=None, job_tag=None, video_path=None):
+                           topics=None, components=None, job_tag=None, video_path=None,
+                           cover_path=None):
         seen.update(image_paths=image_paths, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -269,7 +272,7 @@ async def test_scheduler_runner_routes_video(monkeypatch, tmp_path):
 
         def _fake_publish_once(account_id, cookies, title, content, image_paths,
                                topics=None, components=None, job_tag=None,
-                               video_path=None):
+                               video_path=None, cover_path=None):
             seen.update(image_paths=image_paths, video_path=video_path)
             return sc.PublishResult(success=True, note_url="u", note_id="i")
 
@@ -389,7 +392,8 @@ def test_account_worker_video_job_passes_components(monkeypatch):
     seen = {}
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
-                           topics=None, components=None, job_tag=None, video_path=None):
+                           topics=None, components=None, job_tag=None, video_path=None,
+                           cover_path=None):
         seen.update(topics=topics, components=components, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -405,3 +409,160 @@ def test_account_worker_video_job_passes_components(monkeypatch):
     assert seen["topics"] == ["#心理"]
     assert seen["components"] == {
         "collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1"}
+
+
+# ---------------- 封面:路由与失败路径(骨架期,成功路径的选择器尚无 fixtures) ----------------
+
+
+def test_cover_step_runs_after_upload_and_before_components(monkeypatch):
+    """给了 cover:封面步骤跑在 step3v(转码完成)之后、三组件之前。
+
+    时序不是随意的:封面 UI 在上传未完成时压根不可交互(与原创声明开关同源),
+    而三组件之后紧接着就是发布门,封面必须赶在那之前设完。
+    """
+    from app.browser import sync_client as sc
+
+    holder = {}
+    seen = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(sc, "apply_original_declaration",
+                        lambda page, human: {"status": "done"})
+    monkeypatch.setattr(sc, "ComponentResponses", lambda: type(
+        "R", (), {"attach": lambda self, p: None, "detach": lambda self: None})())
+    monkeypatch.setattr(sc, "apply_components", lambda *a, **k: (
+        holder["atomic"].calls.append("components"), {})[1])
+
+    def _fake_set_cover(page, human, cover_path):
+        seen["cover_path"] = cover_path
+        holder["atomic"].calls.append("cover")
+        return {"status": "done", "cover_path": cover_path}
+
+    monkeypatch.setattr(sc, "apply_video_cover", _fake_set_cover)
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note(
+        "标题", "正文", [], None, {"collection_id": "c1"},
+        video_path="/data/a.mp4", cover_path="/data/cover.jpg",
+    )
+
+    assert r["success"] is True
+    calls = holder["atomic"].calls
+    assert calls.index("step3v") < calls.index("cover") < calls.index("components")
+    assert seen["cover_path"] == "/data/cover.jpg"
+    assert r["components"]["cover"]["status"] == "done"
+
+
+def test_no_cover_means_cover_step_never_runs(monkeypatch):
+    """不传 cover:封面步骤一次都不碰(平台自动封面,行为与本功能上线前一致)。"""
+    from app.browser import sync_client as sc
+
+    holder = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(sc, "apply_original_declaration",
+                        lambda page, human: {"status": "done"})
+
+    def _boom(*a, **k):
+        raise AssertionError("没传 cover 就不该碰封面步骤")
+
+    monkeypatch.setattr(sc, "apply_video_cover", _boom)
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note("标题", "正文", [], None, None, video_path="/data/a.mp4")
+    assert r["success"] is True
+    assert "cover" not in r.get("components", {})
+
+
+def test_cover_failure_does_not_block_publish(monkeypatch):
+    """封面设置失败 → 照发不误,失败只回显(与三组件同语义,退回平台自动封面)。"""
+    from app.browser import sync_client as sc
+
+    holder = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(sc, "apply_original_declaration",
+                        lambda page, human: {"status": "done"})
+    monkeypatch.setattr(sc, "apply_video_cover", lambda p, h, c: {
+        "status": "error",
+        "reason": "cover_entry_not_found: 页面上没有「设置封面」入口",
+        "observed": {"cover_section_text": ""},
+    })
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note("标题", "正文", [], None, None,
+                            video_path="/data/a.mp4", cover_path="/data/cover.jpg")
+
+    assert r["success"] is True, "封面失败绝不能阻断发布"
+    assert "step7" in holder["atomic"].calls
+    assert r["components"]["cover"]["status"] == "error"
+    assert "cover_entry_not_found" in r["components"]["cover"]["reason"]
+
+
+def test_cover_exception_is_contained(monkeypatch):
+    """封面步骤抛异常同样不阻断发布(辅助步的异常绝不掀翻整篇笔记)。"""
+    from app.browser import sync_client as sc
+
+    holder = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(sc, "apply_original_declaration",
+                        lambda page, human: {"status": "done"})
+
+    def _raise(*a, **k):
+        raise RuntimeError("封面弹窗炸了")
+
+    monkeypatch.setattr(sc, "apply_video_cover", _raise)
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note("标题", "正文", [], None, None,
+                            video_path="/data/a.mp4", cover_path="/data/cover.jpg")
+
+    assert r["success"] is True
+    assert r["components"]["cover"]["status"] == "error"
+    assert "封面弹窗炸了" in r["components"]["cover"]["reason"]
+
+
+def test_cover_path_threaded_from_both_execution_paths(monkeypatch):
+    """两条执行路径都把 cover_path 透传下去(漏一边就是"接口收了封面却没设")。"""
+    import app.account_worker as aw
+
+    monkeypatch.setattr(aw, "_load_account_cookies", lambda db, aid: [])
+    seen = {}
+
+    def _fake_publish_once(account_id, cookies, title, content, image_paths,
+                           topics=None, components=None, job_tag=None,
+                           video_path=None, cover_path=None):
+        seen["cover_path"] = cover_path
+        return aw.sync_client.PublishResult(success=True, note_url="u")
+
+    monkeypatch.setattr(aw.sync_client, "publish_once", _fake_publish_once)
+    job = {"id": 21, "title": "T", "content": "C", "images_json": "[]",
+           "topics_json": "[]", "video_path": "/data/a.mp4",
+           "cover_path": "/data/cover.jpg"}
+    assert aw._execute_publish("db.sqlite", 1, job).success is True
+    assert seen["cover_path"] == "/data/cover.jpg"
