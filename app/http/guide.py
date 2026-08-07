@@ -208,12 +208,32 @@ CAPABILITY_GROUPS = [
 #   deprecation 仍可用但将下线
 # endpoints 里的每个路径都被测试比对 manifest,写错即红。
 #
-# 补录起点 0.17.0(2026-07-28,即 app.__version__ 当前值),更早的看 CHANGELOG.md。
+# 补录起点 2026-07-28(0.17.0),更早的看 CHANGELOG.md。本表与 CHANGELOG.md **有意不互相
+# 生成**:两者组织轴不同(那边版本 × 长篇施工叙事给人读,这边日期 × 对调用方影响给机器读),
+# 互相生成不是砍掉那边的细节就是把这边撑成第二份长文档。机械钉住的只有真正会静默腐烂又真正
+# 误导人的那一项——版本号,见 tests/test_version_changelog.py。
 # ---------------------------------------------------------------------------
 
 CHANGELOG_KINDS = frozenset({"feature", "fix", "breaking", "deprecation"})
 
+# 本表声明的补录下界。它不是摆设:tests/test_version_changelog.py 拿它当边界,要求
+# **CHANGELOG.md 里这个日期之后的每个版本段,在本表里都至少有一条同日期记录**——
+# 「发了版却没告诉调用方」正是本接口要消灭的那种腐烂。改小它等于承诺补更早的记录。
+CHANGELOG_COVERAGE_SINCE = "2026-07-28"
+
 CHANGELOG_ENTRIES = [
+    {
+        "date": "2026-08-07",
+        "title": "统一指南接口 + 版本号补齐到 0.20.0",
+        "kind": "fix",
+        "summary": "新增 GET /api/guide(本接口):能力域分组 + 变更记录 + 已知边界。"
+                   "同笔修掉 server_version 报错版本号的问题——它此前静默落后 CHANGELOG 两个"
+                   "版本(0.17.0 vs 0.19.1),而 manifest / guide.meta / extension 三处都在报它。"
+                   "现已加测试钉死 app.__version__ 与 CHANGELOG.md 最新条目一致,漏改即 CI 红。",
+        "endpoints": ["/api/guide", "/api/manifest", "/api/extension"],
+        "notes": "meta.server_version 自此可信;meta.git_revision 仍给出,用于分辨同版本号下的"
+                 "具体代码。",
+    },
     {
         "date": "2026-08-07",
         "title": "他人笔记提取",
@@ -558,6 +578,17 @@ KNOWN_LIMITATIONS = [
     },
     {
         "area": "publish",
+        "what": "原创声明**近期才第一次真正打通**(此前从未生效过:checked 是乐观态,关掉弹窗不"
+                "等于已声明),修复**尚待新一轮真号验证**确认长期稳定。要求原创声明的发布任务"
+                "请逐条复核结果里的声明步骤回执,先别当它已经稳。",
+        "why": "定位那一轮真号录屏是**发现问题**的那次、发生在修复之前;修复(勾选点位从宽容器"
+               "收窄到 16×16 的 simulator 方块、关掉随机偏移)之后没有再跑过真号 e2e。"
+               "宽容器上的随机偏移有约 40% 撞进《原创声明须知》链接、被 <a> 吃掉事件,"
+               "这个根因已定死,但「改对了」目前只有单测在证。",
+        "since": "2026-08-07",
+    },
+    {
+        "area": "publish",
         "what": "话题(标签)在视频发布上连续失配:一轮真号 e2e 里 6/6 全 no_exact_match,"
                 "同期图文是 171/181 成功。原因未定性,当前只把现场证据(浮层实际候选文案、"
                 "候选条数、容器 class)带回任务结果供下一次定性。",
@@ -627,14 +658,6 @@ KNOWN_LIMITATIONS = [
         "why": "submit 即占队列位、success 即扣积分,排队中无法取消。重排 = 赌它没入队,"
                "赌输就是双倍扣分。",
         "since": "2026-08-05",
-    },
-    {
-        "area": "system",
-        "what": "meta.server_version 取自 app.__version__,它**滞后于** CHANGELOG.md 的最新版本号"
-                "(发版时常忘了同步这个常量)。要判断服务端到底跑的哪版代码,"
-                "看 meta.git_revision(最近 commit 短哈希)比看 server_version 可靠。",
-        "why": "版本常量是手工维护的单一事实源,没有测试钉着它与 CHANGELOG 一致。",
-        "since": "2026-08-07",
     },
 ]
 
@@ -707,6 +730,7 @@ async def guide() -> dict:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "manifest_entry_count": len(ALL_MANIFEST_ENTRIES),
             "guide_contract_version": GUIDE_CONTRACT_VERSION,
+            "changelog_covers_since": CHANGELOG_COVERAGE_SINCE,
         },
         "see": _SEE,
         "capabilities": _capabilities(ALL_MANIFEST_ENTRIES),
