@@ -7,9 +7,10 @@
 images/topics 序列化成 images_json/topics_json 落库;images 每项为 URL/base64(远程 agent
 供图),到发布 runner 里再由 materialize_images 落成本地文件,本端点不碰浏览器。
 
-视频笔记走 ``video`` 字段(与 images 互斥,二选一),存的是**服务器侧文件路径**直接落
-``video_path`` 列 —— 视频动辄几百 MB,既不走请求体也不需要物料化,发布 runner 直接拿路径
-set_input_files。路径的存在性与扩展名在入参校验层就查掉(422),不造注定失败的 pending 任务。
+视频笔记走 ``video`` 字段、播客笔记走 ``audio`` 字段(与 images **三选一**),存的都是
+**服务器侧文件路径**,分别落 ``video_path`` / ``audio_path`` 列 —— 这类文件动辄几百 MB 到
+1GB,既不走请求体也不需要物料化,发布 runner 直接拿路径 set_input_files。路径的存在性、
+扩展名、体积与(音频的)时长在入参校验层就查掉(422),不造注定失败的 pending 任务。
 """
 
 import json
@@ -30,6 +31,8 @@ from app.models.publish_job import PublishJob
 from app.publish.policy import (
     XHS_COVER_EXTENSIONS,
     XHS_VIDEO_EXTENSIONS,
+    audio_cover_reject,
+    audio_reject,
     cover_ext_allowed,
     video_ext_allowed,
 )
@@ -41,6 +44,8 @@ from app.services.quota import assert_operator_quota
 _JOB_STATUSES = ("pending", "publishing", "published", "failed", "canceled")
 # 图文笔记图片张数硬上限(小红书图文最多 18 张);下限为 1(纯图文,无图不成立)。
 _MAX_IMAGES = 18
+# 播客合集名称长度上限(实拍确认:创建页 input 的 maxlength="20")
+_MAX_PODCAST_COLLECTION_NAME = 20
 
 
 def _parse_schedule_time(raw: str | None) -> datetime | None:
@@ -190,7 +195,8 @@ router = APIRouter()
 MANIFEST_ENTRIES = [
     {
         "method": "POST", "path": "/api/publish-jobs",
-        "summary": "发布一条小红书笔记:图文(images)或视频(video),二选一(异步入队,需对该账号有 access)",
+        "summary": "发布一条小红书笔记:图文(images)/ 视频(video)/ 播客(audio),三选一"
+                    "(异步入队,需对该账号有 access)",
         "admin_only": False,
         "params": {
             "account_id": "body,int",
@@ -198,18 +204,34 @@ MANIFEST_ENTRIES = [
             "content": "body,str(截断 ≤900,静默不报错)",
             "images": "body,list|None(图文笔记走这个;1-18 项,越界立即 400);每项三形态之一:"
                        "http(s) URL 字符串 / data URI 字符串 / {b64, ext} 对象;"
-                       "**与 video 互斥,二选一必填**(同时给或都不给都 422)",
+                       "**与 video / audio 互斥,三选一必填**(多给或都不给都 422)",
             "video": "body,str|None(视频笔记走这个;**服务器侧文件路径**,不是 URL 也不是 "
                       "base64 —— 视频动辄几百 MB,先把文件落到本服务器再把路径传进来)。"
                       "支持 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts;"
                       "扩展名不在此列 → 422,路径不存在/不可读 → 422;"
-                      "**与 images 互斥,二选一必填**(同时给或都不给都 422)",
-            "cover": "body,str|None(**仅视频任务**的自定义封面图,服务器侧图片路径,语义同 "
+                      "**与 images / audio 互斥,三选一必填**(多给或都不给都 422)",
+            "audio": "body,str|None(**播客笔记**走这个;**服务器侧文件路径**,语义同 video)。"
+                      "支持 .m4a/.mp3/.wav/.flac/.aac;**时长必须在 10 分钟~2 小时之间**"
+                      "(闭区间)、**大小 ≤1GB** —— 四条准入(文件存在 / 扩展名 / 体积 / 时长)"
+                      "任一不过当场 422 且不建 job,报错点名是哪一条。时长由服务端 ffprobe 现读,"
+                      "**读不出时长一律拒收**(读不出来多半不是有效音频,放行只会造一条注定失败"
+                      "的任务)。GB 级音频请走分片上传 POST /api/uploads/media-sessions,"
+                      "complete 返回的 path 就填这里;**与 images / video 互斥,三选一必填**",
+            "cover": "body,str|None(**视频或播客任务**的自定义封面图,服务器侧图片路径,语义同 "
                       "video)。支持 .jpg/.jpeg/.png/.webp;扩展名不在此列或文件不存在 → 422;"
-                      "**图文任务传 cover → 422**(图文的封面就是第一张图,没有独立封面这个概念)。"
-                      "**不传 = 用平台自动截取的第一帧**(默认行为)。封面图很小,不必走分片:"
-                      "POST /api/uploads/images 传完即落在 DATA_DIR/uploads/{batch_id}/NN.ext,"
-                      "把那个服务器侧路径填进来即可",
+                      "**体积上限按任务类型分档**:视频封面不限、播客音频封面 ≤32MB(平台规格),"
+                      "超限 422。**图文任务传 cover → 422**(图文的封面就是第一张图,没有独立"
+                      "封面这个概念)。不传:视频 = 用平台自动截取的第一帧,播客 = 不设封面。"
+                      "封面图很小,不必走分片:POST /api/uploads/images 传完即落在 "
+                      "DATA_DIR/uploads/{batch_id}/NN.ext,把那个服务器侧路径填进来即可",
+            "podcast_collection": "body,str|None(**仅播客任务**:发布时把这一集加进哪个播客合集,"
+                                   "传**合集名称**不是 id,≤20 字)。合集要先建:"
+                                   "POST /api/accounts/{id}/podcast-collections。"
+                                   "图文/视频任务传它 → 422(它是播客发布表单独有的控件);"
+                                   "与 collection_id 同时给也 → 422(两者共用同一个落库字段)。"
+                                   "⚠️ **发布表单里的合集选择控件尚未经真号取证**,设置失败"
+                                   "**不阻断发布**(笔记照发、不进合集),结果见 "
+                                   "applied.components.podcast_collection",
             "topics": "body,list[str]|None(默认[];去重后截断 ≤10,静默不报错)",
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
@@ -224,24 +246,34 @@ MANIFEST_ENTRIES = [
         },
         "returns": "{job_id, status:'pending'}",
         "errors": "400=显式给了 images 但为空数组或超 18 张;"
-                  "422=images 与 video 同时给 / 都不给 / video 或 cover 格式不支持 / "
-                  "video 或 cover 文件不存在 / 图文任务传了 cover;"
+                  "422=images / video / audio 多给或都不给 / video、audio、cover 格式不支持 / "
+                  "三者任一文件不存在 / audio 时长越界或读不出 / audio 超 1GB / "
+                  "播客封面超 32MB / 图文任务传了 cover / 非播客任务传了 podcast_collection / "
+                  "podcast_collection 与 collection_id 同时给;"
                   "403=无该账号 access",
         "notes": "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
                  "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。"
-                 "**视频笔记(传 video)与图文共用本请求体的每一个字段** —— 不是窄版接口:"
-                 "title / content / topics / schedule_time / collection_id / quoted_note_id / "
+                 "**视频笔记(video)与播客笔记(audio)都与图文共用本请求体的每一个字段** "
+                 "—— 不是窄版接口:title / content / topics / schedule_time / quoted_note_id / "
                  "activity_id / related_counselor / note_purpose **全部照常生效**,语义、"
-                 "截断规则、引用推导四条规则(见下)、重试退避、账号串行、每日上限一字不差。"
+                 "截断规则、引用推导四条规则(见下)、重试退避、账号串行、每日上限一字不差"
+                 "(合集那一项播客走 podcast_collection、其余走 collection_id)。"
                  "唯一区别是媒体那一步:视频要等平台上传+转码完成才能继续录入,故 publishing "
                  "阶段比图文长(取决于文件大小,服务端等待上限按体积自动伸缩,见 "
-                 "VIDEO_UPLOAD_TIMEOUT_* 配置)。**封面**:传 cover 用你的自定义封面,不传用"
-                 "平台自动截取的第一帧。**封面设置失败绝不阻断发布**(与三组件同语义):笔记照发,"
-                 "自动降级成平台自动封面,失败原因在 `applied.components.cover.status='error'` "
-                 "与 `.reason` 里可查(所以传了 cover 的任务发完请顺手看一眼这个字段,"
+                 "VIDEO_UPLOAD_TIMEOUT_* 配置);播客同理 —— 音频上传完才会放行「去发布」,"
+                 "1GB 上限下 publishing 可能到 20 分钟级,轮询别设短超时。"
+                 "**封面**:传 cover 用你的自定义封面;不传时视频用平台自动截取的第一帧、"
+                 "播客不设封面。**封面设置失败绝不阻断发布**(与三组件同语义):笔记照发、"
+                 "退回平台默认,失败原因在 `applied.components.cover.status='error'` 与 "
+                 "`.reason` 里可查(所以传了 cover 的任务发完请顺手看一眼这个字段,"
                  "别默认封面一定换上了);"
                  "视频页独有的「添加章节 / 关联直播预告」不设置。"
+                 "⚠️ **播客链路的取证覆盖度低于图文/视频**:「发播客」tab 与播客合集创建页"
+                 "已真号取证;而**音频上传弹窗内部、「去发布」之后的发布表单、合集选择控件**"
+                 "三处的选择器仍是占位值(真号取证被页面引导 tooltip 阻断)。这几步写成 "
+                 "fail-loud —— 定位不到就带当场取证报错,**绝不静默假装做过**;媒体步失败即"
+                 "整条任务失败进重试,合集这类辅助步失败只告警。播客发布**尚未跑过真号 e2e**。"
                  "**关联活动**:视频页与图文页同源(内联区渲染约 2 张推荐活动卡 + 区标题右侧"
                  "「更多」入口)。传的 activity_id 若不在推荐位,服务端会自动点开「更多活动」"
                  "面板滚动查找 —— **不必挑推荐位里的活动**。设置失败**不阻断发布**,笔记照发,"
@@ -344,18 +376,19 @@ MANIFEST_ENTRIES = [
                               "ISO8601 带时区如 2026-01-01T09:00:00+08:00)",
         },
         "returns": "{ok:true, job:<同 GET 单条视图>} 改成功;{ok:false, status:<当前态>} 非 pending 改不了",
-        "errors": "400=images 越界;422=给**视频任务**传了 images(见 notes);"
+        "errors": "400=images 越界;422=给**视频或播客任务**传了 images(见 notes);"
                   "403=无该账号 access;404=job 不存在",
         "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
                  "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。空请求体 {} 为 no-op "
                  "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。"
-                 "**视频任务能改什么**:title / content / topics / schedule_time 与图文任务"
-                 "**完全一样**,照常可改。**只有 images 是硬拒**:给视频任务传 images 一律 "
-                 "422「视频任务不可改图片,请取消后重建」,images_json 与 video_path 都一个"
-                 "字节不动(空数组同样拒——显式传这个字段就是在选图文那条路)。"
-                 "为什么硬拒而不是照写:runner 是按 video_path 路由的,images 写进去也永远"
-                 "不生效,你却会拿到 ok:true —— 那是比报错危险得多的静默态。"
-                 "本端点没有 video 参数,所以反方向(图文任务想变视频)自然不可达。"
+                 "**视频/播客任务能改什么**:title / content / topics / schedule_time 与图文"
+                 "任务**完全一样**,照常可改。**只有 images 是硬拒**:给视频任务传 images 一律 "
+                 "422「视频任务不可改图片,请取消后重建」、给播客任务一律 422「播客任务不可改"
+                 "图片,请取消后重建」,images_json 与 video_path / audio_path 都一个字节不动"
+                 "(空数组同样拒——显式传这个字段就是在选图文那条路)。"
+                 "为什么硬拒而不是照写:runner 是按 audio_path / video_path 路由的,images "
+                 "写进去也永远不生效,你却会拿到 ok:true —— 那是比报错危险得多的静默态。"
+                 "本端点没有 video / audio 参数,所以反方向(图文任务想变视频/播客)自然不可达。"
                  "要换媒体:cancel 掉再建一条新的。",
     },
 ]
@@ -372,9 +405,17 @@ class PublishNoteRequest(BaseModel):
     # 视频笔记的**服务器侧**文件路径(不是 URL、不是 base64:视频动辄几百 MB,
     # 走请求体传输不现实,由调用方先落到服务器再把路径给我们)。与 images 互斥。
     video: str | None = None
-    # 视频笔记的自定义封面图,同样是**服务器侧路径**。不传 = 用平台自动截取的第一帧。
-    # 只对视频任务有意义:图文笔记的封面就是首图,没有独立封面这个概念。
+    # 播客笔记的**服务器侧**音频文件路径(理由同 video:动辄几百 MB~1GB)。
+    # 与 images / video 三选一。四条准入(存在性/扩展名/体积/时长)见 policy.audio_reject。
+    audio: str | None = None
+    # 视频/播客笔记的自定义封面图,同样是**服务器侧路径**。
+    # 视频不传 = 用平台自动截取的第一帧;播客不传 = 不设封面。
+    # 图文笔记没有独立封面这个概念(封面就是首图),传了一律 422。
     cover: str | None = None
+    # 播客合集名称(**仅播客任务**)。用名称不用 id:合集创建流程能否回读到平台侧 id
+    # 未取证(E4/E5),而名称是实拍确认的必填项(≤20 字);发布表单里按名称选中。
+    # 落库复用 collection_id 列(列级多态,见 app/models/publish_job.py 注释)。
+    podcast_collection: str | None = None
     topics: list[str] = []
     schedule_time: str | None = None
     # 笔记三组件(全可选,字段名与 POST /api/accounts/{id}/note-components 一致):
@@ -391,25 +432,33 @@ class PublishNoteRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_media_exclusive(self) -> "PublishNoteRequest":
-        """images 与 video 二选一 + 视频路径可用性校验(违反一律 422)。
+        """images / video / audio **三选一** + 各自路径可用性校验(违反一律 422)。
 
-        为什么放在 pydantic 校验层而不是端点体内:这四条全是**纯入参形状**问题,
+        为什么放在 pydantic 校验层而不是端点体内:这些全是**纯入参形状**问题,
         一条也不需要 DB/账号上下文,放这里让 FastAPI 统一给 422 与字段定位。
         (端点体内的 ``ValueError`` 走 400,那是既有图片张数校验的位置,不动它。)
 
-        「显式 ``images: []`` 且没给 video」故意**不**在这里拦:那是调用方明确选了图文
-        这条路只是没给图,继续落到端点体内既有的 400「至少 1 张图片」,上线前的契约不变。
-        真正的"两个都没给"是 images 省略/为 null 且 video 为空 —— 那才是 422。
+        「显式 ``images: []`` 且没给 video/audio」故意**不**在这里拦:那是调用方明确选了
+        图文这条路只是没给图,继续落到端点体内既有的 400「至少 1 张图片」,上线前的契约
+        不变。真正的"都没给"是 images 省略/为 null 且 video、audio 均为空 —— 那才是 422。
         """
         video = (self.video or "").strip()
-        if video and self.images is not None:
+        audio = (self.audio or "").strip()
+        given = [
+            name for name, on in
+            (("images", self.images is not None), ("video", bool(video)),
+             ("audio", bool(audio)))
+            if on
+        ]
+        if len(given) > 1:
             raise ValueError(
-                "images 与 video 二选一:图文笔记传 images,视频笔记传 video,不能同时给"
+                f"images / video / audio 三选一:图文传 images,视频传 video,"
+                f"播客传 audio,不能同时给(本次给了 {' 与 '.join(given)})"
             )
-        if not video and self.images is None:
+        if not given:
             raise ValueError(
-                "images 与 video 二选一必填:图文笔记传 images(1-18 张),"
-                "视频笔记传 video(服务器侧文件路径)"
+                "images / video / audio 三选一必填:图文笔记传 images(1-18 张),"
+                "视频笔记传 video、播客笔记传 audio(均为服务器侧文件路径)"
             )
         if video:
             if not video_ext_allowed(video):
@@ -419,27 +468,59 @@ class PublishNoteRequest(BaseModel):
                 )
             if not Path(video).is_file():
                 raise ValueError(f"video 文件不存在(需为本服务器可读的绝对路径):{video}")
+        if audio:
+            # 四条准入(存在性/扩展名/体积/时长)收在 policy 一处,理由各异故返回具体
+            # 理由而不是裸 bool —— 换文件 / 转格式 / 压缩 / 剪辑 是四种不同的补救。
+            reason = audio_reject(audio)
+            if reason:
+                raise ValueError(reason)
         cover = (self.cover or "").strip()
         if cover:
-            if not video:
+            if not video and not audio:
                 raise ValueError(
-                    "cover 只对视频笔记有效:图文笔记的封面就是第一张图,"
+                    "cover 只对视频/播客笔记有效:图文笔记的封面就是第一张图,"
                     "没有独立封面这个概念,请去掉 cover"
                 )
-            if not cover_ext_allowed(cover):
+            if audio:
+                # 播客封面另有 ≤32MB 的体积上限(实拍规格),与视频封面**不合并成一个
+                # 函数**:合并后只能靠调用方传参区分档位,而传错档的失败是静默的。
+                reason = audio_cover_reject(cover)
+                if reason:
+                    raise ValueError(reason)
+            else:
+                if not cover_ext_allowed(cover):
+                    raise ValueError(
+                        f"cover 封面图格式不支持:{cover};只接受 "
+                        f"{'/'.join(XHS_COVER_EXTENSIONS)}"
+                    )
+                if not Path(cover).is_file():
+                    raise ValueError(
+                        f"cover 封面图文件不存在(需为本服务器可读的绝对路径):{cover}")
+        collection = (self.podcast_collection or "").strip()
+        if collection:
+            if not audio:
                 raise ValueError(
-                    f"cover 封面图格式不支持:{cover};只接受 "
-                    f"{'/'.join(XHS_COVER_EXTENSIONS)}"
+                    "podcast_collection 只对播客笔记有效(它是播客发布表单独有的控件);"
+                    "图文/视频笔记要加合集请用 collection_id"
                 )
-            if not Path(cover).is_file():
+            if self.collection_id:
+                # 两者共用 collection_id 一列,后写会静默盖掉前者 —— 这正是"看着成功、
+                # 实际只生效一个"的静默态,入口直接拒绝而不是替调用方挑一个。
                 raise ValueError(
-                    f"cover 封面图文件不存在(需为本服务器可读的绝对路径):{cover}")
+                    "podcast_collection 与 collection_id 不能同时给:播客合集与笔记合集"
+                    "共用同一个落库字段,同时给必然有一个被静默丢弃"
+                )
+            if len(collection) > _MAX_PODCAST_COLLECTION_NAME:
+                raise ValueError(
+                    f"podcast_collection 名称 {len(collection)} 字超过平台上限 "
+                    f"{_MAX_PODCAST_COLLECTION_NAME} 字"
+                )
         return self
 
 
 @router.post("/api/publish-jobs", status_code=202)
 async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
-    """发布笔记(异步入队):图文走 images,视频走 video(二选一,已由入参校验钉死)。"""
+    """发布笔记(异步入队):图文走 images,视频走 video,播客走 audio(三选一,已由入参校验钉死)。"""
     operator = current_operator()
     # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建 job。
     await assert_operator_quota(operator)
@@ -447,9 +528,10 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
     async with get_session() as session:
         await assert_account_access(operator, payload.account_id, session)
         # D1:建 job 前先校验图片张数,避免造出注定失败的 pending 任务。
-        # 视频笔记(video 已通过入参校验)不走图片这条路,张数校验整段跳过。
+        # 视频/播客笔记(video/audio 已通过入参校验)不走图片这条路,张数校验整段跳过。
         video_path = (payload.video or "").strip() or None
-        if video_path is None:
+        audio_path = (payload.audio or "").strip() or None
+        if video_path is None and audio_path is None:
             if not payload.images:
                 raise ValueError("图文笔记至少需要 1 张图片")
             if len(payload.images) > _MAX_IMAGES:
@@ -484,12 +566,18 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             content=payload.content,
             images_json=json.dumps(payload.images or [], ensure_ascii=False),
             video_path=video_path,
+            audio_path=audio_path,
             cover_path=(payload.cover or "").strip() or None,
             topics_json=json.dumps(payload.topics or [], ensure_ascii=False),
             schedule_time=scheduled_at,
             status="pending",
             created_by=operator.id,
-            collection_id=payload.collection_id,
+            # 列级多态:播客任务这里存的是**播客合集名称**,图文/视频存笔记合集 id。
+            # 两者互斥已在入参校验层钉死,不会互相覆盖。
+            collection_id=(
+                (payload.podcast_collection or "").strip() or None
+                if audio_path else payload.collection_id
+            ),
             quoted_note_id=quoted_note_id,
             activity_id=payload.activity_id,
             related_counselor=payload.related_counselor,
@@ -610,6 +698,11 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
             # video_path 路由的 —— 图片永远不生效,调用方却拿到 ok:true,只能等笔记发出来
             # 人工看才发现。破坏性/类型迁移决定必须显式拒绝,不靠 manifest 里一句警告兜底。
             # 422 走 HTTPException 的 detail 体,与本仓既有的 409/429 同一个通道。
+            if job.audio_path:
+                raise HTTPException(
+                    status_code=422,
+                    detail="播客任务不可改图片,请取消后重建",
+                )
             if job.video_path:
                 raise HTTPException(
                     status_code=422,

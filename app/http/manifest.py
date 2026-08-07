@@ -44,9 +44,11 @@ _WORKFLOWS = [
 ]
 
 _CONSTRAINTS = [
-    "发布支持图文与视频,二选一:图文传 images(≥1 且 ≤18 张,越界立即 400);"
-    "视频传 video(服务器侧文件路径,支持 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts)。"
-    "两者同时给、都不给、video 格式不支持或文件不存在,均 422。",
+    "发布支持图文 / 视频 / 播客,三选一:图文传 images(≥1 且 ≤18 张,越界立即 400);"
+    "视频传 video(服务器侧文件路径,支持 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts);"
+    "播客传 audio(服务器侧文件路径,支持 .m4a/.mp3/.wav/.flac/.aac,时长 10 分钟~2 小时、≤1GB)。"
+    "多给、都不给、格式不支持、文件不存在、音频时长/体积越界,均 422。"
+    "GB 级视频/音频先走分片上传 POST /api/uploads/media-sessions,拿 complete 返回的 path 再发布。",
     "标题按显示长度截断 ≤20、正文截断 ≤900、话题去重后截断 ≤10——长度类均静默硬截断不报错,请自行控长。",
     "schedule_time 定时发布务必带时区偏移(如 2026-01-01T09:00:00+08:00);不带偏移按 UTC 解释,会早/晚 8 小时。",
     "publish-jobs 读回的时间字段(schedule_time/next_retry_at/created_at)带 +00:00 显式 UTC 偏移"

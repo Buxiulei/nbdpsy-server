@@ -702,10 +702,16 @@ class Supervisor:
 
     @staticmethod
     def _publish_video_sizes(publish_ids: list) -> list:
-        """读这批 publish job 各自视频文件的字节数(没有视频/读不到的位置为 None)。
+        """读这批 publish job 各自**大媒体**文件的字节数(没有媒体/读不到的位置为 None)。
+
+        媒体 = 视频(``video_path``)或播客音频(``audio_path``)—— 两者互斥,同一行
+        最多只有一个非空,故按行取"哪个有取哪个"。1GB 音频与 GB 级视频在上传耗时上
+        同量级,凭什么给视频加时不给音频加,就没有理由。
 
         直接查库文件而不是把大小塞进队列:队列那层与媒体无关(调研结论),不为这一个
         用途污染它。读失败一律 None → 伸缩公式退回基准,最坏退化成改动前的行为。
+        (函数名沿用 ``_publish_video_sizes`` 不改:worker 的既有回归测试按这个名字锁着,
+        为字面准确改名要连带动测试,收益仅美观。)
         """
         if not publish_ids:
             return []
@@ -717,16 +723,16 @@ class Supervisor:
             conn = sqlite3.connect(_sqlite_db_path())
             try:
                 rows = conn.execute(
-                    "SELECT video_path FROM publish_jobs WHERE id IN (%s)"
+                    "SELECT video_path, audio_path FROM publish_jobs WHERE id IN (%s)"
                     % ",".join("?" * len(publish_ids)),
                     [int(i) for i in publish_ids],
                 ).fetchall()
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 — 取大小是优化,失败就退回基准超时
-            logger.warning("读 publish job 视频体积失败(退回基准硬超时)")
+            logger.warning("读 publish job 媒体体积失败(退回基准硬超时)")
             return []
-        return [media_file_size(r[0]) for r in rows]
+        return [media_file_size(r[0] or r[1]) for r in rows]
 
     async def _reap_child(self, account_id: int, proc, timeout: float | None = None) -> None:
         """等子进程退出并出表;超硬超时 SIGKILL 进程组防僵死占坑。

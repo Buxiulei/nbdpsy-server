@@ -3,7 +3,7 @@
 隔离手法与 tests/test_publish_rest.py 完全一致(rest_client 真 lifespan + 假调度器)。
 
 覆盖 brief 必测:
-- video 与 images 同给 → 422;两者都不给 → 422(二选一必填);
+- video 与 images 同给 → 422;两者都不给 → 422(三选一必填,播客上线后 audio 也在同一组);
 - 只给 video → 202 且 video_path 落库、images_json 为空列表;
 - video 扩展名不在平台白名单 → 422;video 文件不存在 → 422;
 - 回归:只给 images 照旧 202;显式 images=[] 且无 video 仍是既有的 400(不是 422)。
@@ -55,7 +55,7 @@ def _make_video(tmp_path, name: str = "note.mp4") -> str:
 
 
 async def test_video_and_images_both_given_422(tmp_path, monkeypatch):
-    """video 与 images 同给 → 422,文案说清二选一。"""
+    """video 与 images 同给 → 422,文案说清三选一(播客上线后 audio 并入同一组互斥)。"""
     async with rest_client(tmp_path, monkeypatch) as c:
         _install_fake_scheduler()
         acc = await _account_with_operator("号V1", "uV1", "op-video-both")
@@ -69,7 +69,7 @@ async def test_video_and_images_both_given_422(tmp_path, monkeypatch):
             headers=bearer("op-video-both"),
         )
         assert r.status_code == 422, r.text
-        assert "二选一" in r.text
+        assert "三选一" in r.text
 
 
 async def test_neither_video_nor_images_422(tmp_path, monkeypatch):
@@ -83,7 +83,7 @@ async def test_neither_video_nor_images_422(tmp_path, monkeypatch):
             headers=bearer("op-video-none"),
         )
         assert r.status_code == 422, r.text
-        assert "二选一" in r.text
+        assert "三选一" in r.text
 
 
 async def test_video_only_creates_job_with_video_path(tmp_path, monkeypatch):

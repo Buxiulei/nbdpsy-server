@@ -189,7 +189,7 @@ def test_publish_once_forwards_video_path(monkeypatch):
 
     def _fake_publish_note(self, title, content, image_paths, topics=None,
                            components=None, job_tag=None, video_path=None,
-                           cover_path=None):
+                           cover_path=None, audio_path=None, podcast_collection=None):
         seen["video_path"] = video_path
         seen["image_paths"] = image_paths
         return {"success": True, "note_url": "u", "note_id": "i"}
@@ -219,7 +219,7 @@ def test_account_worker_video_job_skips_image_pipeline(monkeypatch, tmp_path):
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
                            topics=None, components=None, job_tag=None, video_path=None,
-                           cover_path=None):
+                           cover_path=None, audio_path=None, podcast_collection=None):
         seen.update(image_paths=image_paths, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -252,7 +252,7 @@ def test_account_worker_image_job_still_materializes(monkeypatch, tmp_path):
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
                            topics=None, components=None, job_tag=None, video_path=None,
-                           cover_path=None):
+                           cover_path=None, audio_path=None, podcast_collection=None):
         seen.update(image_paths=image_paths, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -296,7 +296,7 @@ async def test_scheduler_runner_routes_video(monkeypatch, tmp_path):
 
         def _fake_publish_once(account_id, cookies, title, content, image_paths,
                                topics=None, components=None, job_tag=None,
-                               video_path=None, cover_path=None):
+                               video_path=None, cover_path=None, audio_path=None, podcast_collection=None):
             seen.update(image_paths=image_paths, video_path=video_path)
             return sc.PublishResult(success=True, note_url="u", note_id="i")
 
@@ -422,7 +422,7 @@ def test_account_worker_video_job_passes_components(monkeypatch):
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
                            topics=None, components=None, job_tag=None, video_path=None,
-                           cover_path=None):
+                           cover_path=None, audio_path=None, podcast_collection=None):
         seen.update(topics=topics, components=components, video_path=video_path)
         return aw.sync_client.PublishResult(success=True, note_url="u")
 
@@ -588,7 +588,7 @@ def test_cover_path_threaded_from_both_execution_paths(monkeypatch):
 
     def _fake_publish_once(account_id, cookies, title, content, image_paths,
                            topics=None, components=None, job_tag=None,
-                           video_path=None, cover_path=None):
+                           video_path=None, cover_path=None, audio_path=None, podcast_collection=None):
         seen["cover_path"] = cover_path
         return aw.sync_client.PublishResult(success=True, note_url="u")
 

@@ -106,22 +106,27 @@ def make_publish_runner(
                     content = job.content
                     raw_images = json.loads(job.images_json or "[]")
                     video_path = job.video_path or None
+                    audio_path = job.audio_path or None
                     cover_path = job.cover_path or None
                     topics = json.loads(job.topics_json or "[]")
-                    # 三组件(全 None = 不设置,跳过组件那一步)
+                    # 三组件(全 None = 不设置,跳过组件那一步)。
+                    # ⚠️ 播客任务的 collection_id 列存的是**播客合集名称**(列级多态,见
+                    # app/models/publish_job.py),不能喂给按 hex id 找笔记合集的组件链路 ——
+                    # 它单独走 podcast_collection 参数。
                     components = {
-                        "collection_id": job.collection_id,
+                        "collection_id": None if audio_path else job.collection_id,
                         "quoted_note_id": job.quoted_note_id,
                         "activity_id": job.activity_id,
                     }
+                    podcast_collection = job.collection_id if audio_path else None
                     cookies = _decrypt_account_cookies(account)
 
                 # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
                 #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
                 #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
-                # 视频任务整条图片管线都跳过:视频是服务器侧现成文件,既不用物料化,
+                # 视频/播客任务整条图片管线都跳过:媒体是服务器侧现成文件,既不用物料化,
                 # 也不用去水印(那是给生图管线用的)。
-                if video_path:
+                if video_path or audio_path:
                     image_paths = []
                 else:
                     paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
@@ -145,6 +150,8 @@ def make_publish_runner(
                             components,
                             video_path=video_path,
                             cover_path=cover_path,
+                            audio_path=audio_path,
+                            podcast_collection=podcast_collection,
                         )
                     )
 

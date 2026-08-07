@@ -357,7 +357,7 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
 
     def fake_publish_once(
         acc_id, cookies, title, content, image_paths, topics, components=None,
-        video_path=None, cover_path=None,
+        video_path=None, cover_path=None, audio_path=None, podcast_collection=None,
     ):
         # video_path:图文任务恒为 None(视频分支的路由另有用例覆盖)
         captured["args"] = (acc_id, cookies, title, content, image_paths, topics)

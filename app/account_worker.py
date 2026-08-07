@@ -259,18 +259,20 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
 
     临时物料目录发布结束(无论成败)清理。返回 ``PublishResult``。
 
-    视频任务(``video_path`` 非空)**整条图片管线都跳过**:视频是服务器侧现成文件,
-    既不需要下载/解码物料化,也不需要去水印(那是给生图管线用的)。
+    视频任务(``video_path`` 非空)与播客任务(``audio_path`` 非空)**整条图片管线都
+    跳过**:媒体是服务器侧现成文件,既不需要下载/解码物料化,也不需要去水印(那是给
+    生图管线用的)。
     """
     cookies = _load_account_cookies(db_path, account_id)
     raw_images = json.loads(job["images_json"] or "[]")
     topics = json.loads(job["topics_json"] or "[]")
     # 老库没跑迁移时 SELECT * 出来没有这一列 → .get 兜底成 None,与"图文任务"同义。
     video_path = job.get("video_path") or None
+    audio_path = job.get("audio_path") or None
     cover_path = job.get("cover_path") or None
     workdir = Path(settings.UPLOAD_DIR) / f"job_{job['id']}"
     try:
-        if video_path:
+        if video_path or audio_path:
             image_paths = []
         else:
             image_paths = [str(p) for p in materialize_images(raw_images, workdir)]
@@ -282,8 +284,11 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
             image_paths = asyncio.run(dewatermark_all(image_paths))
         # 三组件(值全空 = 不设置,发布链路跳过组件那一步)。job 是 SELECT * 出来的整行,
         # 没跑迁移的库里没有这三列 → .get 兜底成 None,与"不设置"同义。
+        # ⚠️ 播客任务的 collection_id 列存的是**播客合集名称**(列级多态,见
+        # app/models/publish_job.py),它单独走 podcast_collection 参数,绝不能喂给
+        # 按 hex id 找笔记合集的组件链路 —— 那会拿名字去匹配 id,静默设不上。
         components = {
-            field: job.get(field)
+            field: (None if audio_path and field == "collection_id" else job.get(field))
             for field in ("collection_id", "quoted_note_id", "activity_id")
         }
         return sync_client.publish_once(
@@ -293,6 +298,8 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
             job_tag=str(job["id"]),
             video_path=video_path,
             cover_path=cover_path,
+            audio_path=audio_path,
+            podcast_collection=(job.get("collection_id") if audio_path else None),
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -415,6 +422,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_purpose
 
         return lambda account_id, payload: note_purpose.execute(account_id, payload)
+    if kind == "podcast_collection_create":
+        from app.services import podcast_collection
+
+        return lambda account_id, payload: podcast_collection.execute(account_id, payload)
     if kind == "draft_clean":
         from app.services import draft_clean
 

@@ -13,9 +13,12 @@
 - 重试耗尽 → failed。
 """
 
+import json
 import os
 import random
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 # 与 scheduler.finish 的缺省文案逐字一致(I1 / F3)
@@ -166,3 +169,124 @@ def media_file_size(path: str | None) -> int | None:
         return os.path.getsize(path)
     except OSError:
         return None
+
+
+# ── 播客音频:平台规格(实拍确认,见 data/scene_captures/podcast/)──
+# 上传区规格文案逐字:「时长不超过10分钟,最长不超过2小时,大小不超过1GB」
+# (前半句是产品文案笔误,实际语义 = 最短 10 分钟)。
+XHS_AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".flac", ".aac")
+XHS_AUDIO_MAX_BYTES = 1024 * 1024 * 1024
+# 时长门取**闭区间**(=600s / =7200s 放行):平台真实边界语义未取证,先取宽松侧
+# 避免误杀合法输入 —— 真号验出平台拒收整点值时改这两个常量即可。
+AUDIO_MIN_DURATION_S = 600
+AUDIO_MAX_DURATION_S = 7200
+
+
+def audio_ext_allowed(audio_path: str | None) -> bool:
+    """音频路径的扩展名是否在平台白名单内(纯函数,大小写不敏感)。"""
+    lowered = (audio_path or "").lower()
+    return any(lowered.endswith(ext) for ext in XHS_AUDIO_EXTENSIONS)
+
+
+def audio_duration_s(audio_path: str | None) -> float | None:
+    """用 ffprobe 读音频时长(秒);读不出来一律 ``None``,**不假装知道**。
+
+    为什么用 ffprobe:worker 主机已有 ffmpeg 栈(视频管线在用),零新依赖;它只读
+    容器头,毫秒级返回,放在同步 REST 端点里可接受。
+
+    ``None`` 的调用方语义是**拒收**而不是放行(见 ``audio_reject``):平台侧超长会拒,
+    而我们要等发布那一刻才知道——宁可在入口误杀一个读不出时长的坏文件。
+    """
+    if not audio_path:
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", audio_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # ffprobe 不可执行 / 超时:读不到就是读不到
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        raw = json.loads(out.stdout or "{}").get("format", {}).get("duration")
+        value = float(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if value > 0 else None
+
+
+def audio_reject(audio_path: str) -> str | None:
+    """播客音频的四条准入(存在性 / 扩展名 / 体积 / 时长);合格返 ``None``,否则给拒绝理由。
+
+    返回理由字符串而不是裸 bool:这四条的补救动作完全不同(换文件 / 转格式 / 压缩 /
+    剪辑),只说一句"不合格"等于让调用方去猜。
+
+    顺序是有意的 —— 扩展名先于 ffprobe:对一个必拒的文件白跑一次子进程没有意义。
+    """
+    if not audio_path or not Path(audio_path).is_file():
+        return f"audio 文件不存在(需为本服务器可读的绝对路径):{audio_path}"
+    if not audio_ext_allowed(audio_path):
+        return (
+            f"audio 格式不支持:{audio_path};小红书播客只接受 "
+            f"{'/'.join(XHS_AUDIO_EXTENSIONS)}"
+        )
+    size = media_file_size(audio_path)
+    if size is not None and size > XHS_AUDIO_MAX_BYTES:
+        return (
+            f"audio 大小 {size} 字节超过平台上限 {XHS_AUDIO_MAX_BYTES} 字节(1GB)"
+        )
+    duration = audio_duration_s(audio_path)
+    if duration is None:
+        return (
+            f"无法读取 audio 时长(ffprobe 读不出来,多半不是有效音频文件):{audio_path};"
+            f"平台要求 {AUDIO_MIN_DURATION_S // 60}-{AUDIO_MAX_DURATION_S // 60} 分钟,"
+            f"读不出来一律不放行"
+        )
+    if duration < AUDIO_MIN_DURATION_S or duration > AUDIO_MAX_DURATION_S:
+        return (
+            f"audio 时长 {duration:.0f}s 越界:平台要求 {AUDIO_MIN_DURATION_S}-"
+            f"{AUDIO_MAX_DURATION_S}s(最短 10 分钟、最长 2 小时,闭区间)"
+        )
+    return None
+
+
+# ── 两档封面体积上限 ──
+# 扩展名白名单三处**同一套**(XHS_COVER_EXTENSIONS,含 webp):真号取证读到播客合集
+# 封面 input 的 accept 就是 ".jpg,.jpeg,.png,.webp",与设计文档「合集封面无 webp」的
+# 假设相反,以实测 DOM 为准。差异只在体积上限,故只分两个常量、不分两套白名单。
+AUDIO_COVER_MAX_BYTES = 32 * 1024 * 1024
+PODCAST_COLLECTION_COVER_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _cover_reject(cover_path: str, max_bytes: int, label: str) -> str | None:
+    """封面准入共用体:存在性 + 扩展名 + 体积;合格返 ``None``,否则给理由。"""
+    if not cover_path or not Path(cover_path).is_file():
+        return f"{label} 文件不存在(需为本服务器可读的绝对路径):{cover_path}"
+    if not cover_ext_allowed(cover_path):
+        return (
+            f"{label} 格式不支持:{cover_path};只接受 "
+            f"{'/'.join(XHS_COVER_EXTENSIONS)}"
+        )
+    size = media_file_size(cover_path)
+    if size is not None and size > max_bytes:
+        return f"{label} 大小 {size} 字节超过上限 {max_bytes} 字节"
+    return None
+
+
+def audio_cover_reject(cover_path: str) -> str | None:
+    """播客音频封面准入(扩展名 + ≤32MB);合格返 ``None``,否则给拒绝理由。"""
+    return _cover_reject(cover_path, AUDIO_COVER_MAX_BYTES, "cover 音频封面")
+
+
+def podcast_collection_cover_reject(cover_path: str) -> str | None:
+    """播客合集封面准入(扩展名 + ≤5MB);合格返 ``None``,否则给拒绝理由。
+
+    与音频封面**刻意不合并成一个函数**:两者体积上限不同(5MB vs 32MB),合并后
+    只能靠调用方传参区分,而传错参数的失败是静默的(放行一张平台会拒的图)。
+    """
+    return _cover_reject(
+        cover_path, PODCAST_COLLECTION_COVER_MAX_BYTES, "cover 合集封面"
+    )

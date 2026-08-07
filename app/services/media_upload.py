@@ -30,10 +30,12 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.errors import NotFoundError
-from app.publish.policy import XHS_VIDEO_EXTENSIONS
+from app.publish.policy import XHS_AUDIO_EXTENSIONS, XHS_VIDEO_EXTENSIONS
 
-# 播客音频扩展名(与视频白名单并列;平台侧上限 1GB,配置在 UPLOAD_AUDIO_MAX_MB)
-AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".flac", ".aac")
+# 播客音频扩展名(与视频白名单并列;平台侧上限 1GB,配置在 UPLOAD_AUDIO_MAX_MB)。
+# 别名到 policy 里那份**唯一**定义:发布入口(audio_reject)与上传通道必须认同一套
+# 白名单,各写一份迟早漂移成"传得上去但发不出来"。
+AUDIO_EXTENSIONS = XHS_AUDIO_EXTENSIONS
 
 # 单分片硬上限:Cloudflare Tunnel 单请求体 100MB,留 10MB 余量给请求头/编码开销。
 # 客户端传再大的 chunk_size 也压到这条线以下 —— 越线不是"慢一点",是隧道层直接砍断。

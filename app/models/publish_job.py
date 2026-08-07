@@ -28,7 +28,13 @@ class PublishJob(Base):
     # 与 images_json 互斥,二选一(入口 POST /api/publish-jobs 已把互斥钉死),
     # 发布链路据它有无路由到视频分支(step2v/step3v)还是图文分支(step2/step3/step4)。
     video_path: Mapped[str | None] = mapped_column(Text, default=None)
-    # 视频笔记的自定义封面图,服务器侧文件路径;None = 用平台自动截取的第一帧。
+    # 播客笔记的服务器侧音频文件路径;None = 不是播客任务。
+    # 与 images_json / video_path **三选一**(入口 POST /api/publish-jobs 已把互斥钉死)。
+    # 判型规则全链统一且有优先级:audio_path 非空 → 播客;video_path 非空 → 视频;
+    # 否则图文。三者互斥由 REST 层保证,runner 层按此优先级防御性判断即可。
+    audio_path: Mapped[str | None] = mapped_column(Text, default=None)
+    # 视频/播客笔记的自定义封面图,服务器侧文件路径;None = 用平台默认
+    # (视频取自动截取的第一帧;播客不设封面)。
     # **只对视频任务有意义**(图文笔记的封面就是首图,没有独立封面这个概念),
     # 入口已把「图文任务给 cover」挡在 422。
     cover_path: Mapped[str | None] = mapped_column(Text, default=None)
@@ -52,6 +58,10 @@ class PublishJob(Base):
     # 笔记三组件(合集 / 引用笔记 / 关联活动),发布时在 step6 之后、step7 之前设置。
     # 全可空 = 不设置;存平台侧 id 字符串(活动 bizId 实测是字符串,合集/笔记 id 是 hex)。
     # ⚠️ activity_id 会让平台把该活动的话题**追加**进正文(注入的话题名与活动名可能不同)。
+    # ⚠️ collection_id 是**列级多态**:图文/视频任务存笔记合集 id(hex),播客任务
+    # (audio_path 非空)存**播客合集名称**——两种语义永不同路(runner 按 audio_path
+    # 分支路由),故复用同一列而不另开 podcast_collection 列。播客侧用名称不用 id 的
+    # 理由见 app/http/publish_rest.py 的 podcast_collection 字段注释。
     collection_id: Mapped[str | None] = mapped_column(default=None)
     quoted_note_id: Mapped[str | None] = mapped_column(default=None)
     activity_id: Mapped[str | None] = mapped_column(default=None)

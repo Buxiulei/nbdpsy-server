@@ -136,6 +136,52 @@ def classify_video_upload_state(
     return "unknown"
 
 
+def go_publish_enabled(button_state: dict) -> bool:
+    """播客「去发布」按钮到底能不能点(纯函数,吃 ``_audio_probe`` 读出来的一颗按钮)。
+
+    ⚠️ 该按钮的禁用态形态**未取证**(实拍只确认了"未传音频时是禁用的"这件事)。
+    故三路判据取**与**:``disabled`` 属性、``aria-disabled``、class 里的 disabled 类,
+    **全都表明不禁用**才算可点。
+
+    为什么取"与"而不是"或":读不懂的形态一律当禁用。点一颗禁用按钮永远不会成功,
+    只会换来一句"发布超时"(图文那边 2026-08-02 真号事故就是这么来的);而多等一轮
+    的代价只是超时报错,那个报错还带着当场取证,反而能推进排查。
+    """
+    if not button_state:
+        return False
+    if button_state.get("disabled"):
+        return False
+    if str(button_state.get("aria") or "").lower() == "true":
+        return False
+    cls = str(button_state.get("cls") or "").lower()
+    if "disabled" in cls:
+        return False
+    return True
+
+
+# 内部别名:step3a 里按逐颗按钮判定用(纯函数已导出,单测直接打 go_publish_enabled)
+_go_publish_enabled = go_publish_enabled
+
+
+def _find_button_by_text(page, texts) -> Optional[ElementHandle]:
+    """按文案精确匹配找一颗 ``<button>``;找不到返回 None。
+
+    限定 ``<button>`` 标签是有原因的:播客合集创建页上,「创建」按钮的外层包裹 div
+    的 innerText 也是「创建」,按纯文本找会抓到那个点不动的容器(真号取证实录)。
+    """
+    wanted = {(t or "").replace("　", " ").strip() for t in texts}
+    try:
+        for el in page.query_selector_all("button"):
+            try:
+                if (el.inner_text() or "").replace("　", " ").strip() in wanted:
+                    return el
+            except Exception:  # noqa: BLE001 — 单个元素读失败只跳过它
+                continue
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _prune_old_screenshots(root: str, keep_days: int) -> int:
     """删掉超期的调试截图,返回删了几个;**绝不抛异常**。
 
@@ -1304,6 +1350,254 @@ class XHSPublishAtomicTasks:
             "state": state,
             "observed": probe,
             "screenshot": self._take_screenshot("06_video_timeout"),
+        }
+
+    # ============ 播客分支(step2a/step3a,替代图文的 step2/3/4) ============
+    #
+    # 取证状态**分两档,别混着读**(2026-08-07 真号取证,账号9):
+    # - **已取证**:「发播客」tab 的切换与激活判据(见 app/browser/podcast.py);
+    #   上传区文案「将音频文件拖拽到此,或点击上传音频」;红色「上传音频」按钮
+    #   ``button.upload-button``;右侧「通过RSS导入音频」(不做)。
+    # - **未取证**:点「上传音频」之后那个弹窗的**内部结构** —— 音频 file input、
+    #   音频封面 file input、上传进度反馈、「去发布」按钮的禁用态判据,一个都没抓到。
+    #   两轮真号会话都被「播客合集上线啦」引导浮层挡住(它正压在上传按钮上),
+    #   而且发播客 tab 首屏的 ``input[type=file]`` 数量实测为 **0** —— 与视频 tab
+    #   (首屏就有一个隐藏 input)完全不同,说明 input 是点开弹窗后才挂上去的。
+    #
+    # 所以下面这两步写成 **fail-loud**:定位不到就带当场取证报错,**绝不静默假装做过**。
+    # 媒体步失败 = 整条发布任务失败(与视频的 step2v/step3v 同级),交状态机排重试。
+    # 换真值时改的是这几个常量 + 补命中路径单测,控制流不必动。
+
+    # 音频 file input:占位候选。第一条按视频那套 class 类推,第二条按 accept 里
+    # 平台大概率会写的扩展名,最后退回"弹窗打开后新出现的裸 file input"。
+    _AUDIO_FILE_INPUT_SELECTORS = [
+        "input[type='file'].upload-input",
+        "input[type='file'][accept*='.mp3']",
+        "input[type='file'][accept*='audio']",
+        "input[type='file']",
+    ]
+    # 音频封面 file input:与音频 input 的区分特征未取证 —— 只能靠 accept 里的图片
+    # 扩展名把它与音频那个区分开(合集封面页实测 accept=".jpg,.jpeg,.png,.webp",
+    # 弹窗里大概率同款)。**区分不出来就不传封面**,绝不把音频灌进封面位。
+    _AUDIO_COVER_INPUT_SELECTORS = [
+        "input[type='file'][accept*='.jpg']",
+        "input[type='file'][accept*='.png']",
+        "input[type='file'][accept*='image']",
+    ]
+    # 「去发布」按钮:实拍确认未传音频时禁用,故它的翻转 = 上传完成的主判据。
+    # 具体禁用属性(disabled / class / 自定义属性)未取证,三种都读、任一表明可点即可点。
+    _GO_PUBLISH_TEXTS = ("去发布",)
+
+    def step2a_upload_audio(
+        self, audio_path: str, cover_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """步骤2a: 打开「上传音频」弹窗并把音频(可选封面)灌进去。
+
+        与图文/视频同源的硬纪律:**只 set_input_files,绝不点 file input 或上传按钮**
+        去触发系统选择框 —— 真桌面上会弹原生 GTK 文件框,Playwright 拦不住、模态
+        卡死整条流程。这里点的只有「上传音频」那颗红按钮(它开的是网页弹窗)。
+
+        点按钮前先关引导浮层:实测「播客合集上线啦」的 popover 正压在这颗按钮上,
+        不关就点在浮层上(两轮真号取证都卡在这)。
+
+        封面是**可选辅助**:定位不到只告警不阻断(回退成不设封面),与视频封面同语义;
+        音频本身定位不到则整步失败。
+        """
+        from app.browser import podcast as podcast_page
+
+        self.current_step = 2
+        logger.info("=" * 60)
+        logger.info(f"步骤2a: 上传播客音频 {audio_path}")
+        logger.info("=" * 60)
+
+        try:
+            if not podcast_page.ensure_podcast_tab(self.page, self.human):
+                return {
+                    "success": False,
+                    "error": (
+                        "切不到「发播客」tab,当前激活的是 "
+                        f"{podcast_page.active_tab_text(self.page)!r}"
+                    ),
+                    "screenshot": self._take_screenshot("03_podcast_tab_failed"),
+                }
+            tooltip = podcast_page.dismiss_guide_tooltip(self.page, self.human)
+            self._take_screenshot("03_before_audio_upload")
+
+            button = self.page.query_selector(podcast_page.UPLOAD_AUDIO_BUTTON)
+            if button is None:
+                return {
+                    "success": False,
+                    "error": f"未找到「上传音频」按钮({podcast_page.UPLOAD_AUDIO_BUTTON})",
+                    "observed": self._audio_probe(),
+                    "screenshot": self._take_screenshot("03_no_upload_audio_button"),
+                }
+            self.human.click(button, reason="打开上传音频弹窗")
+            self.human.wait(1.0, 1.8, context="等上传音频弹窗渲染")
+
+            upload_input = self._find_element_with_retry(
+                self._AUDIO_FILE_INPUT_SELECTORS,
+                timeout=15, must_be_visible=False,
+                intent_key="upload_audio_input", intent_desc="上传音频弹窗内的音频 file input",
+            )
+            if upload_input is None:
+                return {
+                    "success": False,
+                    "error": (
+                        "上传音频弹窗里没找到音频 file input(选择器待真号 fixtures 落定;"
+                        f"引导浮层处理结果 {tooltip})"
+                    ),
+                    "observed": self._audio_probe(),
+                    "screenshot": self._take_screenshot("03_no_audio_file_input"),
+                }
+            upload_input.set_input_files([audio_path])
+            logger.info("✓ set_input_files 已灌入音频,交 step3a 等上传完成")
+
+            cover_applied = self._set_audio_cover(cover_path, upload_input)
+            return {"success": True, "audio_path": audio_path,
+                    "audio_cover": cover_applied, "tooltip": tooltip}
+        except Exception as e:
+            logger.error(f"上传音频失败: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "screenshot": self._take_screenshot("04_audio_upload_exception"),
+            }
+
+    def _set_audio_cover(self, cover_path: Optional[str], audio_input) -> Dict[str, Any]:
+        """给播客设音频封面(可选);**失败只告警不阻断**,回退成不设封面。
+
+        ``audio_input`` 传进来只为一件事:**排除它** —— 弹窗里两个 file input 的区分
+        特征未取证,若按图片 accept 找到的恰好就是刚才那个音频 input,说明区分不出来,
+        此时**宁可不设封面也绝不把封面灌进音频位**(那会把已传好的音频顶掉)。
+        """
+        if not cover_path:
+            return {"status": "skipped", "reason": "no_cover_requested"}
+        cover_input = None
+        for selector in self._AUDIO_COVER_INPUT_SELECTORS:
+            try:
+                candidate = self.page.query_selector(selector)
+            except Exception:  # noqa: BLE001
+                candidate = None
+            if candidate is None:
+                continue
+            try:
+                if audio_input is not None and candidate.evaluate(
+                    "(el, other) => el === other", audio_input
+                ):
+                    continue
+            except Exception:  # noqa: BLE001 — 比不出来就当它可能是同一个,跳过
+                continue
+            cover_input = candidate
+            break
+        if cover_input is None:
+            logger.warning(
+                "[step2a] 弹窗里认不出音频封面的 file input(与音频 input 区分特征未取证),"
+                "本次不设封面 —— 笔记照发"
+            )
+            return {"status": "error", "reason": "audio_cover_input_not_found"}
+        try:
+            cover_input.set_input_files([cover_path])
+        except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
+            logger.warning(f"[step2a] 音频封面灌入失败(不阻断): {exc}")
+            return {"status": "error", "reason": f"audio_cover_set_input_failed: {exc}"}
+        return {"status": "done", "cover_path": cover_path}
+
+    def _audio_probe(self) -> Dict[str, Any]:
+        """读一次播客上传现场的证据(失败时随 error 交出去,别只丢一句"没找到")。"""
+        js = r"""() => {
+            const inputs = Array.from(document.querySelectorAll("input[type='file']"))
+                .map(el => ({cls: el.className || '', accept: el.getAttribute('accept') || ''}));
+            const btn = Array.from(document.querySelectorAll('button'))
+                .filter(b => (b.innerText || '').trim() === '去发布')
+                .map(b => ({cls: b.className || '',
+                            disabled: b.hasAttribute('disabled'),
+                            aria: b.getAttribute('aria-disabled')}));
+            return {
+                file_inputs: inputs,
+                go_publish: btn,
+                page_text: (document.body.innerText || '').slice(0, 1500),
+            };
+        }"""
+        try:
+            got = self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001 — 取证本身绝不制造新异常
+            return {"probe_error": str(exc)}
+        return got if isinstance(got, dict) else {}
+
+    def step3a_wait_for_audio_upload(
+        self, max_wait: Optional[int] = None, audio_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """步骤3a: 等音频上传完成 —— 判据 = 「去发布」按钮从禁用翻转成可点,然后点它。
+
+        ``max_wait`` 缺省**按 audio_path 的文件体积伸缩**(``policy.media_timeout_s``,
+        与视频 step3v 及账号子进程硬超时共用同一公式,配置项也沿用 ``VIDEO_UPLOAD_TIMEOUT_*``
+        —— 公式只看字节数,与"视频"这个字面无关,不为改个名去动 .env + manifest + worker 三处)。
+
+        为什么以「去发布」的禁用态为主判据:实拍确认未传音频时它是禁用的,所以它翻转
+        就是"平台认为音频到位了"的最直接信号。⚠️ 具体的禁用属性形态**未取证**,故
+        ``disabled`` 属性 / ``aria-disabled`` / class 含 disabled 三路都读,**全都不表示
+        禁用**才算可点(取"与"而不是"或":读不懂的形态一律当禁用,宁可等到超时也不点一颗
+        可能禁用的按钮 —— 图文那边 2026-08-02 就栽在点禁用按钮换来一句"发布超时")。
+
+        失败一律带**当场取证**(最后一次读到的 file input / 按钮属性 / 页面文本)。
+        """
+        self.current_step = 3
+        if max_wait is not None:
+            timeout = max_wait
+        else:
+            from app.publish.policy import media_file_size, media_timeout_s
+
+            timeout = media_timeout_s(
+                media_file_size(audio_path),
+                base_s=settings.VIDEO_UPLOAD_TIMEOUT_BASE_S,
+                per_100mb_s=settings.VIDEO_UPLOAD_TIMEOUT_PER_100MB_S,
+                cap_s=settings.VIDEO_UPLOAD_TIMEOUT_CAP_S,
+            )
+        logger.info("=" * 60)
+        logger.info(f"步骤3a: 等音频上传完成(上限 {timeout}s)")
+        logger.info("=" * 60)
+
+        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        last_log = 0.0
+        observed: Dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            observed = self._audio_probe()
+            buttons = observed.get("go_publish") or []
+            ready = next((b for b in buttons if _go_publish_enabled(b)), None)
+            if ready is not None:
+                waited = time.monotonic() - started
+                logger.info(f"✓ 音频上传完成,「去发布」已可点(等待 {waited:.0f}s)")
+                self._take_screenshot("05_audio_ready")
+                target = _find_button_by_text(self.page, self._GO_PUBLISH_TEXTS)
+                if target is None:
+                    return {"success": False,
+                            "error": "「去发布」读到可点但取元素时没了(页面正在重渲染?)",
+                            "observed": observed,
+                            "screenshot": self._take_screenshot("06_go_publish_vanished")}
+                self.human.click(target, reason="去发布")
+                self.human.wait(1.5, 2.5, context="等发布表单渲染")
+                return {"success": True, "wait_time": round(waited, 1),
+                        "edit_page_loaded": True, "observed": observed}
+            elapsed = time.monotonic() - started
+            if elapsed - last_log >= 15:
+                last_log = elapsed
+                logger.info(
+                    f"…音频上传中({elapsed:.0f}/{timeout}s) 「去发布」按钮 {buttons}"
+                )
+                self._take_screenshot(f"05_audio_waiting_{int(elapsed)}s")
+            time.sleep(1.0)
+
+        logger.error(f"❌ 音频上传超时({timeout}s)")
+        return {
+            "success": False,
+            "error": (
+                f"音频上传超时({timeout}s):「去发布」按钮始终未翻转成可点。"
+                f"当场取证 file_inputs={observed.get('file_inputs')} "
+                f"go_publish={observed.get('go_publish')}"
+            ),
+            "observed": observed,
+            "screenshot": self._take_screenshot("06_audio_timeout"),
         }
 
     def ensure_editor_interactable(self, tries: int = 5) -> bool:

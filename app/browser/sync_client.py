@@ -41,6 +41,7 @@ from app.browser.note_components import (
     apply_original_declaration,
     apply_video_cover,
 )
+from app.browser.podcast import select_podcast_collection
 from app.browser.profile_guard import (
     clean_locks,
     delete_cookies_db,
@@ -596,14 +597,26 @@ class SyncClient:
         job_tag: Optional[str] = None,
         video_path: Optional[str] = None,
         cover_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        podcast_collection: Optional[str] = None,
     ) -> Dict[str, Any]:
         """走 step1-6 录入内容 + 三组件(可选)+ step7 真发布。
 
-        ``video_path``:给了就是**视频笔记**,媒体那一段改走 step2v(灌视频)+ step3v
-        (等上传+转码),并跳过图文专属的 step2/3/4;不给则一行不变走图文老路。
-        视频与图片二选一(入口 POST /api/publish-jobs 已把互斥钉死),这里只按有无路由。
-        ``cover_path``:视频笔记的自定义封面图(仅 video_path 存在时有意义);不给就用平台
-        自动截取的第一帧。封面失败**只告警不阻断发布**(语义对齐三组件)。
+        媒体三选一,**判型优先级 audio → video → 图文**(与 REST/scheduler/worker 全链统一):
+
+        - ``audio_path``:**播客笔记**,媒体段走 step2a(切发播客 tab + 灌音频)+ step3a
+          (等上传完成并点「去发布」);``cover_path`` 此时是音频封面(≤32MB),
+          ``podcast_collection`` 是要加入的播客合集**名称**。
+        - ``video_path``:**视频笔记**,媒体段走 step2v(灌视频)+ step3v(等上传+转码);
+          ``cover_path`` 是自定义封面,不给就用平台自动截取的第一帧。
+        - 都不给:一行不变走图文老路(step2/3/4)。
+
+        三者互斥由入口 POST /api/publish-jobs 钉死,这里只按有无路由。封面与播客合集
+        失败均**只告警不阻断发布**(语义对齐三组件)。
+
+        ⚠️ 播客那条分支的取证覆盖度低于图文/视频:tab 已取证,音频上传弹窗内部与
+        「去发布」之后的发布表单未取证 —— 相关步骤写成 fail-loud(见 atomic_tasks
+        step2a/step3a 的注释),且**尚未跑过真号 e2e**。
 
         ``job_tag``:发布任务 id,只用来给失败现场截图打标,让运营能按 job 取回
         (见 ``XHSPublishAtomicTasks._take_screenshot``);不传则行为与上线前一致。
@@ -625,7 +638,12 @@ class SyncClient:
         # 编辑器加载之前就挂上(响应过期了就读不回来了)。不设组件时一个监听都不挂。
         responses = None
         try:
-            media_desc = f"视频 {video_path}" if video_path else f"图片 {len(image_paths or [])} 张"
+            if audio_path:
+                media_desc = f"播客音频 {audio_path}"
+            elif video_path:
+                media_desc = f"视频 {video_path}"
+            else:
+                media_desc = f"图片 {len(image_paths or [])} 张"
             logger.info(f"[SyncClient] 开始发布: {title} | {media_desc} | 话题 {len(topics or [])}")
 
             # step1 打开发布页(可能切新窗口 + SSO)
@@ -641,7 +659,29 @@ class SyncClient:
                 responses = ComponentResponses()
                 responses.attach(self.page)
 
-            if video_path:
+            audio_cover_result = None
+            if audio_path:
+                # ── 播客分支:step2a 切 tab + 灌音频(+封面)→ step3a 等上传完成并点「去发布」──
+                # 与视频分支的差别:发布页默认落地是「上传视频」tab,播客**必须先切 tab**;
+                # 上传是弹窗里做的,且「去发布」是一次显式点击(视频传完直接就在编辑器里)。
+                r = atomic.step2a_upload_audio(audio_path, cover_path)
+                if not r.get("success"):
+                    return {"success": False, "error": r.get("error")}
+                audio_cover_result = r.get("audio_cover")
+                r = atomic.step3a_wait_for_audio_upload(audio_path=audio_path)
+                if not r.get("success"):
+                    return {"success": False, "error": r.get("error")}
+                logger.info(f"✓ 音频已上传并进入发布表单(等待 {r.get('wait_time')}s)")
+                # 与视频同源的保险:发布表单刚渲染时上方区域高度还在变,标题框 rect 会漂,
+                # 而 step5 是按坐标做拟人点击的 —— 坐标落在遮挡物上打出去的字进不了输入框
+                # **且不会报错**。播客表单结构未取证,这道校验是唯一能挡住"打错地方"的闸。
+                if not atomic.ensure_editor_interactable():
+                    return {
+                        "success": False,
+                        "error": "音频已就绪但发布表单不可交互(标题框在视口外/被遮挡/"
+                                 "播客表单结构与图文不同源),为免把正文打到别处,不继续发布",
+                    }
+            elif video_path:
                 # ── 视频分支:step2v 灌视频 → step3v 等上传+转码 ──
                 # 发布页默认落地就是「上传视频」tab,不需要图文那段切 tab;
                 # 视频传完直接就在编辑器里,也没有「继续编辑」那一步,故无 step4v。
@@ -726,14 +766,45 @@ class SyncClient:
                         f"{cover_result.get('reason')} | 取证: {cover_result.get('observed')}"
                     )
 
+            # step6.45 播客合集(仅播客 + 传了名称才跑):按名称在发布表单里选中。
+            # ⚠️ **控件形态完全未取证**(E4:「去发布」之后的表单从未到达),故走
+            # fail-loud 的 select_podcast_collection —— 找不到就带当场取证报 error,
+            # 绝不静默假装选上了。失败**只告警不阻断发布**(笔记照发,只是不进合集)。
+            podcast_collection_result = None
+            if audio_path and podcast_collection:
+                try:
+                    podcast_collection_result = select_podcast_collection(
+                        atomic.page, SyncHumanActions(atomic.page), podcast_collection
+                    )
+                except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
+                    podcast_collection_result = {
+                        "status": "error", "reason": f"podcast_collection_exception: {exc}"}
+                if podcast_collection_result.get("status") == "error":
+                    logger.warning(
+                        f"[SyncClient] 播客合集未选上(不阻断发布,笔记照发但不进合集): "
+                        f"{podcast_collection_result.get('reason')} | "
+                        f"取证: {podcast_collection_result.get('observed')}"
+                    )
+
             # step6.5 三组件(设计 3.1:step6 之后、step7 之前);失败仅告警,不阻断发布
-            component_result = self._apply_components(atomic, responses, components)
+            # 播客任务的 components 恒为空:collection_id 那一列在播客上存的是**合集名称**,
+            # 已由上面的 step6.45 消费,绝不能再喂给按 hex id 找笔记合集的 apply_components。
+            component_result = (
+                {} if audio_path
+                else self._apply_components(atomic, responses, components)
+            )
 
             # step6.6 原创声明:**每次发布无条件打开**(运营裁定 2026-08-05);
             # 失败仅告警不阻断——辅助声明不值得废掉一篇图都传完的笔记。
             component_result = dict(component_result or {})
             if cover_result is not None:
                 component_result["cover"] = cover_result
+            if audio_cover_result is not None:
+                # 播客的封面在 step2a 弹窗里就设了(与视频封面在编辑器里设不同),
+                # 但回显仍归一到 components.cover —— 调用方不该为媒体类型换键名。
+                component_result["cover"] = audio_cover_result
+            if podcast_collection_result is not None:
+                component_result["podcast_collection"] = podcast_collection_result
             try:
                 # **两条路径都走协议弹窗链**(勾同意 → 等「声明原创」解禁 → 点它 → 回读)。
                 # 图文原本走的是"见弹窗就 X 关掉 + 回读 checked",探针(account10 发布页)
@@ -759,7 +830,10 @@ class SyncClient:
             # 何时翻转没有实测结论。点一个禁用按钮永远不可能发布成功,只会换来一句
             # 「发布超时(30秒)」——图文那边 2026-08-02 就栽在这。故这里等结果、
             # 超时带当场属性快照收口,绝不硬着头皮往下点。
-            if video_path:
+            # 播客同样走这道门:表单结构未取证,更不能盲点。门不通就带取证收口 ——
+            # 若真号跑出来 observed 是 ``{"found": false}``,说明播客发布页用的不是
+            # <xhs-publish-btn>,那时把判据换成实测到的形态即可,控制流不必动。
+            if video_path or audio_path:
                 gate = atomic.wait_for_submit_enabled()
                 if not gate.get("ready"):
                     return {
@@ -867,13 +941,16 @@ def publish_once(
     job_tag: Optional[str] = None,
     video_path: Optional[str] = None,
     cover_path: Optional[str] = None,
+    audio_path: Optional[str] = None,
+    podcast_collection: Optional[str] = None,
 ) -> PublishResult:
     """一次性:建 client → start → 录入内容 → 三组件(可选)→ step7 真发布 → stop。
 
     供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。任何阶段失败都落到 ``PublishResult``。
     ``components`` 为 None / 全空时完全跳过组件那一步(默认值,行为不变)。
-    ``video_path`` 给了就发**视频笔记**(此时 ``image_paths`` 应为空列表);
-    ``cover_path`` 是它的自定义封面(可空 = 平台自动封面)。
+    ``video_path`` 给了就发**视频笔记**、``audio_path`` 给了就发**播客笔记**(两种情况下
+    ``image_paths`` 都应为空列表);``cover_path`` 是二者的自定义封面(可空);
+    ``podcast_collection`` 仅播客用,是要加入的合集**名称**。
     """
     client = SyncClient(account_id, cookies)
     try:
@@ -884,6 +961,7 @@ def publish_once(
         result = client.publish_note(
             title, content, image_paths, topics, components,
             job_tag=job_tag, video_path=video_path, cover_path=cover_path,
+            audio_path=audio_path, podcast_collection=podcast_collection,
         )
         return PublishResult(
             success=bool(result.get("success")),
