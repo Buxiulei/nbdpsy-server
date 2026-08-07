@@ -86,8 +86,13 @@ MANIFEST_ENTRIES = [
                  "complete=false 表示没抓到底(轮数封顶),comments 里是已抓到的那些;"
                  "stop_reason 说明为什么停(reached_limit=拿够了 / no_new_after_scroll=到底了 / "
                  "reached_expected_total=已抓够平台标称的评论总数 / round_cap=轮数封顶 / empty=没有评论)。"
-                 "⚠️ comments 为空且 stop_reason=empty 时,请对照 interact.comment(平台标称评论数)"
-                 "交叉验证:标称不为 0 却抓到 0 条,多半是页面结构变了而不是真没人评论。",
+                 "⚠️ 两条读数纪律:① comments 为空且 stop_reason=empty 时,请对照 interact.comment"
+                 "(平台标称评论数)交叉验证——标称不为 0 却抓到 0 条,多半是页面结构变了而不是"
+                 "真没人评论;② **comments 只含一楼 + 默认展开的子回复,条数天然少于 "
+                 "interact.comment**(平台那个数含全部子回复,且本端点不点「展开更多回复」)"
+                 "——样例笔记标称 17,页面上是 10 条一楼 + 若干子回复,这是正常的不是丢数据。"
+                 "like_count 为 0 表示确实没人赞(平台在计数位上写的是「赞」字,已译成 0);"
+                 "遇到「1.2万」这类简写转不了 int 时 like_count 给 null,原串在 like_count_raw 里。",
     },
 ]
 

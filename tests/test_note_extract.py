@@ -137,8 +137,13 @@ def test_select_note_missing_id_raises():
 def test_images_isolated_from_recommendation_feed():
     """隔离判据 = 按 note_id 从 noteDetailMap 取,**不是**全文正则扫 urlDefault。
 
-    污染部分是在**真夹具之上**注入的(真样例这一页恰好没带推荐流),被断言的是隔离
+    污染部分是在**真夹具之上**注入的(SSR 这一页恰好没带推荐流),被断言的是隔离
     机制本身:注入 3 张推荐流图后,全文正则会多捞 3 张,而按 note_id 取仍是原样 6 张。
+
+    污染的规模有真号数据背书:2026-08-07 账号 9 打开这同一篇的详情页,**整页 123 个
+    ``<img>``,只有 9 个命中这 6 个 file_id**(轮播 + 缩略图重复计),其余一百多张全是
+    推荐流。这正是本实现坚持从 ``__INITIAL_STATE__`` 按 note_id 取、**一张图都不从 DOM
+    上捡**的理由 —— 走 DOM 就得在 123 张里挑,挑错了运营拿到的就是别人家的图。
     """
     state = _state()
     polluted = json.loads(json.dumps(state))

@@ -6,15 +6,29 @@
 JS 现算的 ``x-s``/``x-t`` 签名头一律 406(带不带 cookie 都一样)。**唯一**剩下的路是
 在真实浏览器里让页面自己去拉,我们只读它渲染出来的 DOM。
 
-⚠️ **选择器来源:旧仓移植,本仓未真号验证**。``.parent-comment`` / ``.comment-item`` /
-``.author a.name`` / ``.note-text`` / ``.like-wrapper .count`` / ``.comment-item-sub``
-来自旧仓 ``xhs_playwright_client.get_note_comments``。取证第二段(真号开会话核对 DOM)
-因两个水军号被并发任务占满、碰撞闸与频次闸未转空而**没能执行**,故这套选择器目前是
-**先例而非证据**。旧仓的选择器有过前科(``like-active`` 判已赞 100% 误判),所以:
+**选择器来源:旧仓移植 + 2026-08-07 账号 9(米之木木)真号只读复核通过**。
+``.parent-comment``(10 个一楼)/ ``.comment-item``(11 = 10 一楼 + 1 子回复)/
+``.author a.name``(昵称,``data-user-id`` 就挂在这个 a 上)/ ``.note-text`` /
+``.like-wrapper .count`` / ``.comment-item-sub`` / ``.tag``(作者徽标,实测只在作者
+那条上命中)—— 逐个在样例笔记 6a4f50d0…5535 上取到了真值。
 
-- 抓不到评论时的返回是 ``comments: []`` + ``stop_reason``,调用方能一眼看出"没抓到"
-  而不是"这篇没人评论"—— 平台给的 ``interact.comment`` 数是交叉验证的第二只眼;
-- 首次真号跑通后,请把当次 DOM 采成夹具补一个回放用例(见 tests/page_replay.py)。
+复核当场逮到三个"照旧仓抄就会错"的地方,都已修在下面:
+
+1. **0 赞时计数位的文案是「赞」不是「0」**——按"转不成 int 就给 None"处理会把"没人赞"
+   和"我没读到"混成同一个值,故 ``_ZERO_LIKE_LABELS`` 显式把它认成 0;
+2. **评论区矩形是 y≈2099 的文档坐标,视口只有一千出头**——直接 hover 到那个坐标不是
+   真悬停,滚轮落点无从谈起,故 ``_clamp_to_viewport`` 把落点夹进视口;
+3. **平台标称的 ``commentCount`` 含子回复**(实测标称 17,页面上是 10 条一楼 + 子回复),
+   只拿一楼条数去比 ``expected_total`` 这条判据永远够不着,故按 ``_total_with_subs`` 比。
+
+页面级同名选择器有污染(全页 ``.note-text`` 12 个 > 评论 11 条,笔记正文也用它;
+``.tag`` 全页 11 个多来自正文话题),**所有读取都必须 scope 在单条 ``.comment-item``
+之内**,不要在 page 级直接查 —— 本模块的 ``_parse_item`` 就是这么做的。
+
+仍未验证:``.show-more``(展开更多回复)本模块**不点**,故子回复只取默认展开的那些;
+到底判据在这条 17 评论的笔记上没能触发 ``reached_expected_total``(见上第 3 条修法),
+真到底靠 ``no_new_after_scroll``。抓不到评论时返回 ``comments: []`` + ``stop_reason``,
+调用方能一眼看出"没抓到"而不是"这篇没人评论"—— 平台给的 ``interact.comment`` 是第二只眼。
 
 三条纪律与本仓其它只读模块一致:
 
@@ -33,7 +47,7 @@ from loguru import logger
 
 from app.browser.login_detector import is_wall_url
 
-# ---- 选择器(旧仓先例,未经本仓真号验证,改动前请先采夹具)----
+# ---- 选择器(旧仓移植 + 2026-08-07 账号 9 真号复核通过;改动前请先采夹具)----
 PARENT_COMMENT = ".parent-comment"      # 一楼(含其下所有子回复)
 COMMENT_ITEM = ".comment-item"          # 楼内单条(主楼那条)
 COMMENT_AUTHOR = ".author a.name"       # 评论者昵称锚(带 data-user-id)
@@ -92,7 +106,9 @@ def read_note_comments(
         added = _collect_round(page, collected, seen, max_count, note_author_user_id)
         if len(collected) >= max_count:
             return _result(collected[:max_count], True, "reached_limit", rounds)
-        if expected_total is not None and len(collected) >= expected_total:
+        if expected_total is not None and _total_with_subs(collected) >= expected_total:
+            # 平台标称的 commentCount **含子回复**(真号实测:标称 17,页面上是 10 条
+            # 一楼 + 若干子回复)。只拿一楼条数去比,这条判据永远够不着、形同虚设。
             return _result(collected, True, "reached_expected_total", rounds)
 
         idle = 0 if added else idle + 1
@@ -117,6 +133,11 @@ def read_note_comments(
         if is_wall_url(getattr(page, "url", "")):
             logger.warning(f"[note_comments] 滚动中撞验证墙,已抓 {len(collected)} 条后停手")
             return {**_result(collected, False, "wall", rounds), "error": "wall"}
+
+
+def _total_with_subs(collected: List[dict]) -> int:
+    """一楼 + 子回复的总条数(与平台 commentCount 同口径)。"""
+    return sum(1 + len(c.get("sub_comments") or []) for c in collected)
 
 
 def _result(comments: List[dict], complete: bool, stop_reason: str, rounds: int) -> Dict[str, Any]:
@@ -190,7 +211,8 @@ def _is_author(item, author_id: Optional[str], note_author_user_id: Optional[str
     """是否作者本人的回复。
 
     **优先按 user_id 比对**(语义判据,与 DOM 长相无关);拿不到 user_id 时才退到
-    「作者」徽标 —— 徽标选择器 ``.tag`` 是旧仓先例,本仓未验证,不该当第一判据。
+    「作者」徽标。徽标 ``.tag`` 真号实测确实只在作者那条上命中,但全页有 11 个同名元素
+    (正文话题也用它),所以它只能在 ``.comment-item`` 内作用域里当兜底,不该当第一判据。
     """
     if note_author_user_id and author_id:
         return author_id == note_author_user_id
@@ -210,11 +232,28 @@ def _hover_comment_list(page, human) -> bool:
             "[note_comments] 定位不到评论列表,滚轮可能打在不滚动的区域上,翻页多半停在首屏"
         )
         return False
-    human.hover(
-        (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5),
-        reason="移到评论列表滚动区(滚轮落点)",
+    # **必须夹进视口**:真号实测评论区矩形是 y≈2099 的文档坐标,而视口只有一千出头
+    # —— 直接把鼠标"移"到视口外不是真的悬停,滚轮落点也就无从谈起。夹到视口内的同一
+    # 竖直方向上,既保住"落在正文/评论这条滚动轴上"的本意,又保证坐标是真实可达的。
+    x, y = _clamp_to_viewport(
+        page, box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5
     )
+    human.hover((x, y), reason="移到评论列表滚动区(滚轮落点)")
     return True
+
+
+def _clamp_to_viewport(page, x: float, y: float) -> tuple[float, float]:
+    """把坐标夹进当前视口(留 10% 边距);读不到视口尺寸就按常见 1280x800 兜底。"""
+    try:
+        size = page.viewport_size or {}
+    except Exception:  # noqa: BLE001
+        size = {}
+    width = float(size.get("width") or 1280)
+    height = float(size.get("height") or 800)
+    return (
+        min(max(x, width * 0.1), width * 0.9),
+        min(max(y, height * 0.1), height * 0.9),
+    )
 
 
 # ---- 读元素的小工具(全部吞异常降级成 None:一格读不到不该炸整篇)----
@@ -252,9 +291,22 @@ def _attr(element, name: str) -> Optional[str]:
         return None
 
 
+# 0 赞时平台在计数位上显示的字面文案(真号实测:有赞的显示 "1",没赞的显示 "赞")。
+# 把它当"读不到"会让"这条没人赞"和"我没读到"混成同一个 None —— 那正是取证要防的事。
+_ZERO_LIKE_LABELS = ("赞", "点赞", "")
+
+
 def _to_int(value: str) -> Optional[int]:
-    """点赞数转 int;「1.2万」这类简写转不了就给 None(原串在 like_count_raw 里)。"""
+    """点赞数转 int。
+
+    三种真实取值(2026-08-07 账号 9 真号实测):``"1"`` 这类数字、``"赞"``(0 赞时的
+    占位文案)、以及理论上的 ``"1.2万"`` 简写。前两种给确定的 int,简写转不了才给
+    None(原串保留在 ``like_count_raw`` 里,绝不瞎折算)。
+    """
+    text = (value or "").strip()
+    if text in _ZERO_LIKE_LABELS:
+        return 0
     try:
-        return int((value or "").strip())
+        return int(text)
     except (TypeError, ValueError):
         return None

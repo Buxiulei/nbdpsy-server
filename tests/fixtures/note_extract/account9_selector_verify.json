@@ -1,0 +1,70 @@
+{
+  "captured_at": "2026-08-07T11:07:23.305706+00:00",
+  "hover_box": {
+    "x": 702.625,
+    "y": 1963.300048828125,
+    "width": 375,
+    "height": 271.199951171875
+  },
+  "counts": {
+    "PARENT": 10,
+    "ITEM": 11,
+    "AUTHOR": 12,
+    "TEXT": 12,
+    "LIKE": 56,
+    "SUB": 1,
+    "BADGE": 11
+  },
+  "rows": [
+    {
+      "id_attr": "comment-6a4f50de0000000015009113",
+      "author_sel_hit": true,
+      "author_text": "念头河",
+      "author_data_user_id": "5e08bd510000000001006a28",
+      "text_sel_hit": true,
+      "text_val": "念头河新品 森林疗愈觉察日记 上架啦@念头河NOWRIVER",
+      "like_sel_hit": true,
+      "like_val": "1",
+      "badge_hit": true,
+      "sub_count": 1
+    },
+    {
+      "id_attr": "comment-6a731b0c000000002a0268a9",
+      "author_sel_hit": true,
+      "author_text": "🙈旋木",
+      "author_data_user_id": "643cc098000000000e01f635",
+      "text_sel_hit": true,
+      "text_val": "好，停止担心两小时和八公里以外的事",
+      "like_sel_hit": true,
+      "like_val": "赞",
+      "badge_hit": false,
+      "sub_count": 0
+    },
+    {
+      "id_attr": "comment-6a4f5111000000002300182d",
+      "author_sel_hit": true,
+      "author_text": "Treerooom",
+      "author_data_user_id": "55fc276b67bc650a767c97b0",
+      "text_sel_hit": true,
+      "text_val": "包装精美，小册子内容丰富，希望在这本笔记的引导下走向更平静丰盛的自己",
+      "like_sel_hit": true,
+      "like_val": "1",
+      "badge_hit": false,
+      "sub_count": 0
+    },
+    {
+      "id_attr": "comment-6a4f510c000000002203ea86",
+      "author_sel_hit": true,
+      "author_text": "霏鈅yue",
+      "author_data_user_id": "5e9fd3950000000001009d9d",
+      "text_sel_hit": true,
+      "text_val": "很棒，很有设计感的一个本本。日常可以用来写手帐，记日记。情绪低落的时候，是一个特别好的让自己恢复的工具。",
+      "like_sel_hit": true,
+      "like_val": "赞",
+      "badge_hit": false,
+      "sub_count": 0
+    }
+  ],
+  "one_item_html": "<div data-v-02da754c=\"\" id=\"comment-6a4f50de0000000015009113\" class=\"comment-item\"><!----><div data-v-02da754c=\"\" class=\"comment-inner-container\"><div data-v-02da754c=\"\" class=\"avatar\"><a data-v-02da754c=\"\" href=\"/user/profile/5e08bd510000000001006a28?channel_type=web_note_detail_r10&amp;xsec_token=ABuAYdQBnvxxam9g3llhiCahJLLFEbE32jaYwOE6JTk28%3D&amp;xsec_source=pc_comment\" class=\"\" target=\"_blank\" id=\"user-hover-guide\" data-user-id=\"5e08bd510000000001006a28\" data-xsec-token=\"ABuAYdQBnvxxam9g3llhiCahJLLFEbE32jaYwOE6JTk28=\" data-xsec-source=\"pc_comment\"><span data-v-39c21606=\"\" class=\"avatar-item no-avatar\" style=\"width: 40px; height: 40px;\" id=\"user-hover-guide\" data-user-id=\"5e08bd510000000001006a28\" data-xsec-token=\"ABuAYdQBnvxxam9g3llhiCahJLLFEbE32jaYwOE6JTk28=\" data-xsec-source=\"pc_comment\"></span></a></div><div data-v-02da754c=\"\" class=\"right\"><div data-v-02da754c=\"\" class=\"author-wrapper\"><div data-v-02da754c=\"\" class=\"author\"><a data-v-02da754c=\"\" href=\"/user/profile/5e08bd510000000001006a28?channel_type=web_note_detail_r10&amp;parent_page_channel_type=web_user_board&amp;xsec_token=ABuAYdQBnvxxam9g3llhiCahJLLFEbE32jaYwOE6JTk28=&amp;xsec_source=pc_comment\" class=\"name\" target=\"_blank\" data-user-id=\"5e08bd510000000001006a28\" data-xsec-token=\"ABuAYdQBnvxxam9g3llhiCahJLLFEbE32jaYwOE6JTk28=\" data-xsec-source=\"pc_comment\" selected-disabled-search=\"\">念头河</a><!----><span data-v-02da754c=\"\" class=\"tag\" selected-disabled-search=\"\">作者</span></div><div data-v-02da754c=\"\" class=\"comment-menu\"><div data-v-87beb1be=\"\" data-v-02da754c=\"\" class=\"delete-dropdown\"><svg data-v-55b36ac6=\"\" data-v-02da754c=\"\" class=\"reds-icon more\" width=\"16\" height=\"16\"><use data-v-55b36ac6=\"\" xlink:href=\"#more\"></use></svg></div></div></div><div data-v-02da754c=\"\" class=\"content\"><!----><span data-v-2de80b2e=\"\" data-v-02da754c=\"\" class=\"note-text\"><img data-v-2de80b2e=\"\" class=\"note-content-emoji\" crossorigin=\"anonymous\" src=\"https://picasso-static.xiaohongshu.com/fe-platform/81cedd016ad9d8bef38b2cd0c1e725454df53598.png\"><span data-v-2de80b2e=\"\">念头河新品                                                                              森林疗愈觉察日记                                                                                                                                                                                             上架啦</span><a data-v-2de80b2e=\"\" class=\"note-content-user\" href=\"/user/profile/65d1b4e2000000000401d5d2?xsec_token=ABgabIcVJYXISzuw3FfO725IfHdksqPzoIOgqcYGkOymQ%3D&amp;xsec_source=pc_note\" data-user-id=\"65d1b4e2000000000401d5d2\" data-xsec-token=\"ABgabIcVJYXISzuw3FfO725IfHdksqPzoIOgqcYGkOymQ=\" data-xsec-source=\"pc_note\" target=\"_blank\">@念头河NOWRIVER</a><!----></span></div><!----><!----><div data-v-02da754c=\"\" class=\"labels\"><span data-v-02da754c=\"\" class=\"top\" selected-disabled-search=\"\">置顶评论</span></div><div data-v-02da754c=\"\" class=\"info\"><div data-v-02da754c=\"\" class=\"date\"><span data-v-02da754c=\"\" selected-disabled-search=\"\">07-09</span><span data-v-02da754c=",
+  "_说明": "2026-08-07 账号 9(米之木木)真号只读复核:用 app/browser/note_comments_read.py 的那套选择器去样例笔记 6a4f50d0000000001c025535 的详情页上逐个取值,记录命中与真值。这是评论区选择器唯一的效力背书,别改它;要改只能重新采集(见 tests/page_replay.py)。"
+}

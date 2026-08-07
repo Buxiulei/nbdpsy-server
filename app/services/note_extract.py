@@ -174,6 +174,10 @@ def select_note(state: dict, note_id: str) -> dict:
     ``"urlDefault":\\s*"(http[^"]+)"`` 会把它们的图一起捞走。按 key 取则天然只拿目标篇。
 
     取不到时**报错,绝不退而取 map 里的第一篇** —— 那正好是取到推荐流的那条老路。
+
+    污染规模有真号数据:2026-08-07 账号 9 开这篇详情页,整页 123 个 ``<img>``,只有 9 个
+    命中本篇的 6 个 file_id(轮播 + 缩略图重复),其余一百多张全是推荐流。所以本实现
+    **一张图都不从 DOM 上捡**。
     """
     detail_map = ((state or {}).get("note") or {}).get("noteDetailMap") or {}
     entry = detail_map.get(note_id)

@@ -1,12 +1,11 @@
 """评论区只读抓取:分页 / 上限 / 到底判据 / 撞墙 / 作者回复标记。
 
-⚠️ **选择器来源与效力**:本模块的选择器(``.parent-comment`` / ``.comment-item`` /
-``.author a.name`` / ``.note-text`` / ``.like-wrapper .count`` / ``.comment-item-sub``)
-移植自旧仓 ``xhs_playwright_client.get_note_comments``,**本仓尚未真号验证**
-(取证第二段因两个水军号被并发占用、碰撞闸/频次闸未转空而未能执行)。
+**选择器已在 2026-08-07 用账号 9(米之木木)真号只读复核过**(见被测模块 docstring):
+``.parent-comment`` 10 个、``.comment-item`` 11 个、昵称/正文/点赞/子回复/作者徽标逐个取到真值。
 
-所以这里测的是**翻页与到底判定的逻辑**,不是"选择器对不对"——假页面按代码的假设造,
-证不了选择器。选择器的效力要等一次真号会话补证,见交付报告的未验证点清单。
+假页面测的仍然只是**翻页与到底判定的逻辑**(假页面按代码的假设造,证不了选择器);
+选择器的效力由那次真号复核背书。下面三个用例(``赞``=0 赞、hover 落点夹进视口、
+标称总数含子回复)直接来自那次复核逮到的三个真缺陷,是回归锁。
 """
 
 import pytest
@@ -34,7 +33,8 @@ class _FakeElement:
         return (self._data.get("attrs") or {}).get(name)
 
     def bounding_box(self):
-        return {"x": 100.0, "y": 400.0, "width": 600.0, "height": 80.0}
+        # 真号实测:评论区矩形是 y≈2099 的**文档**坐标,远在 800 高的视口之外
+        return {"x": 100.0, "y": 2099.0, "width": 600.0, "height": 80.0}
 
 
 class _PagingPage:
@@ -68,6 +68,10 @@ class _PagingPage:
     def inner_text(self, _sel: str = "body") -> str:
         return "评论区"
 
+    @property
+    def viewport_size(self):
+        return {"width": 1280, "height": 800}
+
 
 class _FakeHuman:
     """记录拟人动作次数的假 SyncHumanActions;滚动时驱动假页面加载下一页。"""
@@ -75,11 +79,13 @@ class _FakeHuman:
     def __init__(self, page):
         self.page = page
         self.hovers = 0
+        self.hover_points: list = []
         self.scrolls = 0
         self.waits = 0
 
     def hover(self, target, *, reason: str = ""):
         self.hovers += 1
+        self.hover_points.append(target)
 
     def scroll(self, direction: str = "down", distance: int = None):
         self.scrolls += 1
@@ -304,4 +310,51 @@ def test_max_count_zero_reads_nothing():
     page = _PagingPage(_pages(20))
     result, human = _run(page, max_count=0)
     assert result["comments"] == []
+    assert human.scrolls == 0
+
+
+# ---------------- 真号复核逮到的三个缺陷(回归锁) ----------------
+
+
+def test_zero_like_label_is_zero_not_unknown():
+    """0 赞时平台在计数位上写的是「赞」——按"转不成 int"处理会把它和"没读到"混成同一个 None。
+
+    2026-08-07 账号 9 真号实测:有赞的那条读到 "1",没赞的读到 "赞"。
+    """
+    page = _PagingPage([[
+        _comment("a", "有人赞", likes="1"),
+        _comment("b", "没人赞", likes="赞"),
+    ]])
+    result, _ = _run(page, max_count=5)
+    likes = {c["comment_id"]: c["like_count"] for c in result["comments"]}
+    assert likes == {"a": 1, "b": 0}
+    # 原串仍保留,便于事后核对平台文案有没有变
+    assert result["comments"][1]["like_count_raw"] == "赞"
+
+
+def test_hover_point_clamped_into_viewport():
+    """评论区在 y≈2099 的文档坐标上,而视口只有 800 高——落点必须夹进视口才是真悬停。"""
+    page = _PagingPage(_pages(20))
+    _, human = _run(page, max_count=20)
+    assert human.hover_points, "该 hover 却没 hover"
+    x, y = human.hover_points[0]
+    assert 0 < x < 1280 and 0 < y < 800, f"落点 {(x, y)} 掉在视口外了"
+
+
+def test_expected_total_counts_sub_comments():
+    """平台标称的 commentCount **含子回复**(实测标称 17 = 10 条一楼 + 子回复)。
+
+    只拿一楼条数去比,这条判据永远够不着;算上子回复才对得上口径。
+    """
+    subs = [{
+        "attrs": {"id": "comment-s1"},
+        "children": {ncr.COMMENT_TEXT: [{"text": "子回复"}]},
+    }]
+    page = _PagingPage([[
+        _comment("a", "一楼一", subs=subs),
+        _comment("b", "一楼二", subs=subs),
+    ]])
+    result, human = _run(page, max_count=50, expected_total=4)
+    # 2 条一楼 + 2 条子回复 = 4,已达标称总数 → 判到底,不再白滚
+    assert result["stop_reason"] == "reached_expected_total"
     assert human.scrolls == 0
