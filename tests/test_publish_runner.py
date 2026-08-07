@@ -72,9 +72,12 @@ async def test_runner_materializes_images_and_cleans_workdir(
     _patch_dewatermark(monkeypatch)
 
     def fake_publish_once(
-        acc_id, cookies, title, content, image_paths, topics, components=None
+        acc_id, cookies, title, content, image_paths, topics, components=None,
+        video_path=None,
     ):
+        # video_path:图文任务恒为 None(视频分支的路由另有用例覆盖)
         captured["image_paths"] = image_paths
+        captured["video_path"] = video_path
         # 发布时 workdir 及物料文件仍在
         captured["exists_during"] = captured["workdir"].exists()
         from app.browser.sync_client import PublishResult

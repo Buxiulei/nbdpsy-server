@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # 顺延时间在窗口起点 + random.uniform(0, JITTER) 内落点,避免整点节律。
     PUBLISH_ACTIVE_WINDOW_START_UTC_HOUR: int = 1
     PUBLISH_ACTIVE_WINDOW_JITTER_SEC: int = 7200
+    # 视频笔记:上传 + 平台转码的等待上限(秒)。真实业务视频几十~几百 MB,转码耗时
+    # 由平台侧决定、我们观测不到上界,故给足余量并留成可配置项 —— 超时宁可报错带取证,
+    # 也不能因为等不够就把一条已上传大半的视频判失败(重试要从头再传一遍)。
+    PUBLISH_VIDEO_UPLOAD_TIMEOUT: int = 600
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0
 

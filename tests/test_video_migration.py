@@ -64,6 +64,18 @@ def test_video_clips_reference_columns_come_from_migrations(monkeypatch, tmp_pat
             "transitions_json"} <= _column_names(db_file, "video_clips")
 
 
+def test_publish_jobs_video_path_comes_from_migrations(monkeypatch, tmp_path):
+    """视频笔记发布的 publish_jobs.video_path 同样出自迁移链,不是靠 create_all 建出来的。
+
+    与上一条同源(「合并了但漏跑 alembic upgrade」→ 缺列 + 静默 500);复用同一套纯迁移
+    链夹具,不再另起一份 alembic 脚手架。
+    """
+    db_file = str(tmp_path / "publish_cols.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    command.upgrade(Config(str(_REPO_ROOT / "alembic.ini")), "head")
+    assert "video_path" in _column_names(db_file, "publish_jobs")
+
+
 def test_migration_up_creates_and_down_drops(monkeypatch, tmp_path):
     db_file = str(tmp_path / "mig.db")
     monkeypatch.setattr(

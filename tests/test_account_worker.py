@@ -125,7 +125,7 @@ def _patch_publish_once(monkeypatch, result_or_exc, calls=None):
 
     def fake_publish_once(
         account_id, cookies, title, content, image_paths, topics, components=None,
-        job_tag=None,
+        job_tag=None, video_path=None,
     ):
         # job_tag 是发布任务 id,只用于给失败现场截图打标(见 publish_artifacts_rest);
         # 记进 calls 让"确实按 job 打了标"这条能被断言,而不是悄悄没传。

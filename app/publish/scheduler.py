@@ -19,6 +19,7 @@ import json
 import random
 import shutil
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -104,6 +105,7 @@ def make_publish_runner(
                     title = job.title
                     content = job.content
                     raw_images = json.loads(job.images_json or "[]")
+                    video_path = job.video_path or None
                     topics = json.loads(job.topics_json or "[]")
                     # 三组件(全 None = 不设置,跳过组件那一步)
                     components = {
@@ -116,24 +118,32 @@ def make_publish_runner(
                 # 2b. 图片物料化:images_json 存的是 URL/base64(远程 agent 供图),而 publish_once
                 #     的 set_input_files 只认本地文件路径 —— 先落成本地文件再传。下载/解码是阻塞
                 #     I/O,下沉到线程避免卡事件循环;物料化失败照样落到下面兜底 finish(fail)。
-                paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
-                # 2b'. fail-closed 去水印闸(与 account_worker._execute_publish 同源):发布任务
-                #      存的是图片字节快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛
-                #      异常,落到下面兜底 finish(fail) 排重试,绝不用原图发。
-                image_paths = await dewatermark_all([str(p) for p in paths])
+                # 视频任务整条图片管线都跳过:视频是服务器侧现成文件,既不用物料化,
+                # 也不用去水印(那是给生图管线用的)。
+                if video_path:
+                    image_paths = []
+                else:
+                    paths = await asyncio.to_thread(materialize_images, raw_images, workdir)
+                    # 2b'. fail-closed 去水印闸(与 account_worker._execute_publish 同源):发布任务
+                    #      存的是图片字节快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛
+                    #      异常,落到下面兜底 finish(fail) 排重试,绝不用原图发。
+                    image_paths = await dewatermark_all([str(p) for p in paths])
 
                 # 2c. 全局浏览器并发闸 + 线程内跑 sync 发布(per-account 串行已由外层锁保证)。
                 #     browser_slot 封顶总 camoufox 数,超出排队;publish 不 block_images(保真)。
                 async with browser_slot():
                     result = await asyncio.to_thread(
-                        sync_client.publish_once,
-                        account_id,
-                        cookies,
-                        title,
-                        content,
-                        image_paths,
-                        topics,
-                        components,
+                        partial(
+                            sync_client.publish_once,
+                            account_id,
+                            cookies,
+                            title,
+                            content,
+                            image_paths,
+                            topics,
+                            components,
+                            video_path=video_path,
+                        )
                     )
 
                 # 2d. 落状态机(成功→published;失败→重试排期或 failed)

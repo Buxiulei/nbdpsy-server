@@ -258,19 +258,27 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
     """物料化图片 + 去水印闸 + 调既有拟人层真发布(``sync_client.publish_once``,一行不改)。
 
     临时物料目录发布结束(无论成败)清理。返回 ``PublishResult``。
+
+    视频任务(``video_path`` 非空)**整条图片管线都跳过**:视频是服务器侧现成文件,
+    既不需要下载/解码物料化,也不需要去水印(那是给生图管线用的)。
     """
     cookies = _load_account_cookies(db_path, account_id)
     raw_images = json.loads(job["images_json"] or "[]")
     topics = json.loads(job["topics_json"] or "[]")
+    # 老库没跑迁移时 SELECT * 出来没有这一列 → .get 兜底成 None,与"图文任务"同义。
+    video_path = job.get("video_path") or None
     workdir = Path(settings.UPLOAD_DIR) / f"job_{job['id']}"
     try:
-        image_paths = [str(p) for p in materialize_images(raw_images, workdir)]
-        # fail-closed 去水印闸:生图侧的去水印只在生图那一刻跑,而发布任务存的是图片字节
-        # 快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛异常整任务失败(交外层
-        # decide_finish 落 error 排重试),绝不用原图发。
-        # 同进程此刻绝无运行中的事件循环:publish 批全程 sync,browser job 的 asyncio.run
-        # 严格排在所有 publish job 之后(见 main()),故 asyncio.run 安全。
-        image_paths = asyncio.run(dewatermark_all(image_paths))
+        if video_path:
+            image_paths = []
+        else:
+            image_paths = [str(p) for p in materialize_images(raw_images, workdir)]
+            # fail-closed 去水印闸:生图侧的去水印只在生图那一刻跑,而发布任务存的是图片字节
+            # 快照,判断不了"这张是否已清洗"→ 统一重做,任一张失败即抛异常整任务失败(交外层
+            # decide_finish 落 error 排重试),绝不用原图发。
+            # 同进程此刻绝无运行中的事件循环:publish 批全程 sync,browser job 的 asyncio.run
+            # 严格排在所有 publish job 之后(见 main()),故 asyncio.run 安全。
+            image_paths = asyncio.run(dewatermark_all(image_paths))
         # 三组件(值全空 = 不设置,发布链路跳过组件那一步)。job 是 SELECT * 出来的整行,
         # 没跑迁移的库里没有这三列 → .get 兜底成 None,与"不设置"同义。
         components = {
@@ -282,6 +290,7 @@ def _execute_publish(db_path: str, account_id: int, job: dict):
             components,
             # 截图打上 job 标记,失败现场才能按 job 取回(GET /api/publish-jobs/{id}/artifacts)
             job_tag=str(job["id"]),
+            video_path=video_path,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

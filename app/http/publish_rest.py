@@ -6,14 +6,19 @@
 
 images/topics 序列化成 images_json/topics_json 落库;images 每项为 URL/base64(远程 agent
 供图),到发布 runner 里再由 materialize_images 落成本地文件,本端点不碰浏览器。
+
+视频笔记走 ``video`` 字段(与 images 互斥,二选一),存的是**服务器侧文件路径**直接落
+``video_path`` 列 —— 视频动辄几百 MB,既不走请求体也不需要物料化,发布 runner 直接拿路径
+set_input_files。路径的存在性与扩展名在入参校验层就查掉(422),不造注定失败的 pending 任务。
 """
 
 import json
 import random
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select, update
 
 from app.auth.context import current_operator
@@ -22,6 +27,7 @@ from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
+from app.publish.policy import XHS_VIDEO_EXTENSIONS, video_ext_allowed
 from app.publish.runtime import get_active_scheduler
 from app.services import counselor_quote
 from app.services.quota import assert_operator_quota
@@ -179,14 +185,20 @@ router = APIRouter()
 MANIFEST_ENTRIES = [
     {
         "method": "POST", "path": "/api/publish-jobs",
-        "summary": "发布一条小红书图文笔记(异步入队,需对该账号有 access)",
+        "summary": "发布一条小红书笔记:图文(images)或视频(video),二选一(异步入队,需对该账号有 access)",
         "admin_only": False,
         "params": {
             "account_id": "body,int",
             "title": "body,str(显示长度截断 ≤20,静默不报错)",
             "content": "body,str(截断 ≤900,静默不报错)",
-            "images": "body,list(1-18 项,越界立即 400);每项三形态之一:"
-                       "http(s) URL 字符串 / data URI 字符串 / {b64, ext} 对象",
+            "images": "body,list|None(图文笔记走这个;1-18 项,越界立即 400);每项三形态之一:"
+                       "http(s) URL 字符串 / data URI 字符串 / {b64, ext} 对象;"
+                       "**与 video 互斥,二选一必填**(同时给或都不给都 422)",
+            "video": "body,str|None(视频笔记走这个;**服务器侧文件路径**,不是 URL 也不是 "
+                      "base64 —— 视频动辄几百 MB,先把文件落到本服务器再把路径传进来)。"
+                      "支持 .mp4/.mov/.flv/.f4v/.mkv/.rm/.rmvb/.m4v/.mpg/.mpeg/.ts;"
+                      "扩展名不在此列 → 422,路径不存在/不可读 → 422;"
+                      "**与 images 互斥,二选一必填**(同时给或都不给都 422)",
             "topics": "body,list[str]|None(默认[];去重后截断 ≤10,静默不报错)",
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
@@ -200,10 +212,18 @@ MANIFEST_ENTRIES = [
                              "个人记录/其他,词表会扩,传别的词也收)",
         },
         "returns": "{job_id, status:'pending'}",
-        "errors": "400=images 为空或超 18 张;403=无该账号 access",
+        "errors": "400=显式给了 images 但为空数组或超 18 张;"
+                  "422=images 与 video 同时给 / 都不给 / video 格式不支持 / video 文件不存在;"
+                  "403=无该账号 access",
         "notes": "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
                  "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。"
+                 "**视频笔记(传 video)**:除了媒体那一步,其余(标题/正文/话题/三组件/原创声明/"
+                 "定时发布/重试退避/账号串行)与图文完全同一套,不需要换端点也不需要换参数。"
+                 "视频要等平台上传+转码完成才能继续录入,故 publishing 阶段比图文长(取决于文件"
+                 "大小,等待上限由服务端 PUBLISH_VIDEO_UPLOAD_TIMEOUT 控制,默认 10 分钟);"
+                 "封面用平台自动截取的第一帧(本接口不支持自定义封面);"
+                 "视频页独有的「添加章节 / 加入合集 / 关联直播预告」一概不设置。"
                  "三组件(collection_id / quoted_note_id / activity_id)在发布链路里于话题之后、"
                  "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇)。"
                  "组件逐项结果**发出去之后能查**:成功后 GET /api/publish-jobs/{job_id} 的 "
@@ -296,7 +316,9 @@ MANIFEST_ENTRIES = [
         "errors": "400=images 越界;403=无该账号 access;404=job 不存在",
         "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
                  "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。空请求体 {} 为 no-op "
-                 "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。",
+                 "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。"
+                 "**改不了媒体类型**:本端点没有 video 参数,视频任务只能改标题/正文/话题/时间;"
+                 "给视频任务传 images 会把它改成图文任务,别这么干——要换媒体请取消后另建。",
     },
 ]
 
@@ -305,7 +327,13 @@ class PublishNoteRequest(BaseModel):
     account_id: int
     title: str
     content: str
-    images: list
+    # 图文笔记的图片(URL / data URI / {b64, ext});与 video 互斥,二选一必填。
+    # 上线视频发布前它是必填字段,现在改成可省略 —— 省略 = 选了视频那条路,
+    # 由 _check_media_exclusive 把"两个都没给"挡在 422。
+    images: list | None = None
+    # 视频笔记的**服务器侧**文件路径(不是 URL、不是 base64:视频动辄几百 MB,
+    # 走请求体传输不现实,由调用方先落到服务器再把路径给我们)。与 images 互斥。
+    video: str | None = None
     topics: list[str] = []
     schedule_time: str | None = None
     # 笔记三组件(全可选,字段名与 POST /api/accounts/{id}/note-components 一致):
@@ -320,10 +348,42 @@ class PublishNoteRequest(BaseModel):
     # T0 发布当场带进台账并记 purpose_source='declared';不传则留空,事后由回填链路推断。
     note_purpose: str | None = None
 
+    @model_validator(mode="after")
+    def _check_media_exclusive(self) -> "PublishNoteRequest":
+        """images 与 video 二选一 + 视频路径可用性校验(违反一律 422)。
+
+        为什么放在 pydantic 校验层而不是端点体内:这四条全是**纯入参形状**问题,
+        一条也不需要 DB/账号上下文,放这里让 FastAPI 统一给 422 与字段定位。
+        (端点体内的 ``ValueError`` 走 400,那是既有图片张数校验的位置,不动它。)
+
+        「显式 ``images: []`` 且没给 video」故意**不**在这里拦:那是调用方明确选了图文
+        这条路只是没给图,继续落到端点体内既有的 400「至少 1 张图片」,上线前的契约不变。
+        真正的"两个都没给"是 images 省略/为 null 且 video 为空 —— 那才是 422。
+        """
+        video = (self.video or "").strip()
+        if video and self.images is not None:
+            raise ValueError(
+                "images 与 video 二选一:图文笔记传 images,视频笔记传 video,不能同时给"
+            )
+        if not video and self.images is None:
+            raise ValueError(
+                "images 与 video 二选一必填:图文笔记传 images(1-18 张),"
+                "视频笔记传 video(服务器侧文件路径)"
+            )
+        if video:
+            if not video_ext_allowed(video):
+                raise ValueError(
+                    f"video 格式不支持:{video};小红书只接受 "
+                    f"{'/'.join(XHS_VIDEO_EXTENSIONS)}"
+                )
+            if not Path(video).is_file():
+                raise ValueError(f"video 文件不存在(需为本服务器可读的绝对路径):{video}")
+        return self
+
 
 @router.post("/api/publish-jobs", status_code=202)
 async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
-    """发布图文笔记(异步入队):函数体与 app/tools/publish.py::publish_note 逐行对齐。"""
+    """发布笔记(异步入队):图文走 images,视频走 video(二选一,已由入参校验钉死)。"""
     operator = current_operator()
     # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建 job。
     await assert_operator_quota(operator)
@@ -331,10 +391,13 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
     async with get_session() as session:
         await assert_account_access(operator, payload.account_id, session)
         # D1:建 job 前先校验图片张数,避免造出注定失败的 pending 任务。
-        if not payload.images:
-            raise ValueError("图文笔记至少需要 1 张图片")
-        if len(payload.images) > _MAX_IMAGES:
-            raise ValueError(f"最多 {_MAX_IMAGES} 张图片")
+        # 视频笔记(video 已通过入参校验)不走图片这条路,张数校验整段跳过。
+        video_path = (payload.video or "").strip() or None
+        if video_path is None:
+            if not payload.images:
+                raise ValueError("图文笔记至少需要 1 张图片")
+            if len(payload.images) > _MAX_IMAGES:
+                raise ValueError(f"最多 {_MAX_IMAGES} 张图片")
         # F2:每账号每自然日发布上限。统计该账号当日(UTC)status in
         # (pending/publishing/published) 的 job 数;达上限且本任务本会当日发出(立即或定时在今日
         # 之内)则不立即发,顺延到次日活跃窗口起点(带抖动),仍落库 pending,不丢 job。
@@ -363,7 +426,8 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
             account_id=payload.account_id,
             title=payload.title,
             content=payload.content,
-            images_json=json.dumps(payload.images, ensure_ascii=False),
+            images_json=json.dumps(payload.images or [], ensure_ascii=False),
+            video_path=video_path,
             topics_json=json.dumps(payload.topics or [], ensure_ascii=False),
             schedule_time=scheduled_at,
             status="pending",

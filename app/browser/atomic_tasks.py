@@ -93,6 +93,49 @@ def dedupe_topics(tags: Optional[List[str]]) -> List[str]:
     return dedup[:XHS_MAX_TOPICS]
 
 
+# ── 视频笔记:上传/转码判据的文本标志 ──
+# 进度类(在 = 这一刻绝对没传完)。**只放真号夹具里逐字见过的两个**:cover 区上传中显示
+# 「视频文件.mp4 上传中 N% 当前速度 …」。故意不猜「转码中/处理中」之类没见过的文案 ——
+# 猜错方向是致命的:页面上若有个无关的常驻「处理中」,每一条视频都会被判成永远没传完、
+# 干等到超时。而漏掉一个真实进度文案代价很小:它落到 unknown,unknown 本来就不放行。
+VIDEO_PROGRESS_MARKERS = ("上传中", "当前速度")
+# 完成类:夹具实测 cover-container 从「视频文件.mp4 上传中 N% 当前速度」变成
+# 「真实文件名 + 检测为高清视频…」,同时页面出现「重新上传」入口。
+VIDEO_DONE_MARKERS = ("检测为高清视频", "重新上传")
+
+
+def classify_video_upload_state(
+    cover_text: str,
+    page_text: str,
+    original_switch_enabled: Optional[bool] = None,
+) -> str:
+    """判定视频上传/转码处于哪一态:``uploading`` / ``ready`` / ``unknown``(纯函数)。
+
+    **绝不能用图文那套 ``_check_edit_page_loaded``(标题框存在即就绪)**:真号采集实证,
+    视频页的标题 input 在上传进度还是 0% 时就已经挂进 DOM(存在但不可交互),照搬即
+    100% 假阳性 —— step5 会往一个还没转码完的编辑器里打字,失败还查不出原因。
+
+    判据优先级(顺序即语义):
+    1. 进度文案在 → ``uploading``。这是**最强否定信号**,压过一切完成文案:页面正在
+       切换时两种文案会短暂同时存在,宁可多等一轮也不能在半态上放行。
+    2. 完成文案在 → ``ready``。
+    3. 「原创声明」开关已从禁用变为可点 **且 cover 区已有内容** → ``ready``。辅助判据:
+       夹具实测上传未完成时该开关是 ``pointer-events:none``,平台改文案的概率远高于改这个
+       交互约束,留它兜底避免文案一变整条链路就干等到超时。**必须叠加 cover 区非空**:
+       光凭开关可点没法区分"传完了"和"压根还没开始传"(空白发布页上开关若恰好可点,
+       就会在视频还没进去时判就绪),cover 区有内容 = 页面上确实挂着一个视频。
+    4. 其余 → ``unknown``。**读不到 ≠ 好了**,不放行。
+    """
+    blob = f"{cover_text or ''}\n{page_text or ''}"
+    if any(m in blob for m in VIDEO_PROGRESS_MARKERS):
+        return "uploading"
+    if any(m in blob for m in VIDEO_DONE_MARKERS):
+        return "ready"
+    if original_switch_enabled and (cover_text or "").strip():
+        return "ready"
+    return "unknown"
+
+
 def _prune_old_screenshots(root: str, keep_days: int) -> int:
     """删掉超期的调试截图,返回删了几个;**绝不抛异常**。
 
@@ -1092,6 +1135,243 @@ class XHSPublishAtomicTasks:
             except Exception:
                 continue
         return None
+
+    # ============ 视频笔记分支(step2v/step3v,替代图文的 step2/3/4) ============
+    #
+    # 与图文分支的差别只有"媒体怎么进去"这一段:
+    # - 免切 tab —— 创作中心发布页默认落地就是「上传视频」(真号采集实证),
+    #   图文那个坐标点 tab 的整段在这里一行都不需要;
+    # - 上传完成要等平台**转码**,判据完全不同(见 classify_video_upload_state);
+    # - 没有「继续编辑」那一步(视频传完直接就在编辑器里),故无 step4v。
+    # 往后的 step5/6/组件/原创声明/step7 与图文共用同一套。
+
+    # 视频上传 input:平台 accept 给的是**扩展名列表**(.mp4,.mov,...),
+    # 所以 `input[type='file'][accept*='video']` 一个都匹配不到 —— 只能按 class 收口,
+    # 再退回裸 file input(默认落地页实测只有这一个)。
+    _VIDEO_FILE_INPUT_SELECTORS = [
+        "input[type='file'].upload-input",
+        "input[type='file'][accept*='.mp4']",
+        "input[type='file']",
+    ]
+
+    def step2v_upload_video(self, video_path: str) -> Dict[str, Any]:
+        """步骤2v: 上传视频文件(``set_input_files`` 直传,**不点上传按钮**)。
+
+        不点按钮与图文同源(见 step2_upload_images):真桌面上点「上传视频」会弹原生
+        GTK 文件框,Playwright 拦不住、模态卡死整条流程。这里也不切 tab —— 发布页默认
+        就是「上传视频」。
+
+        只负责把文件灌进去;传没传完、转码好没好一律交 step3v 判(这里立刻回读会永远
+        读到"上传中",判据放在一处才不会两处漂移)。
+        """
+        self.current_step = 2
+        logger.info("=" * 60)
+        logger.info(f"步骤2v: 上传视频 {video_path}")
+        logger.info("=" * 60)
+
+        try:
+            self._take_screenshot("03_before_video_upload")
+            upload_input = self._find_element_with_retry(
+                self._VIDEO_FILE_INPUT_SELECTORS,
+                timeout=15, must_be_visible=False,
+                intent_key="upload_video_input", intent_desc="隐藏的视频文件 input",
+            )
+            if not upload_input:
+                return {
+                    "success": False,
+                    "error": "未找到视频上传 input 元素",
+                    "screenshot": self._take_screenshot("03_no_video_file_input"),
+                }
+            upload_input.set_input_files([video_path])
+            logger.info("✓ set_input_files 已灌入视频,交 step3v 等上传+转码")
+            return {"success": True, "video_path": video_path}
+        except Exception as e:
+            logger.error(f"上传视频失败: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "screenshot": self._take_screenshot("04_video_upload_exception"),
+            }
+
+    # 视频页三路判据的一次性读取:cover 区文本 / 页面文本 /「原创声明」开关是否已可点。
+    # 开关那一路读 pointer-events 而不是 class:夹具实测禁用态是 pointer-events:none,
+    # 而这套组件库的 class 并不随状态翻转(见 note_components.apply_original_declaration)。
+    _VIDEO_PROBE_JS = r"""() => {
+        const cover = document.querySelector('.cover-container');
+        const sw = document.querySelector('.original-wrapper .d-switch');
+        let enabled = null;
+        if (sw) {
+            const cs = window.getComputedStyle(sw);
+            enabled = cs.pointerEvents !== 'none' && cs.display !== 'none';
+        }
+        return {
+            cover_text: cover ? (cover.innerText || '').trim() : '',
+            page_text: (document.body.innerText || '').slice(0, 4000),
+            original_switch_enabled: enabled,
+        };
+    }"""
+
+    def _video_upload_probe(self) -> Dict[str, Any]:
+        """读一次视频上传判据的三路信号;读不到就给空值(空 ≠ 就绪,交判据函数裁决)。"""
+        try:
+            probe = self.page.evaluate(self._VIDEO_PROBE_JS)
+        except Exception as exc:  # noqa: BLE001 — 读判据失败只当"这轮没读到"
+            logger.info(f"[step3v] 读取判据异常(当作未就绪): {exc}")
+            probe = None
+        if not isinstance(probe, dict):
+            return {"cover_text": "", "page_text": "", "original_switch_enabled": None}
+        return probe
+
+    # 连续多少轮判定 ready 才收口。视频页在"传完 → 转码 → 渲染完成态"之间会闪半态,
+    # 单轮命中就放行会让 step5 打进一个还没稳的编辑器。
+    _VIDEO_READY_CONFIRM_POLLS = 2
+
+    def step3v_wait_for_video_processing(
+        self, max_wait: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """步骤3v: 等视频上传 + 平台转码完成(判据见 ``classify_video_upload_state``)。
+
+        ``max_wait`` 缺省取 ``settings.PUBLISH_VIDEO_UPLOAD_TIMEOUT``(默认 600s):真实
+        业务视频几十~几百 MB,转码耗时由平台侧决定、我们观测不到上界,给足余量。
+
+        失败一律带**当场取证**(最后一次读到的三路判据原文)。这条路径的失败若只丢一句
+        「超时」,运营除了换变量试错什么也做不了 —— 图文那边为此吃过整整一轮排查。
+        """
+        self.current_step = 3
+        timeout = max_wait if max_wait is not None else settings.PUBLISH_VIDEO_UPLOAD_TIMEOUT
+        logger.info("=" * 60)
+        logger.info(f"步骤3v: 等待视频上传+转码(上限 {timeout}s)")
+        logger.info("=" * 60)
+
+        deadline = time.monotonic() + timeout
+        ready_streak = 0
+        probe: Dict[str, Any] = {
+            "cover_text": "", "page_text": "", "original_switch_enabled": None
+        }
+        state = "unknown"
+        last_log = 0.0
+        started = time.monotonic()
+        while time.monotonic() < deadline:
+            probe = self._video_upload_probe()
+            state = classify_video_upload_state(
+                probe.get("cover_text", ""),
+                probe.get("page_text", ""),
+                probe.get("original_switch_enabled"),
+            )
+            if state == "ready":
+                ready_streak += 1
+                if ready_streak >= self._VIDEO_READY_CONFIRM_POLLS:
+                    waited = time.monotonic() - started
+                    logger.info(f"✓ 视频上传+转码完成(等待 {waited:.0f}s)")
+                    self._take_screenshot("05_video_ready")
+                    return {
+                        "success": True,
+                        "state": "ready",
+                        "edit_page_loaded": True,
+                        "wait_time": round(waited, 1),
+                        "observed": probe,
+                    }
+            else:
+                ready_streak = 0
+            elapsed = time.monotonic() - started
+            if elapsed - last_log >= 15:
+                last_log = elapsed
+                logger.info(
+                    f"…视频处理中({elapsed:.0f}/{timeout}s) state={state} "
+                    f"cover={probe.get('cover_text', '')[:80]!r}"
+                )
+                self._take_screenshot(f"05_video_waiting_{int(elapsed)}s")
+            time.sleep(1.0)
+
+        logger.error(f"❌ 视频上传+转码超时({timeout}s),最后判定 state={state}")
+        return {
+            "success": False,
+            "error": (
+                f"视频上传/转码超时({timeout}s),最后判定 {state};"
+                f"cover 区文案={probe.get('cover_text', '')[:200]!r}"
+            ),
+            "state": state,
+            "observed": probe,
+            "screenshot": self._take_screenshot("06_video_timeout"),
+        }
+
+    def ensure_editor_interactable(self, tries: int = 5) -> bool:
+        """确认标题输入框**真的可交互**(在视口内、且中心点没被别的东西盖住)才放行。
+
+        视频页的编辑区不像图文那样传完即定型:封面卡「智能推荐封面生成中」是独立异步
+        任务,期间上方区域高度会变,标题框的 rect 一路漂移;而 step5 是按**坐标**做拟人
+        点击的(不持 ElementHandle,规避 React 重渲染脱离),坐标一旦落在遮挡物上,
+        打出去的字就进不了标题框,还不会报错。故这里用 ``elementFromPoint`` 反查中心点
+        命中的到底是不是这个输入框 —— rect 本身在这个页面上不可信。
+        """
+        js = r"""() => {
+            const el = document.querySelector("input[placeholder*='标题']")
+                || document.querySelector("textarea[placeholder*='标题']");
+            if (!el) return {found: false};
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return {found: true, sized: false};
+            const inView = r.top >= 0 && r.bottom <= (window.innerHeight || 0);
+            const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+            const hit = document.elementFromPoint(cx, cy);
+            const covered = !hit || !(hit === el || el.contains(hit) || hit.contains(el));
+            return {found: true, sized: true, inView, covered};
+        }"""
+        for attempt in range(1, tries + 1):
+            try:
+                st = self.page.evaluate(js)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"[编辑区可交互校验] 读取异常(重试): {exc}")
+                st = None
+            if isinstance(st, dict) and st.get("sized") and st.get("inView") \
+                    and not st.get("covered"):
+                if attempt > 1:
+                    logger.info(f"✓ 编辑区可交互(第 {attempt} 次校验)")
+                return True
+            logger.info(f"⚠ 编辑区尚不可交互(第 {attempt}/{tries} 次): {st}")
+            # 不可交互的两种成因都靠"把它滚到视口中段"解:在视口外,或被吸底发布栏压住。
+            try:
+                self.page.evaluate(
+                    "() => { const el = document.querySelector(\"input[placeholder*='标题']\");"
+                    " if (el) el.scrollIntoView({block: 'center'}); }"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            self.human.wait(0.8, 1.5, context="等编辑区稳定")
+        return False
+
+    def wait_for_submit_enabled(self, timeout: int = 120) -> Dict[str, Any]:
+        """等 ``<xhs-publish-btn>`` 的 ``submit-disabled`` 属性翻成非 true 才放行点发布。
+
+        视频页刚进编辑器时该属性是 ``"true"``(真号夹具实测);它**何时**翻转没有实测
+        结论(可能等封面生成、可能等标题非空)。所以这里不猜条件、只等结果,超时就带
+        当场的属性快照报错 —— 点一个禁用按钮永远不可能发布成功,只会换来一句"发布超时"
+        (图文那边 2026-08-02 真号事故就是这么来的)。
+
+        host 不存在同样判 **not ready**:那是页面状态异常,不是"可以点了"。
+        """
+        js = r"""() => {
+            const h = document.querySelector('xhs-publish-btn');
+            if (!h) return {found: false};
+            return {
+                found: true,
+                submit_disabled: h.getAttribute('submit-disabled'),
+                submit_loading: h.getAttribute('submit-loading'),
+            };
+        }"""
+        deadline = time.monotonic() + timeout
+        st: Dict[str, Any] = {"found": False}
+        while time.monotonic() < deadline:
+            try:
+                got = self.page.evaluate(js)
+            except Exception:  # noqa: BLE001
+                got = None
+            if isinstance(got, dict):
+                st = got
+                if st.get("found") and str(st.get("submit_disabled")).lower() != "true":
+                    return {"ready": True, "observed": st}
+            time.sleep(1.0)
+        logger.warning(f"[step7 前置] 发布按钮 {timeout}s 内未就绪,当场取证: {st}")
+        return {"ready": False, "observed": st}
 
     # ==================== 步骤4: 进入编辑界面 ====================
 

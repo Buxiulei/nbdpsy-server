@@ -593,8 +593,13 @@ class SyncClient:
         topics: Optional[List[str]] = None,
         components: Optional[Dict[str, Any]] = None,
         job_tag: Optional[str] = None,
+        video_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """走 step1-6 录入内容 + 三组件(可选)+ step7 真发布。
+
+        ``video_path``:给了就是**视频笔记**,媒体那一段改走 step2v(灌视频)+ step3v
+        (等上传+转码),并跳过图文专属的 step2/3/4;不给则一行不变走图文老路。
+        视频与图片二选一(入口 POST /api/publish-jobs 已把互斥钉死),这里只按有无路由。
 
         ``job_tag``:发布任务 id,只用来给失败现场截图打标,让运营能按 job 取回
         (见 ``XHSPublishAtomicTasks._take_screenshot``);不传则行为与上线前一致。
@@ -616,7 +621,8 @@ class SyncClient:
         # 编辑器加载之前就挂上(响应过期了就读不回来了)。不设组件时一个监听都不挂。
         responses = None
         try:
-            logger.info(f"[SyncClient] 开始发布: {title} | 图片 {len(image_paths or [])} 张 | 话题 {len(topics or [])}")
+            media_desc = f"视频 {video_path}" if video_path else f"图片 {len(image_paths or [])} 张"
+            logger.info(f"[SyncClient] 开始发布: {title} | {media_desc} | 话题 {len(topics or [])}")
 
             # step1 打开发布页(可能切新窗口 + SSO)
             r = atomic.step1_open_publish_page()
@@ -631,32 +637,53 @@ class SyncClient:
                 responses = ComponentResponses()
                 responses.attach(self.page)
 
-            # step2 上传图片
-            if image_paths:
-                r = atomic.step2_upload_images(image_paths)
-                if not r.get("success"):
-                    # 与 step1 同源:透出 step2 SSO 失败的 need_manual_login,交状态机直接置
-                    # failed 而非徒劳重试(否则该独立信号在此层被丢弃,I1 修复形同虚设)。
-                    return {
-                        "success": False,
-                        "error": r.get("error"),
-                        "need_manual_login": r.get("need_manual_login", False),
-                    }
-                logger.info(f"✓ 已上传 {r.get('uploaded_count')} 张图片")
-            else:
-                logger.info("跳过图片上传(无图片)")
-
-            # step3 等待上传处理
-            r = atomic.step3_wait_for_upload_processing(max_wait=30)
-            if not r.get("success"):
-                return {"success": False, "error": r.get("error")}
-            edit_page_loaded = r.get("edit_page_loaded", False)
-
-            # step4 进入编辑界面(若未自动进入)
-            if not edit_page_loaded:
-                r = atomic.step4_enter_edit_page()
+            if video_path:
+                # ── 视频分支:step2v 灌视频 → step3v 等上传+转码 ──
+                # 发布页默认落地就是「上传视频」tab,不需要图文那段切 tab;
+                # 视频传完直接就在编辑器里,也没有「继续编辑」那一步,故无 step4v。
+                r = atomic.step2v_upload_video(video_path)
                 if not r.get("success"):
                     return {"success": False, "error": r.get("error")}
+                r = atomic.step3v_wait_for_video_processing()
+                if not r.get("success"):
+                    return {"success": False, "error": r.get("error")}
+                logger.info(f"✓ 视频已上传并转码完成(等待 {r.get('wait_time')}s)")
+                # 编辑区可交互校验:封面「智能推荐生成中」是独立异步任务,期间上方区域高度
+                # 还在变,标题框 rect 一路漂移。step5 是按坐标做拟人点击的,坐标落在遮挡物上
+                # 打出去的字进不了输入框**且不会报错**,所以必须在这里先把它挡住。
+                if not atomic.ensure_editor_interactable():
+                    return {
+                        "success": False,
+                        "error": "视频已就绪但编辑区不可交互(标题框在视口外或被遮挡),"
+                                 "为免把正文打到别处,不继续发布",
+                    }
+            else:
+                # step2 上传图片
+                if image_paths:
+                    r = atomic.step2_upload_images(image_paths)
+                    if not r.get("success"):
+                        # 与 step1 同源:透出 step2 SSO 失败的 need_manual_login,交状态机直接置
+                        # failed 而非徒劳重试(否则该独立信号在此层被丢弃,I1 修复形同虚设)。
+                        return {
+                            "success": False,
+                            "error": r.get("error"),
+                            "need_manual_login": r.get("need_manual_login", False),
+                        }
+                    logger.info(f"✓ 已上传 {r.get('uploaded_count')} 张图片")
+                else:
+                    logger.info("跳过图片上传(无图片)")
+
+                # step3 等待上传处理
+                r = atomic.step3_wait_for_upload_processing(max_wait=30)
+                if not r.get("success"):
+                    return {"success": False, "error": r.get("error")}
+                edit_page_loaded = r.get("edit_page_loaded", False)
+
+                # step4 进入编辑界面(若未自动进入)
+                if not edit_page_loaded:
+                    r = atomic.step4_enter_edit_page()
+                    if not r.get("success"):
+                        return {"success": False, "error": r.get("error")}
 
             # step5 填写标题正文
             r = atomic.step5_fill_content(title, content)
@@ -689,6 +716,22 @@ class SyncClient:
                     f"[SyncClient] 原创声明未开成(不阻断发布): "
                     f"{component_result['original_declaration'].get('reason')}"
                 )
+
+            # step6.7 视频专属:等发布按钮真的可点再进 step7。
+            # <xhs-publish-btn> 刚进编辑器时 submit-disabled="true"(真号夹具实测),
+            # 何时翻转没有实测结论。点一个禁用按钮永远不可能发布成功,只会换来一句
+            # 「发布超时(30秒)」——图文那边 2026-08-02 就栽在这。故这里等结果、
+            # 超时带当场属性快照收口,绝不硬着头皮往下点。
+            if video_path:
+                gate = atomic.wait_for_submit_enabled()
+                if not gate.get("ready"):
+                    return {
+                        "success": False,
+                        "error": (
+                            "发布按钮始终不可点(submit-disabled 未翻转),当场取证:"
+                            f"{gate.get('observed')}"
+                        ),
+                    }
 
             # step7 点击发布并等待
             r = atomic.step7_click_publish_and_wait(max_wait=30)
@@ -785,11 +828,13 @@ def publish_once(
     topics: Optional[List[str]] = None,
     components: Optional[Dict[str, Any]] = None,
     job_tag: Optional[str] = None,
+    video_path: Optional[str] = None,
 ) -> PublishResult:
     """一次性:建 client → start → 录入内容 → 三组件(可选)→ step7 真发布 → stop。
 
     供上层 ``asyncio.to_thread(publish_once, ...)`` 调用。任何阶段失败都落到 ``PublishResult``。
     ``components`` 为 None / 全空时完全跳过组件那一步(默认值,行为不变)。
+    ``video_path`` 给了就发**视频笔记**(此时 ``image_paths`` 应为空列表)。
     """
     client = SyncClient(account_id, cookies)
     try:
@@ -798,7 +843,8 @@ def publish_once(
             return PublishResult(success=False, error=start.get("error"))
 
         result = client.publish_note(
-            title, content, image_paths, topics, components, job_tag=job_tag
+            title, content, image_paths, topics, components,
+            job_tag=job_tag, video_path=video_path,
         )
         return PublishResult(
             success=bool(result.get("success")),

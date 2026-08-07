@@ -105,3 +105,19 @@ def cooldown_remaining_s(
 def daily_cap_reached(published_today: int, daily_cap: int) -> bool:
     """每账号每自然日发布上限判定(纯函数):当日已发布数达到上限即 True。"""
     return published_today >= daily_cap
+
+
+# ── 视频笔记:平台接受的视频扩展名 ──
+# 逐字来自真号采集(data/scene_captures/video_publish/account9_video_publish_probe.json)
+# 里视频上传 input 的 accept 属性 —— 平台给的是**扩展名列表**而不是 MIME,所以判据也只能
+# 按扩展名走(靠 `accept*='video'` 之类的猜测在这个页面上一个都匹配不到)。
+XHS_VIDEO_EXTENSIONS = (
+    ".mp4", ".mov", ".flv", ".f4v", ".mkv", ".rm", ".rmvb",
+    ".m4v", ".mpg", ".mpeg", ".ts",
+)
+
+
+def video_ext_allowed(video_path: str) -> bool:
+    """视频路径的扩展名是否在平台白名单内(纯函数,大小写不敏感)。"""
+    lowered = (video_path or "").lower()
+    return any(lowered.endswith(ext) for ext in XHS_VIDEO_EXTENSIONS)

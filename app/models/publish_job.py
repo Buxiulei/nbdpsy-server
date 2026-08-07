@@ -24,6 +24,10 @@ class PublishJob(Base):
     content: Mapped[str] = mapped_column(Text)
     # 图片路径列表的 JSON 串
     images_json: Mapped[str] = mapped_column(Text)
+    # 视频笔记的服务器侧视频文件路径;None = 图文笔记(走 images_json)。
+    # 与 images_json 互斥,二选一(入口 POST /api/publish-jobs 已把互斥钉死),
+    # 发布链路据它有无路由到视频分支(step2v/step3v)还是图文分支(step2/step3/step4)。
+    video_path: Mapped[str | None] = mapped_column(Text, default=None)
     # 话题(#tag)列表的 JSON 串
     topics_json: Mapped[str] = mapped_column(Text)
     # 定时发布时刻;None 表示立即入队

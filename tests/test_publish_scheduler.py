@@ -356,9 +356,12 @@ async def test_publish_runner_full_flow(db_factory, monkeypatch):
     )
 
     def fake_publish_once(
-        acc_id, cookies, title, content, image_paths, topics, components=None
+        acc_id, cookies, title, content, image_paths, topics, components=None,
+        video_path=None,
     ):
+        # video_path:图文任务恒为 None(视频分支的路由另有用例覆盖)
         captured["args"] = (acc_id, cookies, title, content, image_paths, topics)
+        captured["video_path"] = video_path
         return PublishResult(success=True, note_id="nid", note_url="https://xhs/1")
 
     monkeypatch.setattr(scheduler_mod.sync_client, "publish_once", fake_publish_once)
