@@ -157,8 +157,10 @@ def test_publish_chain_always_applies_original_declaration(monkeypatch):
 
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _FakeAtomicOK)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page: object())
-    def fake_apply(page, human):
+    def fake_apply(page, human, *, handle_consent_modal=False):
+        # 图文任务:handle_consent_modal 必须是 False(生产路径不被本次改动波及)
         seen["called"] = True
+        seen["consent_modal"] = handle_consent_modal
         return {"status": "done"}
 
     monkeypatch.setattr(sc, "apply_original_declaration", fake_apply)
@@ -168,6 +170,7 @@ def test_publish_chain_always_applies_original_declaration(monkeypatch):
 
     assert result["success"] is True
     assert seen.get("called") is True
+    assert seen["consent_modal"] is False, "图文路径不许被切到协议弹窗链"
     assert result["components"]["original_declaration"] == {"status": "done"}
 
 
@@ -186,3 +189,180 @@ def test_original_declaration_failure_never_blocks_publish(monkeypatch):
 
     assert result["success"] is True
     assert "original_exception" in result["components"]["original_declaration"]["reason"]
+
+
+# ---------------- 原创声明协议弹窗:勾同意 → 等解禁 → 点「声明原创」 ----------------
+#
+# 夹具铁证(tests/fixtures/pages/content_settings.json,2026-08-05 真号):
+#   original_row.checkbox_checked      = False   ← 初始
+#   after_toggle_on.checkbox_checked   = True    ← **点开关那一刻就 true,而弹窗还开着没确认**
+# 也就是说隐藏 input.checked 是**乐观 UI 态**,不是"已声明"的证据。谁拿它当终判,
+# 谁就会在关掉弹窗、什么都没声明的情况下报成功。
+
+from app.browser import note_components as _bnc
+
+
+class _FakeEl:
+    """最小元素替身:能报自己的文案,也能在子树里找文案(供 _find_text_in_section 用)。"""
+
+    def __init__(self, text="", children=()):
+        self._text = text
+        self._children = list(children)
+
+    def inner_text(self):
+        return self._text
+
+    def query_selector_all(self, _sel):
+        return list(self._children)
+
+
+class _ConsentModalPage:
+    """会弹协议弹窗的假页面:必须勾同意 + 点「声明原创」才算真声明。"""
+
+    def __init__(self, *, checkbox_found=True, button_ever_enables=True):
+        self.modal_open = False
+        self.consent_ticked = False
+        self.declared = False          # 只有点了「声明原创」才 True
+        self.optimistic_checked = False  # 模拟平台的乐观 UI 态
+        self.closed_by_x = False
+        self._checkbox_found = checkbox_found
+        self._button_ever_enables = button_ever_enables
+
+    # --- 被测代码会用到的 page API ---
+    def query_selector(self, sel):
+        if sel in (_bnc._ORIGINAL_ROW, _bnc._ORIGINAL_SWITCH):
+            return f"EL:{sel}"
+        if sel == _bnc._ORIGINAL_MODAL:
+            if not self.modal_open:
+                return None
+            return _FakeEl("协议弹窗", [_FakeEl(_bnc._ORIGINAL_CONFIRM_TEXT)])
+        if sel == _bnc._ORIGINAL_MODAL_CLOSE:
+            return "EL:x" if self.modal_open else None
+        if "checkbox" in sel or "d-checkbox" in sel:
+            return "EL:consent" if (self.modal_open and self._checkbox_found) else None
+        return None
+
+    def query_selector_all(self, sel):
+        el = self.query_selector(sel)
+        return [el] if el else []
+
+    def evaluate(self, script, *args):
+        if "checked" in script and "original-wrapper" in script:
+            return self.optimistic_checked
+        if args and args[0] == _bnc._ORIGINAL_CONFIRM_TEXT:
+            # 按钮可点 = 已勾同意(且本用例允许它解禁)
+            return bool(self.consent_ticked and self._button_ever_enables)
+        return None
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+
+class _ConsentHuman:
+    def __init__(self, page):
+        self.page = page
+        self.clicks = []
+
+    def click(self, target, reason="", **_k):
+        self.clicks.append(reason)
+        if "开关" in reason:
+            self.page.modal_open = True
+            self.page.optimistic_checked = True   # ← 乐观翻转,弹窗还没确认
+        elif "同意" in reason:
+            self.page.consent_ticked = True
+        elif "声明原创" in reason:
+            if self.page.consent_ticked:
+                self.page.declared = True
+                self.page.modal_open = False
+        elif "关掉" in reason or "关闭" in reason:
+            self.page.modal_open = False
+            self.page.closed_by_x = True
+
+    def hover(self, *_a, **_k):
+        return None
+
+    def wait(self, *_a, **_k):
+        return None
+
+    def scroll(self, *_a, **_k):
+        return None
+
+
+def _run_consent(page):
+    import app.browser.note_components as m
+
+    human = _ConsentHuman(page)
+    out = m.apply_original_declaration(page, human, handle_consent_modal=True)
+    return out, human
+
+
+def test_consent_modal_chain_actually_declares(monkeypatch):
+    """走完整链:勾「我已阅读并同意」→ 等「声明原创」解禁 → 点它 → done。"""
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage()
+    out, human = _run_consent(page)
+
+    assert out["status"] == "done", out
+    assert page.declared is True, "没点到「声明原创」就不算声明"
+    assert page.closed_by_x is False, "走成了就不该用 X 关弹窗"
+    # 顺序:先勾同意,再点声明原创
+    tick = next(i for i, r in enumerate(human.clicks) if "同意" in r)
+    confirm = next(i for i, r in enumerate(human.clicks) if "声明原创" in r)
+    assert tick < confirm, human.clicks
+
+
+def test_optimistic_checked_alone_is_not_accepted_as_done(monkeypatch):
+    """**核心回归**:隐藏 input.checked 已经 true,但协议没确认 → 绝不许报 done。
+
+    这正是夹具里 after_toggle_on.checkbox_checked=True 而弹窗仍开着的那一刻。
+    拿 checked 当终判 = 关掉弹窗什么都没声明却报成功。
+    """
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage(checkbox_found=False)  # 勾不上 → 链走不完
+    out, _human = _run_consent(page)
+
+    assert page.optimistic_checked is True, "夹具语义:点开关即乐观翻 true"
+    assert out["status"] == "error", f"checked=true 但没声明,不许报 done: {out}"
+    assert "consent" in out["reason"]
+
+
+def test_modal_closed_when_consent_chain_cannot_complete(monkeypatch):
+    """链走不完必须把弹窗关掉 —— 残留弹窗会盖住发布按钮(2026-08-02 事故同型)。"""
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage(button_ever_enables=False)
+    out, _human = _run_consent(page)
+
+    assert out["status"] == "error"
+    assert page.modal_open is False, "弹窗必须关掉,否则盖住发布按钮"
+    assert page.declared is False
+
+
+def test_no_modal_falls_back_to_checked_readback(monkeypatch):
+    """页面压根不弹协议弹窗(发布页可能如此)→ 退回读 checked 的老判据,不误报。"""
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+
+    class _NoModalPage(_ConsentModalPage):
+        def query_selector(self, sel):
+            if sel == _bnc._ORIGINAL_MODAL:
+                return None          # 永不弹窗
+            return super().query_selector(sel)
+
+    page = _NoModalPage()
+    out, human = _run_consent(page)
+    assert out["status"] == "done", out
+    assert all("同意" not in r for r in human.clicks), "没弹窗就不该去勾任何协议框"
+
+
+def test_image_path_behaviour_unchanged_by_default(monkeypatch):
+    """默认不开 handle_consent_modal → 与上线前逐字节同一条路径(图文生产不受影响)。
+
+    图文发布页是否弹这个协议弹窗**尚无真号证据**,在拿到证据前不动生产路径。
+    """
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage()
+    human = _ConsentHuman(page)
+    out = _bnc.apply_original_declaration(page, human)  # 不传新参数
+
+    assert page.closed_by_x is True, "老路径就是「弹窗出现就 X 关掉」"
+    assert all("同意" not in r for r in human.clicks)
+    assert out["status"] == "done"  # 老路径拿乐观 checked 当终判(即本次报告的缺陷)

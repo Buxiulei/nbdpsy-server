@@ -1470,9 +1470,112 @@ _ORIGINAL_CHECKED_JS = (
     " return b ? b.checked : null; }"
 )
 _ORIGINAL_TOGGLE_TRIES = 2
+# ── 原创声明的**协议弹窗**(2026-08-07 用户实拍 + 夹具复核) ──
+# 夹具 content_settings.json 里这个弹窗一直都在,只是被读成了"无底栏 = 没有确认按钮":
+# 它的 class 确实带 d-modal-no-footer,但「声明原创」按钮在 .d-modal-content **里**,
+# 不在底栏。必须勾「我已阅读并同意《原创声明须知》」→ 按钮解禁 → 点它,才算真声明。
+_ORIGINAL_MODAL = ".d-modal.creator-modal-style"
+_ORIGINAL_CONSENT_TEXT = "我已阅读并同意"
+_ORIGINAL_CONFIRM_TEXT = "声明原创"
+# 协议复选框的选择器**没有夹具证据**(采集时只抓了弹窗顶层节点,没抓后代),
+# 故给候选列表并 fail-loud:一个都不命中就如实报错,绝不假装勾上了。
+_ORIGINAL_CONSENT_CANDIDATES = (
+    ".d-modal.creator-modal-style .d-checkbox",
+    ".d-modal.creator-modal-style input[type='checkbox']",
+    ".d-modal.creator-modal-style [class*='checkbox']",
+)
+# 「声明原创」按钮当前可点否(三处 disabled 写法都读,与 step7 同口径)
+_ORIGINAL_CONFIRM_ENABLED_JS = r"""(text) => {
+    const modal = document.querySelector('.d-modal.creator-modal-style');
+    if (!modal) return null;
+    const isDisabled = (el) => !!(
+        el.disabled ||
+        /(^|\s)disabled(\s|$)/.test(el.getAttribute('class') || '') ||
+        el.getAttribute('aria-disabled') === 'true'
+    );
+    for (const el of modal.querySelectorAll('button, div, span, a')) {
+        if ((el.textContent || '').trim() !== text) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        return !isDisabled(el);
+    }
+    return null;
+}"""
+# 等按钮解禁的轮询窗口(秒)
+_ORIGINAL_CONFIRM_TIMEOUT_S = 8.0
 
 
-def apply_original_declaration(page, human: SyncHumanActions) -> Dict[str, Any]:
+def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
+    """走完协议弹窗:勾「我已阅读并同意」→ 等「声明原创」解禁 → 点它。
+
+    返回 ``{"ok": bool, "reason": str, "observed": dict}``。**走不完一律把弹窗关掉**
+    —— 残留弹窗会盖住发布按钮(2026-08-02 事故同型),比声明没成更严重。
+    """
+    observed: Dict[str, Any] = {}
+    consent = None
+    for selector in _ORIGINAL_CONSENT_CANDIDATES:
+        try:
+            consent = page.query_selector(selector)
+        except Exception:  # noqa: BLE001
+            consent = None
+        if consent is not None:
+            observed["consent_selector"] = selector
+            break
+    if consent is None:
+        return {"ok": False, "observed": observed,
+                "reason": "original_consent_checkbox_not_found: 协议弹窗里没找到"
+                          "「我已阅读并同意」复选框(选择器候选全未命中)"}
+    human.click(consent, reason=f"勾选「{_ORIGINAL_CONSENT_TEXT}《原创声明须知》」")
+    human.wait(0.4, 0.9, context="等「声明原创」按钮解禁")
+
+    deadline = time.monotonic() + _ORIGINAL_CONFIRM_TIMEOUT_S
+    enabled = None
+    while time.monotonic() < deadline:
+        try:
+            enabled = page.evaluate(_ORIGINAL_CONFIRM_ENABLED_JS, _ORIGINAL_CONFIRM_TEXT)
+        except Exception:  # noqa: BLE001
+            enabled = None
+        if enabled:
+            break
+        page.wait_for_timeout(300)
+    observed["confirm_enabled"] = enabled
+    if not enabled:
+        return {"ok": False, "observed": observed,
+                "reason": f"original_confirm_never_enabled: 勾了同意但「{_ORIGINAL_CONFIRM_TEXT}」"
+                          f"{_ORIGINAL_CONFIRM_TIMEOUT_S:.0f}s 内没解禁"}
+
+    button = _find_text_in_section(page, _ORIGINAL_MODAL, _ORIGINAL_CONFIRM_TEXT)
+    if button is None:
+        return {"ok": False, "observed": observed,
+                "reason": f"original_confirm_not_found: 读到按钮可点,但按文案取不到"
+                          f"「{_ORIGINAL_CONFIRM_TEXT}」元素"}
+    human.click(button, reason=f"点「{_ORIGINAL_CONFIRM_TEXT}」完成声明")
+    human.wait(0.6, 1.2, context="等协议弹窗关闭")
+    try:
+        still_open = page.query_selector(_ORIGINAL_MODAL) is not None
+    except Exception:  # noqa: BLE001
+        still_open = False
+    observed["modal_still_open"] = still_open
+    if still_open:
+        return {"ok": False, "observed": observed,
+                "reason": "original_modal_not_closed: 点了声明原创但弹窗仍在"}
+    return {"ok": True, "observed": observed, "reason": ""}
+
+
+def _close_original_modal(page, human: SyncHumanActions) -> None:
+    """兜底关掉协议弹窗(绝不能让它留着盖住发布按钮);点不动就算了。"""
+    try:
+        close = page.query_selector(_ORIGINAL_MODAL_CLOSE)
+        if close is not None:
+            human.click(close, reason="关掉原创声明协议弹窗(链走不完的兜底)")
+            human.wait(0.4, 0.9, context="等弹窗关闭")
+    except Exception:  # noqa: BLE001 — 兜底动作失败不额外制造异常
+        pass
+
+
+def apply_original_declaration(
+    page, human: SyncHumanActions, *, handle_consent_modal: bool = False
+) -> Dict[str, Any]:
     """打开「原创声明」开关 → ``{"status": "done"|"skipped"|"error", ...}``。
 
     夹具实证(2026-08-05 真号采集 content_settings.json):
@@ -1482,9 +1585,18 @@ def apply_original_declaration(page, human: SyncHumanActions) -> Dict[str, Any]:
       弹窗必须关掉——弹窗不关会盖住发布按钮(2026-08-02 事故同型);
     - 已是开态 → ``skipped`` 零点击(判「现在是什么状态」不判「变了没有」,幂等重跑安全)。
 
-    X 关弹窗后 checked 是否保持**没有**直接夹具证据(采集时是二次点开关恢复的),故防御:
-    关弹窗后回读,不是开态就再点一轮,封顶 ``_ORIGINAL_TOGGLE_TRIES``;终判一律以回读
-    checked 为准——这条产品线的失败是静默的,"没报错"不算数。
+    ``handle_consent_modal=True``(视频路径用)走**协议弹窗链**:勾「我已阅读并同意」→
+    等「声明原创」解禁 → 点它 → 弹窗消失才算 done。
+
+    ⚠️ **为什么此时不能拿 checked 当终判**:夹具 content_settings.json 铁证 ——
+    ``original_row.checkbox_checked=False`` → 点开关后 ``after_toggle_on.checkbox_checked
+    =True`` 而**同一快照里弹窗仍 visible**。隐藏 input.checked 是**乐观 UI 态**,不是
+    "已声明"的证据;拿它当终判 = 关掉弹窗什么都没声明却报成功。故开启本参数后,
+    ``done`` 的依据是"协议链真走完了",checked 只作 ``observed`` 佐证。
+
+    ``handle_consent_modal=False``(缺省,图文生产路径)维持上线前行为:弹窗出现就 X 关掉、
+    以回读 checked 为终判。**图文发布页是否也弹这个协议弹窗尚无真号证据**,在拿到证据前
+    不动正在跑的生产路径(见交给 lead 的单独报告)。
     """
     if page.query_selector(_ORIGINAL_ROW) is None:
         return {"status": "error",
@@ -1502,6 +1614,29 @@ def apply_original_declaration(page, human: SyncHumanActions) -> Dict[str, Any]:
         toggle = page.query_selector(_ORIGINAL_SWITCH) or toggle
         human.click(toggle, reason="打开原创声明开关")
         human.wait(0.8, 1.5, context="等原创声明开关/弹窗反应")
+
+        if handle_consent_modal:
+            try:
+                modal_present = page.query_selector(_ORIGINAL_MODAL) is not None
+            except Exception:  # noqa: BLE001
+                modal_present = False
+            if modal_present:
+                outcome = _complete_original_consent(page, human)
+                if outcome["ok"]:
+                    return {"status": "done", "observed": {
+                        "via": "consent_modal",
+                        "checked": page.evaluate(_ORIGINAL_CHECKED_JS),
+                        **outcome["observed"],
+                    }}
+                _close_original_modal(page, human)
+                return {"status": "error", "reason": outcome["reason"],
+                        "observed": {"via": "consent_modal", **outcome["observed"]}}
+            # 没弹协议弹窗:退回读 checked 的老判据(发布页可能就是不弹)
+            if page.evaluate(_ORIGINAL_CHECKED_JS) is True:
+                return {"status": "done", "observed": {"via": "no_modal",
+                                                       "checked": True}}
+            continue
+
         close = page.query_selector(_ORIGINAL_MODAL_CLOSE)
         if close is not None:
             try:

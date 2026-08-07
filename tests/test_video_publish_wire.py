@@ -77,7 +77,8 @@ def patched_sync_client(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(
         sc, "apply_original_declaration",
-        lambda page, human: {"status": "done", "observed": "checked_on"},
+        lambda page, human, **kw: {"status": "done", "observed": "checked_on",
+                                   "consent_modal": kw.get("handle_consent_modal")},
     )
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     return sc, holder
@@ -312,7 +313,8 @@ def test_video_branch_runs_topics_components_and_original(monkeypatch):
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(
         sc, "apply_original_declaration",
-        lambda page, human: {"status": "done", "observed": "checked_on"},
+        lambda page, human, **kw: {"status": "done", "observed": "checked_on",
+                                   "consent_modal": kw.get("handle_consent_modal")},
     )
 
     class _FakeResponses:
@@ -347,6 +349,8 @@ def test_video_branch_runs_topics_components_and_original(monkeypatch):
     assert seen["components"] == {
         "collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1"}
     assert r["components"]["original_declaration"]["status"] == "done"
+    # 视频路径必须走协议弹窗链(勾同意 → 等解禁 → 点声明原创)
+    assert r["components"]["original_declaration"]["consent_modal"] is True
     assert r["topics_applied"] == ["#心理"]
 
 
@@ -433,7 +437,7 @@ def test_cover_step_runs_after_upload_and_before_components(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(sc, "apply_original_declaration",
-                        lambda page, human: {"status": "done"})
+                        lambda page, human, **kw: {"status": "done"})
     monkeypatch.setattr(sc, "ComponentResponses", lambda: type(
         "R", (), {"attach": lambda self, p: None, "detach": lambda self: None})())
     monkeypatch.setattr(sc, "apply_components", lambda *a, **k: (
@@ -473,7 +477,7 @@ def test_no_cover_means_cover_step_never_runs(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(sc, "apply_original_declaration",
-                        lambda page, human: {"status": "done"})
+                        lambda page, human, **kw: {"status": "done"})
 
     def _boom(*a, **k):
         raise AssertionError("没传 cover 就不该碰封面步骤")
@@ -500,7 +504,7 @@ def test_cover_failure_does_not_block_publish(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(sc, "apply_original_declaration",
-                        lambda page, human: {"status": "done"})
+                        lambda page, human, **kw: {"status": "done"})
     monkeypatch.setattr(sc, "apply_video_cover", lambda p, h, c: {
         "status": "error",
         "reason": "cover_entry_not_found: 页面上没有「设置封面」入口",
@@ -531,7 +535,7 @@ def test_cover_exception_is_contained(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(sc, "apply_original_declaration",
-                        lambda page, human: {"status": "done"})
+                        lambda page, human, **kw: {"status": "done"})
 
     def _raise(*a, **k):
         raise RuntimeError("封面弹窗炸了")

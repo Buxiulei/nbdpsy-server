@@ -735,8 +735,12 @@ class SyncClient:
             if cover_result is not None:
                 component_result["cover"] = cover_result
             try:
+                # 视频路径走**协议弹窗链**(勾同意 → 等「声明原创」解禁 → 点它);
+                # 图文路径维持上线前行为 —— 图文发布页是否也弹这个弹窗尚无真号证据,
+                # 在拿到证据前不动正在跑的生产链路(详见交给 lead 的单独缺陷报告)。
                 component_result["original_declaration"] = apply_original_declaration(
-                    atomic.page, SyncHumanActions(atomic.page)
+                    atomic.page, SyncHumanActions(atomic.page),
+                    handle_consent_modal=bool(video_path),
                 )
             except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
                 component_result["original_declaration"] = {
