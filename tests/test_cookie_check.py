@@ -8,11 +8,20 @@ tests/test_cookie_checks_rest.py 锁定)。本文件保留并适配原三关注�
   (进程级单例)——断言同锁对象 + 同号检测在发布持锁时串行等待。
 - 执行崩溃终态:进程内消费管线(_run_inline)在 execute 抛异常时把台账落成
   error 终态,不让轮询方死等。
+
+新增第三个关注点(转正引导链):cookie 从非 valid 转 valid 时登记「台账同步 +
+newcomer 补量」各一条,让新号自动融进矩阵互动体系;在途去重、登记失败绝不上抛。
 """
 
 import asyncio
+import json
 
+from sqlalchemy import select
+
+import app.core.db as db_module
 from app.browser.account_locks import account_locks
+from app.models.browser_job import BrowserJob
+from app.models.xhs_account import XhsAccount
 from app.publish.scheduler import PublishScheduler
 from app.services import browser_jobs_repo, cookie_check
 
@@ -219,3 +228,123 @@ async def test_execute_timeout_does_not_write_back_account(monkeypatch):
     assert result["status"] == "error"
     assert wrote["v"] is False
     await _clean_locks()
+
+
+# ---------------- 转正引导链(非 valid → valid) ----------------
+#
+# 缺口:新号插件推 cookie 落库时 cookie_status='unknown',检测转正后没有任何东西触发
+# 「台账同步」与「newcomer 补量」——他既不会被别的号互动(台账里没有他的笔记),也不会
+# 去互动别人。账号 10/11 加入后 published_notes 一行都没有正是这个空档。
+
+
+async def _jobs_of(factory, kind: str) -> list[BrowserJob]:
+    """取某 kind 的全部台账行(按 id 稳定排序)。"""
+    async with factory() as s:
+        rows = await s.execute(
+            select(BrowserJob).where(BrowserJob.kind == kind).order_by(BrowserJob.id)
+        )
+        return list(rows.scalars().all())
+
+
+async def _add_job(factory, kind: str, account_id: int, status: str) -> None:
+    """造一条指定状态的台账行(去重断言用)。"""
+    import uuid
+
+    async with factory() as s:
+        s.add(BrowserJob(
+            id=uuid.uuid4().hex, kind=kind, account_id=account_id,
+            operator_id=0, payload="{}", status=status,
+        ))
+        await s.commit()
+
+
+async def test_kick_onboarding_chain_enqueues_both(db_factory):
+    """登记两条 queued:note_ledger_sync + newcomer 补量,operator_id=0。"""
+    job_ids = await cookie_check.kick_onboarding_chain(db_factory, 77)
+
+    assert len(job_ids) == 2
+    sync_jobs = await _jobs_of(db_factory, "note_ledger_sync")
+    assert len(sync_jobs) == 1
+    assert (sync_jobs[0].account_id, sync_jobs[0].operator_id) == (77, 0)
+    assert sync_jobs[0].status == "queued"
+    assert json.loads(sync_jobs[0].payload) == {}
+
+    backfill_jobs = await _jobs_of(db_factory, "interaction_backfill")
+    assert len(backfill_jobs) == 1
+    assert (backfill_jobs[0].account_id, backfill_jobs[0].operator_id) == (77, 0)
+    # newcomer 语义:互动方硬指定成本号,被互动的是其余所有号
+    assert json.loads(backfill_jobs[0].payload) == {
+        "scope": "newcomer",
+        "target_account_id": None,
+        "actor_account_id": 77,
+        "limit": None,
+    }
+
+
+async def test_kick_onboarding_chain_skips_in_flight(db_factory):
+    """在途(queued/running)同 kind 同号不重复登记;已终态(done)不算在途。"""
+    await _add_job(db_factory, "note_ledger_sync", 77, "queued")
+    await _add_job(db_factory, "interaction_backfill", 77, "running")
+    await _add_job(db_factory, "note_ledger_sync", 88, "queued")  # 别的号不干扰
+
+    assert await cookie_check.kick_onboarding_chain(db_factory, 77) == []
+    assert len(await _jobs_of(db_factory, "note_ledger_sync")) == 2  # 未新增
+    assert len(await _jobs_of(db_factory, "interaction_backfill")) == 1
+
+    # done 是终态,不挡新一轮引导(重登老号时该补的还得补)
+    await _add_job(db_factory, "note_ledger_sync", 99, "done")
+    await _add_job(db_factory, "interaction_backfill", 99, "error")
+    assert len(await cookie_check.kick_onboarding_chain(db_factory, 99)) == 2
+
+
+async def test_kick_onboarding_chain_swallows_failure(monkeypatch):
+    """登记炸了只告警不上抛:引导链是写回之后的副作用,绝不能拖累写回本身。"""
+
+    def broken_factory():
+        raise RuntimeError("库炸了")
+
+    assert await cookie_check.kick_onboarding_chain(broken_factory, 77) == []
+
+
+async def _seed_account(factory, cookie_status: str) -> int:
+    """造一个指定 cookie_status 的账号,返回 id。"""
+    async with factory() as s:
+        acc = XhsAccount(name="号", cookie_status=cookie_status)
+        s.add(acc)
+        await s.commit()
+        return acc.id
+
+
+async def test_write_back_unknown_to_valid_kicks_chain(db_factory, monkeypatch):
+    """_write_back:unknown → valid 触发引导链(手动检测/REST 路径也走这里)。"""
+    monkeypatch.setattr(db_module, "async_session", db_factory)
+    acc_id = await _seed_account(db_factory, "unknown")
+
+    await cookie_check._write_back(acc_id, "valid", None)
+
+    async with db_factory() as s:
+        assert (await s.get(XhsAccount, acc_id)).cookie_status == "valid"
+    assert len(await _jobs_of(db_factory, "note_ledger_sync")) == 1
+    assert len(await _jobs_of(db_factory, "interaction_backfill")) == 1
+
+
+async def test_write_back_valid_to_valid_skips_chain(db_factory, monkeypatch):
+    """_write_back:valid → valid 不触发(老号每次检测都过这条路,不能次次叠一对)。"""
+    monkeypatch.setattr(db_module, "async_session", db_factory)
+    acc_id = await _seed_account(db_factory, "valid")
+
+    await cookie_check._write_back(acc_id, "valid", None)
+
+    assert await _jobs_of(db_factory, "note_ledger_sync") == []
+    assert await _jobs_of(db_factory, "interaction_backfill") == []
+
+
+async def test_write_back_valid_to_invalid_skips_chain(db_factory, monkeypatch):
+    """_write_back:转成非 valid 的写回一律不触发引导链。"""
+    monkeypatch.setattr(db_module, "async_session", db_factory)
+    acc_id = await _seed_account(db_factory, "valid")
+
+    await cookie_check._write_back(acc_id, "invalid", None)
+
+    assert await _jobs_of(db_factory, "note_ledger_sync") == []
+    assert await _jobs_of(db_factory, "interaction_backfill") == []

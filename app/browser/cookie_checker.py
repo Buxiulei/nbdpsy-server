@@ -1,4 +1,4 @@
-"""可选的后台 cookie 巡检循环:周期性对 valid 账号跑登录检测并写回状态。
+"""可选的后台 cookie 巡检循环:周期性对 valid / unknown 账号跑登录检测并写回状态。
 
 lifespan 仅在 ``settings.COOKIE_CHECK_INTERVAL > 0`` 时启一个 ``CookieChecker`` 后台
 协程;默认 0(测试环境亦默认 0)**不起**该循环,故单测/CI 完全不受影响。号间隔
@@ -14,7 +14,7 @@ import json
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.browser import sync_client
 from app.browser.account_locks import account_locks
@@ -22,7 +22,11 @@ from app.browser.browser_gate import browser_slot
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
 from app.services import risk_events
-from app.services.cookie_check import _run_check_with_watchdog, pick_probe_user_id
+from app.services.cookie_check import (
+    _run_check_with_watchdog,
+    kick_onboarding_chain,
+    pick_probe_user_id,
+)
 
 # check_login_once 返回 user_info 时回填到账号的字段(与 cookies 工具一致的子集)
 _USER_INFO_FIELDS = ("nickname", "user_id", "red_id", "avatar")
@@ -39,7 +43,8 @@ def _decrypt_account_cookies(account: XhsAccount | None) -> list[dict]:
 
 
 class CookieChecker:
-    """周期 cookie 巡检:每 ``interval`` 秒对 ``cookie_status='valid'`` 的账号逐个检测并写回。
+    """周期 cookie 巡检:每 ``interval`` 秒对该巡的账号(见 ``_list_patrol_account_ids``)
+    逐个检测并写回。
 
     ``account_gap`` 为号间隔(默认 5s)防频控;``stop()`` 优雅取消(可打断 interval/gap 休眠)。
     """
@@ -71,11 +76,11 @@ class CookieChecker:
             await self._sleep(self._interval)
 
     async def check_once(self) -> int:
-        """跑一轮:取所有 valid 账号逐个检测并写回;返回实际检测的账号数。
+        """跑一轮:取该巡的账号逐个检测并写回;返回实际检测的账号数。
 
         号与号之间隔 ``account_gap`` 秒防频控(首个号不等);运行中收到停止信号即提前退出。
         """
-        account_ids = await self._list_valid_account_ids()
+        account_ids = await self._list_patrol_account_ids()
         checked = 0
         for index, account_id in enumerate(account_ids):
             if self._is_stopping():
@@ -88,19 +93,34 @@ class CookieChecker:
                 checked += 1
         return checked
 
-    async def _list_valid_account_ids(self) -> list[int]:
-        """选出 cookie_status='valid' 的账号 id(按 id 升序,稳定顺序)。
+    async def _list_patrol_account_ids(self) -> list[int]:
+        """选出该巡的账号 id:``valid`` + ``unknown``(且有 cookie),按 id 升序稳定排序。
+
+        **unknown 必须纳入**:插件推 cookie 落库时 ``cookie_status='unknown'``,只巡 valid
+        的话新号永远没人替它检测转正——也就永远当不了矩阵互动方(账号 10/11 加入后
+        last_check_at 一直是 NULL 正是这个原因)。要求 ``login_cookies`` 非空:没 cookie
+        的号检测必败,起一次 camoufox 纯浪费。
 
         **restricted(被风控)的号刻意不纳入周期巡检**:墙一旦挂上,继续每隔 interval 起一次
         camoufox 正是把「扫码验证身份」催成「请求太频繁」的原因(2026-07-31 NBDpsy-聊创伤
         实测)。恢复走人工:运营用手机扫码后,在插件里对该号点一次检测(REST
         POST /api/accounts/{id}/cookie-checks)即写回 valid,重新进入巡检。
         代价:不会自动恢复——但状态在账号列表里明晃晃是"风控",本就需要人处理。
+        ``invalid`` / ``captcha`` 同理不自动重试:同样是需要人处置的状态。
         """
         async with self._session_factory() as session:
             result = await session.execute(
                 select(XhsAccount.id)
-                .where(XhsAccount.cookie_status == "valid")
+                .where(
+                    or_(
+                        XhsAccount.cookie_status == "valid",
+                        and_(
+                            XhsAccount.cookie_status == "unknown",
+                            XhsAccount.login_cookies.isnot(None),
+                            XhsAccount.login_cookies != "",
+                        ),
+                    )
+                )
                 .order_by(XhsAccount.id)
             )
             return list(result.scalars().all())
@@ -148,9 +168,11 @@ class CookieChecker:
             )
             return True
 
+        previous_status: str | None = None
         async with self._session_factory() as session:
             account = await session.get(XhsAccount, account_id)
             if account is not None:
+                previous_status = account.cookie_status  # 转正判定要旧值,须在覆写前取
                 account.cookie_status = status
                 account.last_check_at = datetime.utcnow()
                 if user_info:
@@ -173,6 +195,10 @@ class CookieChecker:
                 await ensure_baseline(self._session_factory, account_id)
             except Exception:
                 logger.exception(f"基底采集 enqueue 失败(不影响巡检)account_id={account_id}")
+            # 转正引导链(台账同步 + newcomer 补量):只在从非 valid 转过来时走一次。
+            # 巡检是 unknown 新号转正的主路径,这个 seam 必须与手动检测的 _write_back 一致。
+            if previous_status != "valid":
+                await kick_onboarding_chain(self._session_factory, account_id)
         return True
 
     def _is_stopping(self) -> bool:

@@ -4,8 +4,10 @@
 sync_client.check_login_once 被 monkeypatch 成假实现,断言状态写回。
 
 覆盖:
-- check_once:只检 cookie_status='valid' 的号,写回三态 + last_check_at + 回填资料;
-  无 cookie 的 valid 号跳过(不误改状态)。
+- check_once:检 cookie_status='valid' 与 'unknown'(有 cookie)的号,写回三态 +
+  last_check_at + 回填资料;无 cookie 的 valid 号跳过(不误改状态);invalid /
+  captcha / restricted 一律不巡(需人工处置的状态不自动重试)。
+- 转正引导链:非 valid → valid 时登记台账同步 + newcomer 补量;valid → valid 不登记。
 - account_gap=0 时不引入号间隔延时(测试可秒级跑完)。
 - start/stop 生命周期:起循环 → 至少跑一轮 → 干净 stop(无遗留 task)。
 - lifespan 开关:COOKIE_CHECK_INTERVAL=0 不起 checker;>0 起 + shutdown 干净 stop。
@@ -15,6 +17,7 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -27,6 +30,7 @@ from app.browser import cookie_checker as checker_mod
 from app.browser.account_locks import account_locks
 from app.browser.cookie_checker import CookieChecker
 from app.core.security import encrypt_cookies
+from app.models.browser_job import BrowserJob
 from app.models.xhs_account import XhsAccount
 
 
@@ -61,6 +65,15 @@ async def _add_account(factory, name, cookie_status, cookies=None) -> int:
         s.add(acc)
         await s.commit()
         return acc.id
+
+
+async def _jobs(factory, kind: str) -> list[BrowserJob]:
+    """取某 kind 的全部台账行(按创建顺序),供引导链断言用。"""
+    async with factory() as s:
+        rows = await s.execute(
+            select(BrowserJob).where(BrowserJob.kind == kind).order_by(BrowserJob.id)
+        )
+        return list(rows.scalars().all())
 
 
 async def test_check_once_only_valid_and_writes_back(smk, monkeypatch):
@@ -153,6 +166,91 @@ async def test_check_once_skips_valid_without_cookies(smk, monkeypatch):
     async with smk() as s:
         acc = await s.get(XhsAccount, empty_id)
         assert acc.cookie_status == "valid"  # 保持不变
+
+
+# ---------------- 新号纳入巡检(unknown 有 cookie) ----------------
+
+
+async def test_check_once_covers_unknown_with_cookies(smk, monkeypatch):
+    """巡检选号 = valid + unknown(有 cookie)。
+
+    新号插件推 cookie 落库时 cookie_status='unknown',若巡检只认 valid,这个号永远
+    没人替它检测转正,也就永远当不了矩阵互动方(账号 10/11 实例)。
+    invalid / captcha / restricted 维持不巡:那三态需人工处置,自动重试只会把限流催得更狠。
+    """
+    valid_id = await _add_account(smk, "有效号", "valid", [{"name": "a", "value": "x"}])
+    unknown_id = await _add_account(smk, "新号", "unknown", [{"name": "b", "value": "y"}])
+    await _add_account(smk, "新号无cookie", "unknown", cookies=None)
+    await _add_account(smk, "失效号", "invalid", [{"name": "c", "value": "z"}])
+    await _add_account(smk, "验证码号", "captcha", [{"name": "d", "value": "z"}])
+    await _add_account(smk, "风控号", "restricted", [{"name": "e", "value": "z"}])
+
+    seen: list[int] = []
+
+    def fake_check(account_id, cookies, probe_user_id=None):
+        seen.append(account_id)
+        return {"status": "captcha", "user_info": None}
+
+    monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    await checker.check_once()
+
+    # 无 cookie 的 unknown 号连选都不该被选(检测必败,纯浪费一次浏览器)
+    assert seen == [valid_id, unknown_id]
+
+
+# ---------------- 转正引导链 ----------------
+
+
+async def test_patrol_unknown_to_valid_kicks_onboarding_chain(smk, monkeypatch):
+    """unknown → valid:巡检写回后登记台账同步 + newcomer 补量各一条。
+
+    这两条是新号融进矩阵的两个方向:台账同步把他的历史笔记入库(同步完成会经
+    schedule_after_sync 让其余号来互动他),newcomer 补量让他去互动别人的历史笔记。
+    """
+    acc_id = await _add_account(smk, "新号", "unknown", [{"name": "a", "value": "x"}])
+
+    def fake_check(account_id, cookies, probe_user_id=None):
+        return {"status": "valid", "user_info": None}
+
+    monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    await checker.check_once()
+
+    sync_jobs = await _jobs(smk, "note_ledger_sync")
+    assert len(sync_jobs) == 1
+    assert sync_jobs[0].account_id == acc_id
+    assert sync_jobs[0].operator_id == 0  # 非请求上下文的进程内直调
+    assert sync_jobs[0].status == "queued"
+
+    backfill_jobs = await _jobs(smk, "interaction_backfill")
+    assert len(backfill_jobs) == 1
+    assert backfill_jobs[0].account_id == acc_id
+    payload = json.loads(backfill_jobs[0].payload)
+    assert payload == {
+        "scope": "newcomer",
+        "target_account_id": None,
+        "actor_account_id": acc_id,
+        "limit": None,
+    }
+
+
+async def test_patrol_valid_to_valid_skips_onboarding_chain(smk, monkeypatch):
+    """valid → valid:老号每轮巡检都过这条路,绝不能每轮都叠一对引导任务。"""
+    await _add_account(smk, "老号", "valid", [{"name": "a", "value": "x"}])
+
+    def fake_check(account_id, cookies, probe_user_id=None):
+        return {"status": "valid", "user_info": None}
+
+    monkeypatch.setattr(checker_mod.sync_client, "check_login_once", fake_check)
+
+    checker = CookieChecker(smk, interval=999, account_gap=0)
+    await checker.check_once()
+
+    assert await _jobs(smk, "note_ledger_sync") == []
+    assert await _jobs(smk, "interaction_backfill") == []
 
 
 async def test_start_stop_runs_at_least_one_cycle(smk, monkeypatch):
