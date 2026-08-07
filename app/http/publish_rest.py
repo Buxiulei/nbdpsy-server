@@ -333,9 +333,13 @@ MANIFEST_ENTRIES = [
         "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
                  "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。空请求体 {} 为 no-op "
                  "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。"
-                 "**媒体类型改不了,而且是硬拒不是靠自觉**:本端点没有 video 参数(图文→视频"
-                 "自然不可达),给**视频任务**传 images 一律 422「视频任务不可改成图文,"
-                 "请取消后重建」,库里一个字节不动。视频任务能改的是标题/正文/话题/时间。"
+                 "**视频任务能改什么**:title / content / topics / schedule_time 与图文任务"
+                 "**完全一样**,照常可改。**只有 images 是硬拒**:给视频任务传 images 一律 "
+                 "422「视频任务不可改图片,请取消后重建」,images_json 与 video_path 都一个"
+                 "字节不动(空数组同样拒——显式传这个字段就是在选图文那条路)。"
+                 "为什么硬拒而不是照写:runner 是按 video_path 路由的,images 写进去也永远"
+                 "不生效,你却会拿到 ok:true —— 那是比报错危险得多的静默态。"
+                 "本端点没有 video 参数,所以反方向(图文任务想变视频)自然不可达。"
                  "要换媒体:cancel 掉再建一条新的。",
     },
 ]
@@ -566,14 +570,15 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
                 raise ValueError("content 不可为 null(不改请省略该字段)")
             changes["content"] = payload.content
         if "images" in fields:
-            # 视频任务硬拒改图 —— 本端点没有 video 参数,那只挡住了「图文→视频」一个方向;
-            # 反方向若放任 images 落库,一条视频任务会**静默变成图文任务**(video_path 还
-            # 留在库里),直到发布时才炸。类型迁移是破坏性决定,必须显式拒绝,不能靠 manifest
-            # 里一句警告兜底。422 与本仓 409/429 同源,走 HTTPException 的 detail 体。
+            # 视频任务硬拒改图。放任 images 落库产生的**不是**"改成了图文任务",而是第三种
+            # 没人预期的迷惑态:images_json 写进去了、video_path 还在,而 runner 是按
+            # video_path 路由的 —— 图片永远不生效,调用方却拿到 ok:true,只能等笔记发出来
+            # 人工看才发现。破坏性/类型迁移决定必须显式拒绝,不靠 manifest 里一句警告兜底。
+            # 422 走 HTTPException 的 detail 体,与本仓既有的 409/429 同一个通道。
             if job.video_path:
                 raise HTTPException(
                     status_code=422,
-                    detail="视频任务不可改成图文,请取消后重建",
+                    detail="视频任务不可改图片,请取消后重建",
                 )
             imgs = payload.images or []
             if not imgs:

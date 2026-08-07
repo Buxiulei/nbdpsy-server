@@ -102,8 +102,8 @@ async def test_video_only_creates_job_with_video_path(tmp_path, monkeypatch):
         assert fake.submitted == [job_id]
         async with db_module.async_session() as s:
             job = await s.get(PublishJob, job_id)
-            assert job.video_path == video
-            assert json.loads(job.images_json) == []
+            assert job.video_path == video, "video_path 不许被动"
+            assert json.loads(job.images_json) == [], "images_json 不许被写进去"
 
 
 async def test_video_bad_extension_422(tmp_path, monkeypatch):
@@ -298,12 +298,12 @@ async def _make_video_job(c, tmp_path, key: str, acc: int) -> tuple:
 
 
 async def test_patch_images_onto_video_job_is_hard_rejected(tmp_path, monkeypatch):
-    """给视频任务 PATCH images → 422 硬拒,不做静默类型转换。
+    """给视频任务 PATCH images → 422 硬拒,且库里两列都不许动。
 
-    本端点没有 video 参数(换媒体=换内容,取消重建语义更清楚)。但"没有参数"只挡住了
-    图文→视频那个方向;反方向若放任 images 落库,一条视频任务会**静默变成图文任务**,
-    video_path 还留在库里,直到发布时才炸。类型迁移这种破坏性决定必须显式拒绝,
-    不能靠文档里一句警告兜底。
+    放任 images 落库产生的**不是**"改成了图文任务",而是第三种没人预期的迷惑态:
+    images_json 写进去了、video_path 还在,而 runner 按 video_path 路由 —— 图片永远
+    不生效,调用方却拿到 ok:true,只能等笔记发出来人工看才发现。比报错危险得多,
+    所以必须硬拒,不能靠 manifest 里一句警告兜底。
     """
     async with rest_client(tmp_path, monkeypatch) as c:
         _install_fake_scheduler()
@@ -316,12 +316,12 @@ async def test_patch_images_onto_video_job_is_hard_rejected(tmp_path, monkeypatc
             headers=bearer("op-video-patch"),
         )
         assert r.status_code == 422, r.text
-        assert "视频任务不可改成图文" in r.text
+        assert "视频任务不可改图片" in r.text
         # 库里一个字节都不许动
         async with db_module.async_session() as s:
             job = await s.get(PublishJob, job_id)
-            assert job.video_path == video
-            assert json.loads(job.images_json) == []
+            assert job.video_path == video, "video_path 不许被动"
+            assert json.loads(job.images_json) == [], "images_json 不许被写进去"
 
 
 async def test_patch_empty_images_onto_video_job_also_rejected(tmp_path, monkeypatch):
