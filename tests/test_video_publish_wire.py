@@ -10,6 +10,29 @@ from pathlib import Path
 import pytest
 
 
+# ---------------- 关键链路假件:spy 形态(不许 TypeError 被吞着过测试) ----------------
+#
+# 为什么假件必须收 **kw、且必须记账:
+# sync_client 调 apply_original_declaration 时**无条件**带 handle_consent_modal kwarg,
+# 而那个调用点包在 try/except Exception 里(辅助步绝不阻断发布)。假件若把签名锁成
+# (page, human),多出来的 kwarg 会 TypeError → 被 except 吞成 status=error → **测试照绿,
+# 但原创声明那一步在该用例里从来没被真正执行过**。这与图文生产那个"关掉弹窗当成功"是
+# 同型的静默失效,只是长在测试层。故:签名放宽 + 显式记账 + 断言调用真的发生并带了预期
+# kwarg —— 三样缺一不可,只放宽签名而不断言,下次照样悄悄退化。
+
+
+def _declaration_spy(result=None):
+    """返回 (假件, 记录字典)。记录 called/kwargs,供断言"调用真发生且带对参数"。"""
+    seen = {"called": False, "kwargs": None}
+
+    def _fake(page, human, **kw):
+        seen["called"] = True
+        seen["kwargs"] = kw
+        return dict(result or {"status": "done"})
+
+    return _fake, seen
+
+
 # ---------------- sync_client.publish_note 分支路由 ----------------
 
 
@@ -367,10 +390,8 @@ def test_video_branch_component_failure_does_not_block_publish(monkeypatch):
 
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
-    monkeypatch.setattr(
-        sc, "apply_original_declaration",
-        lambda page, human: {"status": "done"},
-    )
+    declaration, declared = _declaration_spy()
+    monkeypatch.setattr(sc, "apply_original_declaration", declaration)
     monkeypatch.setattr(sc, "ComponentResponses", lambda: type(
         "R", (), {"attach": lambda self, p: None, "detach": lambda self: None})())
     monkeypatch.setattr(sc, "apply_components", lambda *a, **k: {
@@ -386,6 +407,10 @@ def test_video_branch_component_failure_does_not_block_publish(monkeypatch):
     assert "step7" in holder["atomic"].calls
     assert r["components"]["activity"]["status"] == "error"
     assert "activity_section_absent" in r["components"]["activity"]["reason"]
+    # 原创声明那一步必须**真的被执行到**(此前这里的假件签名锁死,TypeError 被 try/except
+    # 吞成 status=error,断言照过而这一步其实从没跑过)
+    assert declared["called"] is True, "原创声明步没被执行到"
+    assert declared["kwargs"] == {"handle_consent_modal": True}
 
 
 def test_account_worker_video_job_passes_components(monkeypatch):
@@ -505,7 +530,10 @@ def test_cover_failure_does_not_block_publish(monkeypatch):
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
     monkeypatch.setattr(sc, "apply_original_declaration",
                         lambda page, human, **kw: {"status": "done"})
-    monkeypatch.setattr(sc, "apply_video_cover", lambda p, h, c: {
+    # 签名放宽同上:调用点包在 try/except 里,锁死签名的假件会把 TypeError 吞成
+    # status=error,用例照绿而封面步其实没跑。今天签名是对的,放宽是为了它以后长参数时
+    # 仍然会**红**而不是悄悄退化。
+    monkeypatch.setattr(sc, "apply_video_cover", lambda p, h, c, **k: {
         "status": "error",
         "reason": "cover_entry_not_found: 页面上没有「设置封面」入口",
         "observed": {"cover_section_text": ""},
