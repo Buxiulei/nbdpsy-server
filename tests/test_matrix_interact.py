@@ -12,10 +12,12 @@ patch 纪律:打在被测模块的命名空间(顶层 import 的依赖),不是�
 """
 
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -24,6 +26,8 @@ from sqlalchemy.ext.asyncio import (
 
 import app.core.db as db_module
 from app.browser import matrix_interact as browser_mi
+from app.models.risk_event import RiskEvent
+from app.models.xhs_account import XhsAccount
 from app.services import browser_jobs_repo as repo
 from app.services import matrix_interact as svc
 
@@ -1155,7 +1159,7 @@ def test_schedule_selects_valid_accounts_excluding_publisher(matrix_db):
 
 
 def test_schedule_payload_carries_locator_and_window(matrix_db):
-    """payload 带主页定位三件套 + 窗口内随机 not_before;**不再有 comment 字段**。"""
+    """payload 是**笔记列表**形态:每条带主页定位三件套,任务级带窗口内随机 not_before。"""
     _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
     _add_account(matrix_db, 2, "矩阵号A", "valid")
     _add_published_job(matrix_db, 88, 1, "焦虑发作时的五个自救动作")
@@ -1164,23 +1168,44 @@ def test_schedule_payload_carries_locator_and_window(matrix_db):
     svc.schedule_matrix_interact(matrix_db, 88)
 
     payload = repo.get_job_sync(matrix_db, _read_jobs(matrix_db)[0]["id"])["payload"]
-    assert payload["publisher_user_id"] == "pub-uid"
-    assert payload["title"] == "焦虑发作时的五个自救动作"
-    assert payload["source_publish_job_id"] == 88
+    assert len(payload["notes"]) == 1
+    note = payload["notes"][0]
+    assert note["publisher_user_id"] == "pub-uid"
+    assert note["title"] == "焦虑发作时的五个自救动作"
+    assert note["source_publish_job_id"] == 88
+    assert note["publisher_account_id"] == 1
     # 评论已从矩阵互动移除(独立走 note_comment),payload 里不该再有这个字段
-    assert "comment" not in payload
+    assert "comment" not in payload and "comment" not in note
     not_before = datetime.fromisoformat(payload["not_before"])
     assert before <= not_before <= before + timedelta(seconds=svc.WINDOW_SECONDS + 1)
 
 
 def test_schedule_is_idempotent_per_publish_job(matrix_db):
-    """同一发布重复调不重复登记(钩子幂等)。"""
+    """同一发布重复调不重复登记(钩子幂等):既不新建行,**也不往列表里补一条**。"""
     _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
     _add_account(matrix_db, 2, "矩阵号A", "valid")
     _add_published_job(matrix_db, 99, 1, "拖延的三个成因")
 
     assert len(svc.schedule_matrix_interact(matrix_db, 99)) == 1
     assert svc.schedule_matrix_interact(matrix_db, 99) == []
+    rows = _read_jobs(matrix_db)
+    assert len(rows) == 1
+    # 合并登记上线后,幂等最容易破的地方从"多一行"变成"多一条 notes"——钉死它
+    assert len(repo.get_job_sync(matrix_db, rows[0]["id"])["payload"]["notes"]) == 1
+
+
+def test_schedule_idempotency_reads_legacy_single_payload(matrix_db):
+    """在途的**旧单篇** payload 也算登记过:部署那一刻的在飞任务不能被重复登记一遍。"""
+    _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
+    _add_account(matrix_db, 2, "矩阵号A", "valid")
+    _add_published_job(matrix_db, 55, 1, "旧形态在途")
+    repo.enqueue_sync(
+        matrix_db, "matrix_interact",
+        {"source_publish_job_id": 55, "publisher_user_id": "pub-uid", "title": "旧形态在途"},
+        0, account_id=2,
+    )
+
+    assert svc.schedule_matrix_interact(matrix_db, 55) == []
     assert len(_read_jobs(matrix_db)) == 1
 
 
@@ -1199,7 +1224,198 @@ def test_schedule_never_raises_on_broken_db():
     assert svc.schedule_matrix_interact("/nonexistent/dir/nope.db", 1) == []
 
 
-# ---------------- execute 契约 ----------------
+# ---------------- 合并登记:同号的待互动笔记并进同一条任务 ----------------
+
+
+def _payload_of(db_path: str, job_id: str) -> dict:
+    return repo.get_job_sync(db_path, job_id)["payload"]
+
+
+def test_schedule_merges_into_queued_job_of_same_account(matrix_db):
+    """同号已有 queued 的同 kind 任务 → 并进它的 notes,**绝不新建第二条**。
+
+    这是本次改动的核心:2026-08-07 生产实测一小时发 4 篇 → 26 次会话,把全矩阵九个号
+    的会话额度(4 次/号/小时)全部打满,队列里 11 条其它任务全部饿死。
+    """
+    _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
+    _add_account(matrix_db, 2, "矩阵号A", "valid")
+    _add_account(matrix_db, 3, "矩阵号B", "valid")
+    _add_published_job(matrix_db, 101, 1, "第一篇")
+    _add_published_job(matrix_db, 102, 1, "第二篇")
+
+    first = svc.schedule_matrix_interact(matrix_db, 101)
+    second = svc.schedule_matrix_interact(matrix_db, 102)
+
+    rows = _read_jobs(matrix_db)
+    assert len(rows) == 2  # 两个矩阵号各一条,**不是四条**
+    assert sorted(second) == sorted(first)  # 第二篇并进了同一批任务,不新开会话
+    for row in rows:
+        notes = _payload_of(matrix_db, row["id"])["notes"]
+        assert [n["title"] for n in notes] == ["第一篇", "第二篇"]
+        assert [n["source_publish_job_id"] for n in notes] == [101, 102]
+
+
+def test_schedule_never_merges_into_running_job(matrix_db):
+    """已被领走(running)的任务不能再并 —— 它的 payload 早被读进执行方,并了也白并。"""
+    _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
+    _add_account(matrix_db, 2, "矩阵号A", "valid")
+    _add_published_job(matrix_db, 111, 1, "第一篇")
+    _add_published_job(matrix_db, 112, 1, "第二篇")
+
+    running_id = svc.schedule_matrix_interact(matrix_db, 111)[0]
+    with sqlite3.connect(matrix_db) as conn:
+        conn.execute("UPDATE browser_jobs SET status='running' WHERE id=?", (running_id,))
+        conn.commit()
+
+    new_id = svc.schedule_matrix_interact(matrix_db, 112)[0]
+
+    assert new_id != running_id
+    assert len(_read_jobs(matrix_db)) == 2
+    assert [n["title"] for n in _payload_of(matrix_db, running_id)["notes"]] == ["第一篇"]
+    assert [n["title"] for n in _payload_of(matrix_db, new_id)["notes"]] == ["第二篇"]
+
+
+def test_schedule_merges_into_legacy_single_payload(matrix_db):
+    """在途的旧单篇任务也能被并进去:部署当天的在飞任务不该白起一次额外会话。"""
+    _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
+    _add_account(matrix_db, 2, "矩阵号A", "valid")
+    _add_published_job(matrix_db, 121, 1, "新来的")
+    legacy = repo.enqueue_sync(
+        matrix_db, "matrix_interact",
+        {"source_publish_job_id": 120, "publisher_user_id": "pub-uid", "title": "旧形态"},
+        0, account_id=2,
+    )
+
+    assert svc.schedule_matrix_interact(matrix_db, 121) == [legacy]
+
+    payload = _payload_of(matrix_db, legacy)
+    assert len(_read_jobs(matrix_db)) == 1
+    assert payload["title"] == "旧形态"  # 旧字段原样留着,执行方按兼容口径读
+    assert [n["title"] for n in payload["notes"]] == ["新来的"]
+
+
+def test_concurrent_schedule_never_loses_a_note(matrix_db):
+    """十二个发布**同时**并进同一条在途任务:笔记一条都不许丢。
+
+    先登记一篇造出那条 queued 任务,后面十二个线程走的就全是合并路径 —— 读-改-写实现
+    在这里会丢笔记(几个线程读到同一份 payload、各自加一条、后写的整份覆盖先写的),
+    而丢掉的那篇没有任何地方会补,永远不会被互动。
+
+    只断言"没丢",不断言"只有一条任务":并发下若干线程同时发现那条任务刚被领走而各建
+    一条是合理的,丢笔记才是缺陷。
+    """
+    _add_account(matrix_db, 1, "发布者", "valid", user_id="pub-uid")
+    _add_account(matrix_db, 2, "矩阵号A", "valid")
+    _add_published_job(matrix_db, 200, 1, "先手那篇")
+    svc.schedule_matrix_interact(matrix_db, 200)  # 造出待合并的 queued 任务
+
+    publish_ids = list(range(201, 213))
+    for pid in publish_ids:
+        _add_published_job(matrix_db, pid, 1, f"并发第{pid}篇")
+
+    barrier = threading.Barrier(len(publish_ids))
+    errors: list[Exception] = []
+
+    def run(pid: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            svc.schedule_matrix_interact(matrix_db, pid)
+        except Exception as exc:  # noqa: BLE001 — 线程里的异常要带回主线程断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(pid,)) for pid in publish_ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == []
+    landed = [
+        n["source_publish_job_id"]
+        for row in _read_jobs(matrix_db)
+        for n in _payload_of(matrix_db, row["id"])["notes"]
+    ]
+    assert sorted(landed) == [200] + publish_ids  # 既不丢,也不重复
+
+
+# ---------------- execute 契约(一轮一会话做多篇) ----------------
+
+
+class _FakeWallPage:
+    """假 page:只提供撞墙判据要用的 url 与分型要用的正文。"""
+
+    def __init__(self):
+        self.url = "https://www.xiaohongshu.com/user/profile/pub-uid"
+
+    def evaluate(self, _js):
+        return "请用小红书 App 扫码验证"
+
+
+class _FakeSyncClient:
+    """假 SyncClient:**建了几次 = 起了几次会话**,这正是风控红线要数的东西。"""
+
+    instances: list["_FakeSyncClient"] = []
+
+    def __init__(self, account_id, cookies, **_kw):
+        self.account_id = account_id
+        self.page = _FakeWallPage()
+        self.stopped = False
+        _FakeSyncClient.instances.append(self)
+
+    def start(self):
+        return {"success": True}
+
+    def stop(self):
+        self.stopped = True
+
+
+def _note(title: str, publish_job_id: int = 1, user_id: str = "pub-uid") -> dict:
+    """构造 payload 里的一条待互动笔记。"""
+    return {
+        "source_publish_job_id": publish_job_id,
+        "publisher_account_id": 1,
+        "publisher_user_id": user_id,
+        "title": title,
+    }
+
+
+@pytest.fixture
+def no_browser(monkeypatch):
+    """禁掉真浏览器与真等待;返回 ``(calls, sleeps, script)``。
+
+    - ``calls``:逐篇被互动的标题(断言顺序、截断与撞墙即停);
+    - ``sleeps``:篇间抖动秒数(断言这层闸真的在);
+    - ``script``:``{title: 结果 / "wall" / "locate_failed"}``,注入某篇的返回。
+    """
+    _FakeSyncClient.instances.clear()
+    calls: list[str] = []
+    sleeps: list[float] = []
+    script: dict[str, object] = {}
+
+    def fake_interact(page, account_id, publisher_user_id, title, note_id=None):
+        calls.append(title)
+        planned = script.get(title)
+        if planned == "wall":
+            # 真实撞墙的形态:互动过程中被重定向到验证页
+            page.url = "https://www.xiaohongshu.com/website-login/captcha?verifyType=124"
+            raise browser_mi.MatrixInteractError("profile_not_loaded: 主页未渲染出卡片")
+        if planned == "locate_failed":
+            raise browser_mi.MatrixInteractError("note_not_found: 没找到")
+        if isinstance(planned, dict):
+            return planned
+        return {
+            "note_url": f"https://www.xiaohongshu.com/explore/{title}",
+            "actions": {"like": {"status": "done"}, "collect": {"status": "done"}},
+        }
+
+    async def fake_cookies(_account_id):
+        return [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
+
+    monkeypatch.setattr(svc, "SyncClient", _FakeSyncClient)
+    monkeypatch.setattr(svc, "interact_with_note", fake_interact)
+    monkeypatch.setattr(svc.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(svc, "load_account_cookies", fake_cookies)
+    return calls, sleeps, script
 
 
 async def test_execute_returns_error_when_payload_incomplete():
@@ -1208,32 +1424,22 @@ async def test_execute_returns_error_when_payload_incomplete():
     assert "error" in result
 
 
-async def test_execute_converges_locate_failure(monkeypatch):
-    """定位类失败(MatrixInteractError)收敛成 {"error": reason},不上抛。"""
+async def test_execute_converges_locate_failure(no_browser):
+    """定位类失败(MatrixInteractError)收敛进这一篇的 error,整轮落 error 不上抛。"""
+    calls, _sleeps, script = no_browser
+    script["标题"] = "locate_failed"
 
-    async def fake_load(_account_id):
-        return [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
+    result = await svc.execute(2, {"notes": [_note("标题")]})
 
-    def boom(*_args):
-        raise browser_mi.MatrixInteractError("note_not_found: 没找到")
-
-    monkeypatch.setattr(svc, "load_account_cookies", fake_load)
-    monkeypatch.setattr(svc, "_interact_sync", boom)
-
-    result = await svc.execute(2, {"publisher_user_id": "u1", "title": "标题"})
-    assert result == {"error": "note_not_found: 没找到"}
+    assert calls == ["标题"]
+    assert result["notes"][0]["error"] == "note_not_found: 没找到"
+    assert "error" in result  # 唯一一篇失败 = 整轮失败,台账必须落 error
 
 
-async def test_execute_passes_forensics_through(monkeypatch):
-    """发布后互动这条路的服务层不加工:取证原样落 ``browser_jobs.result``。
-
-    这层直接 return 浏览器动作的返回值,取证"顺带就过去了"—— 正因为是顺带的,更要有
-    用例钉住:哪天这里改成挑字段重组结果,现场证据会**悄无声息**地丢掉。
-    """
-    async def fake_load(_account_id):
-        return [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
-
-    failed = {
+async def test_execute_passes_forensics_through(no_browser):
+    """取证原样透传进逐篇结果:哪天汇总改成挑字段重组,现场证据会**悄无声息**地丢掉。"""
+    _calls, _sleeps, script = no_browser
+    script["标题"] = {
         "note_url": "https://www.xiaohongshu.com/explore/x",
         "actions": {
             "like": {"status": "error", "reason": "点不动",
@@ -1243,13 +1449,154 @@ async def test_execute_passes_forensics_through(monkeypatch):
         "error": "点赞与收藏均失败",
         "forensics": {"url": "https://x/captcha", "engage_bar": False},
     }
-    monkeypatch.setattr(svc, "load_account_cookies", fake_load)
-    monkeypatch.setattr(svc, "_interact_sync", lambda *a, **k: failed)
 
-    result = await svc.execute(2, {"publisher_user_id": "u1", "title": "标题"})
+    result = await svc.execute(2, {"notes": [_note("标题")]})
 
-    assert result["forensics"] == {"url": "https://x/captcha", "engage_bar": False}
-    assert result["actions"]["like"]["forensics"]["engage_bar"] is False
+    entry = result["notes"][0]
+    assert entry["forensics"] == {"url": "https://x/captcha", "engage_bar": False}
+    assert entry["actions"]["like"]["forensics"]["engage_bar"] is False
+
+
+async def test_round_runs_in_one_session_with_jitter(no_browser):
+    """一轮 = **一次会话**做多篇;篇间抖动落在 [60, 240] 秒(与互动补量同口径)。"""
+    calls, sleeps, _script = no_browser
+    payload = {"notes": [_note(f"标题{i}", publish_job_id=i) for i in range(3)]}
+
+    result = await svc.execute(2, payload)
+
+    assert len(_FakeSyncClient.instances) == 1  # 3 篇共用一个 camoufox,不是一篇起一次
+    assert _FakeSyncClient.instances[0].stopped is True
+    assert calls == ["标题0", "标题1", "标题2"]
+    assert result["picked"] == 3 and result["handled"] == 3
+    assert result["liked"] == 3 and result["collected"] == 3
+    assert result["remaining"] == []
+    assert "error" not in result
+    assert len(sleeps) == 2  # 篇间才等,最后一篇之后不等
+    assert all(svc.MIN_GAP_SECONDS <= s <= svc.MAX_GAP_SECONDS for s in sleeps)
+
+
+async def test_round_limit_truncates_and_carries_over(jobs_db, no_browser, monkeypatch):
+    """超单轮上限的部分**不丢**:原样排进下一轮,且不许立刻再起一次会话。"""
+    monkeypatch.setattr(svc.settings, "MATRIX_INTERACT_ROUND_LIMIT", 2)
+    calls, _sleeps, _script = no_browser
+    payload = {"notes": [_note(f"标题{i}", publish_job_id=i) for i in range(5)]}
+    before = datetime.utcnow()
+
+    result = await svc.execute(2, payload)
+
+    assert calls == ["标题0", "标题1"]
+    assert result["picked"] == 2 and result["handled"] == 2
+    assert [n["title"] for n in result["remaining"]] == ["标题2", "标题3", "标题4"]
+
+    rows = _read_jobs(jobs_db)
+    assert len(rows) == 1 and rows[0]["status"] == "queued" and rows[0]["account_id"] == 2
+    assert result["carry_over_job_id"] == rows[0]["id"]
+    carried = _payload_of(jobs_db, rows[0]["id"])
+    assert [n["title"] for n in carried["notes"]] == ["标题2", "标题3", "标题4"]
+    assert carried["notes"][0]["source_publish_job_id"] == 2  # 归属信息原样带走
+    # 这个号刚烧掉一次会话,下一轮至少隔一个完整窗口再来
+    assert datetime.fromisoformat(carried["not_before"]) >= before + timedelta(
+        seconds=svc.WINDOW_SECONDS
+    )
+
+
+async def test_budget_exhausted_leaves_rest_for_next_round(
+    jobs_db, no_browser, monkeypatch
+):
+    """时间预算用尽就收工(别撞上账号子进程硬超时被强杀),没做的接着排下一轮。"""
+    monkeypatch.setattr(svc, "ROUND_BUDGET_SECONDS", 0)
+    calls, _sleeps, _script = no_browser
+    payload = {"notes": [_note(f"标题{i}", publish_job_id=i) for i in range(3)]}
+
+    result = await svc.execute(2, payload)
+
+    assert calls == ["标题0"]
+    assert result["picked"] == 3 and result["handled"] == 1
+    assert [n["title"] for n in result["remaining"]] == ["标题1", "标题2"]
+    assert [
+        n["title"] for n in _payload_of(jobs_db, _read_jobs(jobs_db)[0]["id"])["notes"]
+    ] == ["标题1", "标题2"]
+
+
+async def test_wall_aborts_round_and_keeps_finished_part(jobs_db, no_browser):
+    """撞墙:立刻中止不碰剩余篇,已完成的照常记账,号置 restricted 并落 risk_events。"""
+    calls, _sleeps, script = no_browser
+    async with db_module.async_session() as session:
+        session.add(XhsAccount(id=2, name="矩阵号A", cookie_status="valid"))
+        await session.commit()
+    script["标题1"] = "wall"
+    payload = {"notes": [_note(f"标题{i}", publish_job_id=i) for i in range(3)]}
+
+    result = await svc.execute(2, payload)
+
+    assert calls == ["标题0", "标题1"]  # 第三篇一下都没碰
+    assert "撞风控墙" in result["error"]
+    assert [n["title"] for n in result["notes"]] == ["标题0"]  # 已完成的部分照常记账
+    assert result["liked"] == 1 and result["collected"] == 1
+    # 号已被挂墙,绝不能再排一轮把它往墙上撞第二次
+    assert result["carry_over_job_id"] is None
+    assert _read_jobs(jobs_db) == []
+    async with db_module.async_session() as session:
+        account = await session.get(XhsAccount, 2)
+        events = (await session.execute(select(RiskEvent))).scalars().all()
+    assert account.cookie_status == "restricted"
+    assert len(events) == 1 and events[0].source == "matrix_interact"
+
+
+async def test_browser_start_failure_does_not_reschedule(jobs_db, no_browser, monkeypatch):
+    """浏览器起不来 = 整轮 error,**不排下一轮**:否则就是对着坏掉的号无限重试。"""
+    monkeypatch.setattr(_FakeSyncClient, "start", lambda self: {"success": False, "error": "boom"})
+    payload = {"notes": [_note("标题0"), _note("标题1")]}
+
+    result = await svc.execute(2, payload)
+
+    assert "browser_start_failed" in result["error"]
+    assert result["carry_over_job_id"] is None
+    assert _read_jobs(jobs_db) == []
+
+
+async def test_legacy_single_note_payload_still_runs(no_browser):
+    """旧的单篇 payload 照跑:部署那一刻在途的任务不能因为换形态就崩。"""
+    calls, _sleeps, _script = no_browser
+
+    result = await svc.execute(
+        2, {"source_publish_job_id": 7, "publisher_user_id": "pub-uid", "title": "旧形态"}
+    )
+
+    assert calls == ["旧形态"]
+    assert result["picked"] == 1 and result["liked"] == 1
+    assert len(_FakeSyncClient.instances) == 1
+
+
+async def test_legacy_payload_with_appended_notes_runs_both(no_browser):
+    """旧单篇被并进新笔记后的混合形态:两篇都要做,顺序是旧的在前。"""
+    calls, _sleeps, _script = no_browser
+
+    result = await svc.execute(
+        2,
+        {
+            "source_publish_job_id": 7,
+            "publisher_user_id": "pub-uid",
+            "title": "旧形态",
+            "notes": [_note("新来的", publish_job_id=8)],
+        },
+    )
+
+    assert calls == ["旧形态", "新来的"]
+    assert result["picked"] == 2 and result["handled"] == 2
+    assert len(_FakeSyncClient.instances) == 1
+
+
+async def test_partial_failure_is_not_a_round_failure(no_browser):
+    """一篇失败不拖垮整轮:失败计数如实报,但任务不落 error(其余篇是真做成了的)。"""
+    _calls, _sleeps, script = no_browser
+    script["标题0"] = "locate_failed"
+    payload = {"notes": [_note("标题0"), _note("标题1")]}
+
+    result = await svc.execute(2, payload)
+
+    assert result["failed"] == 1 and result["liked"] == 1
+    assert "error" not in result
 
 
 # ---------------- 台账纪律:延时排期 + 非幂等 ----------------

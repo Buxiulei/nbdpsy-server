@@ -90,6 +90,19 @@
 钩子内为每个矩阵账号登记一条 `browser_jobs`(`kind='matrix_interact'`),各自分配
 窗口内的随机执行时刻。
 
+> **2026-08-07 修订:一条任务 = 一次会话里做多篇,不是一篇一任务。**
+> 本节原方案是"一篇笔记一次浏览器会话"。生产实测近一小时发 4 篇 → 扇出 **26 次
+> matrix_interact 会话**(每篇让其余约 7 个号各起一次),而派发层的同号会话总闸是
+> 4 次/号/小时(风控红线),光发布扇出就把全矩阵九个号的额度全部打满,队列里 11 条
+> 其它任务全部饿死(running=0、queued=11)。
+> 现在登记时若该号**已有 queued 的同 kind 任务**,就把这篇并进它 payload 的 `notes`
+> 列表(单条 `UPDATE ... json_insert(..., '$.notes[#]', …) WHERE status='queued'`
+> 原子完成,不做读-改-写,并发登记不丢笔记);执行时一次会话里逐篇互动,篇间抖动
+> 60~240s、整轮预算 1200s、撞墙即停、单轮上限 `MATRIX_INTERACT_ROUND_LIMIT`(默认 5),
+> 没轮到的排进下一轮。语义与 `interaction_backfill` 对齐(会话频次才是被弹墙的直接
+> 原因,宁可一次会话开久一点)。payload 兼容旧的单篇形态。详见
+> `app/services/matrix_interact.py` 模块 docstring。
+
 **硬约束:延时必须落库排期,不得靠进程内 `asyncio.sleep` / `time.sleep` 等待。**
 任务领取后干等会占死全局浏览器闸(`browser_slot`),5 个号最多干等 10 分钟将阻塞
 cookie_check / note_export / 发布等所有浏览器任务。
@@ -154,3 +167,6 @@ error);为 `#like` 则拟人点击,点击后复核变为 `#liked` 方算成功�
 3. 全程 headed 真屏,日志可见 `SyncHuman` 动作轨迹。
 4. `matrix_interact` 未进 `_IDEMPOTENT_KINDS`。
 5. 无任何 JS 注入式点击/输入。
+6.(2026-08-07 修订新增)单元测试覆盖:同号 queued 任务的合并(不新建第二条)、
+   并发登记不丢笔记、一次会话跑多篇(SyncClient 只建一次)、篇间抖动、撞墙即停且已
+   完成部分照常报、单轮上限截断 + 剩余排下一轮、旧单篇 payload 兼容。
