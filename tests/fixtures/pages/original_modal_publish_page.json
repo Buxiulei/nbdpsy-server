@@ -1,0 +1,421 @@
+{
+  "account_id": 10,
+  "captured_at": "2026-08-07T06:48:19.414808+00:00",
+  "step1": {
+    "success": true
+  },
+  "step2": {
+    "success": true,
+    "uploaded_count": 1
+  },
+  "step3": {
+    "success": true,
+    "edit_page_loaded": true
+  },
+  "step5": {
+    "success": true,
+    "title_length": 10,
+    "content_length": 17
+  },
+  "editor_ready_screenshot": "/home/roots/nbdpsy-server/data/scene_captures/original_modal/01_editor_ready.png",
+  "row_state_before_click": {
+    "row_present": true,
+    "row_visible": true,
+    "switch_present": true,
+    "switch_class": "d-switch d-clickable d-switch-default d-inline-block",
+    "checked": false
+  },
+  "dialogs_before_click": [
+    {
+      "tag": "DIV",
+      "cls": "el-overlay el-modal-dialog",
+      "role": null,
+      "text": "",
+      "visible": false,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "el-overlay-dialog",
+      "role": "dialog",
+      "text": "",
+      "visible": false,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      }
+    }
+  ],
+  "checked_immediately_after_click": {
+    "row_present": true,
+    "row_visible": true,
+    "switch_present": true,
+    "switch_class": "d-switch d-clickable d-switch-default d-inline-block",
+    "checked": true
+  },
+  "after_click_screenshot": "/home/roots/nbdpsy-server/data/scene_captures/original_modal/02_after_toggle_click.png",
+  "dialogs_after_click": [
+    {
+      "tag": "DIV",
+      "cls": "el-overlay el-modal-dialog",
+      "role": null,
+      "text": "",
+      "visible": false,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "el-overlay-dialog",
+      "role": "dialog",
+      "text": "",
+      "visible": false,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-modal-mask",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 2560,
+        "height": 1299
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-modal d-modal-centered d-modal-no-footer creator-modal-style",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 553,
+        "width": 716,
+        "height": 194
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-space d-space-horizontal d-space-small d-space-align-center d-modal-header",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 553,
+        "width": 716,
+        "height": 56
+      }
+    },
+    {
+      "tag": "SPAN",
+      "cls": "d-icon --color-current --color-static --size-icon-default d-modal-close d-clickable",
+      "role": null,
+      "text": "",
+      "visible": true,
+      "rect": {
+        "x": 1598,
+        "y": 573,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-modal-content",
+      "role": null,
+      "text": "1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 609,
+        "width": 716,
+        "height": 138
+      }
+    }
+  ],
+  "new_dialog_candidates": [
+    {
+      "tag": "DIV",
+      "cls": "d-modal-mask",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 2560,
+        "height": 1299
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-modal d-modal-centered d-modal-no-footer creator-modal-style",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益 1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 553,
+        "width": 716,
+        "height": 194
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-space d-space-horizontal d-space-small d-space-align-center d-modal-header",
+      "role": null,
+      "text": "笔记完成原创声明后，将获得以下权益",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 553,
+        "width": 716,
+        "height": 56
+      }
+    },
+    {
+      "tag": "DIV",
+      "cls": "d-modal-content",
+      "role": null,
+      "text": "1. 获得原创笔记标记 2. 平台保护你的作品，识别并打击搬运 我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置 声明原创",
+      "visible": true,
+      "rect": {
+        "x": 922,
+        "y": 609,
+        "width": 716,
+        "height": 138
+      }
+    }
+  ],
+  "modal_appeared": true,
+  "modal_selector_guess": ".d-modal-mask",
+  "modal_structure": {
+    "outerHTML_len": 3185,
+    "full_outerHTML": "<div class=\"d-modal-mask\" style=\"z-index: 999; background: rgba(0, 0, 0, 0.4);\"><div class=\"d-modal d-modal-centered d-modal-no-footer creator-modal-style\" style=\"width: 716px; z-index: 999;\"><div class=\"d-space d-space-horizontal d-space-small d-space-align-center d-modal-header\"><!----><h6 class=\"d-text --color-static --color-text-h6 --size-text-h6 bold\" style=\"text-underline-offset: auto;\"><!---->笔记完成原创声明后，将获得以下权益<!----><!----></h6><span class=\"d-icon --color-current --color-static --size-icon-default d-modal-close d-clickable\"><svg width=\"100%\" height=\"100%\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5.70711 19.7071C5.31658 20.0976 4.68342 20.0976 4.29289 19.7071C3.90237 19.3166 3.90237 18.6834 4.29289 18.2929L10.5858 12L4.29289 5.70711C3.90237 5.31658 3.90237 4.68342 4.29289 4.29289C4.68342 3.90237 5.31658 3.90237 5.70711 4.29289L12 10.5858L18.2929 4.29289C18.6834 3.90237 19.3166 3.90237 19.7071 4.29289C20.0976 4.68342 20.0976 5.31658 19.7071 5.70711L13.4142 12L19.7071 18.2929C20.0976 18.6834 20.0976 19.3166 19.7071 19.7071C19.3166 20.0976 18.6834 20.0976 18.2929 19.7071L12 13.4142L5.70711 19.7071Z\" fill=\"currentColor\"></path></svg></span></div><div class=\"d-modal-content\"><div data-v-0cb8c711=\"\" class=\"originalContainer\"><div data-v-0cb8c711=\"\" class=\"flexRowBox mt14\"><div data-v-0cb8c711=\"\" class=\"block1\"><div data-v-0cb8c711=\"\">1. 获得原创笔记标记</div><img data-v-0cb8c711=\"\" src=\"https://fe-static.xhscdn.com/formula-static/ugc/public/resource/image/b1.367c94f9.png\" alt=\"获得原创笔记标记\"></div><div data-v-0cb8c711=\"\" class=\"block2\"><div data-v-0cb8c711=\"\">2. 平台保护你的作品，识别并打击搬运</div><img data-v-0cb8c711=\"\" style=\"object-fit: cover;\" src=\"https://fe-static.xhscdn.com/formula-static/ugc/public/resource/image/b2.edf31418.png\" alt=\"平台保护你的作品，识别并打击搬运\"></div></div><div data-v-0cb8c711=\"\" class=\"footer\"><div data-v-0cb8c711=\"\" class=\"footerLeft\"><div data-v-0cb8c711=\"\" class=\"d-grid d-checkbox d-checkbox-main-label d-clickable bg-red\" style=\"display: inline-grid; vertical-align: top;\"><span class=\"d-checkbox-simulator --color-bg-white unchecked\"><span class=\"d-checkbox-indicator --color-bg-white --color-bg-fill-light-opaque\"><!----></span></span><input type=\"checkbox\" style=\"\"><span class=\"d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label\" style=\"text-underline-offset: auto;\"><!----><span data-v-0cb8c711=\"\" class=\"ml6\"> 我已阅读并同意 <span data-v-0be1c3e4=\"\" data-v-0cb8c711=\"\" class=\"custom-link alink\">《原创声明须知》</span> ，如滥用声明，平台将驳回并予以相关处置 </span><!----><!----><!----></span><!----></div></div><button data-v-7369c04b=\"\" data-v-0cb8c711=\"\" type=\"button\" class=\"d-button d-button-default disabled d-button-with-content --color-static bold --color-bg-fill --color-text-disabled custom-button bg-red disabled\" disabled=\"\"><div class=\"d-button-content\"><!----><span class=\"d-text --color-static --color-current --size-text-paragraph d-text-nowrap d-text-ellipsis d-text-nowrap\" style=\"text-underline-offset: auto;\"><!----><span data-v-7369c04b=\"\" class=\"circle-button-content\"> 声明原创 </span><!----><!----></span><!----></div></button><!----></div></div></div><!----></div></div>",
+    "all_inputs": [
+      {
+        "tag": "INPUT",
+        "text": "",
+        "attrs": {
+          "type": "checkbox",
+          "style": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 946,
+          "y": 703,
+          "width": 0,
+          "height": 0
+        },
+        "outerHTML": "<input type=\"checkbox\" style=\"\">"
+      }
+    ],
+    "checkboxes": [
+      {
+        "tag": "DIV",
+        "text": "我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置",
+        "attrs": {
+          "data-v-0cb8c711": "",
+          "class": "d-grid d-checkbox d-checkbox-main-label d-clickable bg-red",
+          "style": "display: inline-grid; vertical-align: top;"
+        },
+        "visible": true,
+        "rect": {
+          "x": 946,
+          "y": 691,
+          "width": 509,
+          "height": 23
+        },
+        "outerHTML": "<div data-v-0cb8c711=\"\" class=\"d-grid d-checkbox d-checkbox-main-label d-clickable bg-red\" style=\"display: inline-grid; vertical-align: top;\"><span class=\"d-checkbox-simulator --color-bg-white unchecked\"><span class=\"d-checkbox-indicator --color-bg-white --color-bg-fill-light-opaque\"><!----></span></span><input type=\"checkbox\" style=\"\"><span class=\"d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label\" style=\"text-underline-offset: auto;\"><"
+      },
+      {
+        "tag": "SPAN",
+        "text": "",
+        "attrs": {
+          "class": "d-checkbox-simulator --color-bg-white unchecked"
+        },
+        "visible": true,
+        "rect": {
+          "x": 946,
+          "y": 695,
+          "width": 16,
+          "height": 16
+        },
+        "outerHTML": "<span class=\"d-checkbox-simulator --color-bg-white unchecked\"><span class=\"d-checkbox-indicator --color-bg-white --color-bg-fill-light-opaque\"><!----></span></span>"
+      },
+      {
+        "tag": "SPAN",
+        "text": "",
+        "attrs": {
+          "class": "d-checkbox-indicator --color-bg-white --color-bg-fill-light-opaque"
+        },
+        "visible": true,
+        "rect": {
+          "x": 947,
+          "y": 696,
+          "width": 14,
+          "height": 14
+        },
+        "outerHTML": "<span class=\"d-checkbox-indicator --color-bg-white --color-bg-fill-light-opaque\"><!----></span>"
+      },
+      {
+        "tag": "INPUT",
+        "text": "",
+        "attrs": {
+          "type": "checkbox",
+          "style": ""
+        },
+        "visible": false,
+        "rect": {
+          "x": 946,
+          "y": 703,
+          "width": 0,
+          "height": 0
+        },
+        "outerHTML": "<input type=\"checkbox\" style=\"\">"
+      },
+      {
+        "tag": "SPAN",
+        "text": "我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置",
+        "attrs": {
+          "class": "d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label",
+          "style": "text-underline-offset: auto;"
+        },
+        "visible": true,
+        "rect": {
+          "x": 968,
+          "y": 691,
+          "width": 487,
+          "height": 23
+        },
+        "outerHTML": "<span class=\"d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label\" style=\"text-underline-offset: auto;\"><!----><span data-v-0cb8c711=\"\" class=\"ml6\"> 我已阅读并同意 <span data-v-0be1c3e4=\"\" data-v-0cb8c711=\"\" class=\"custom-link alink\">《原创声明须知》</span> ，如滥用声明，平台将驳回并予以相关处置 </span><!----><!----><!----></span>"
+      }
+    ],
+    "buttons": [
+      {
+        "tag": "BUTTON",
+        "text": "声明原创",
+        "attrs": {
+          "data-v-7369c04b": "",
+          "data-v-0cb8c711": "",
+          "type": "button",
+          "class": "d-button d-button-default disabled d-button-with-content --color-static bold --color-bg-fill --color-text-disabled custom-button bg-red disabled",
+          "disabled": ""
+        },
+        "visible": true,
+        "rect": {
+          "x": 1494,
+          "y": 683,
+          "width": 120,
+          "height": 40
+        },
+        "outerHTML": "<button data-v-7369c04b=\"\" data-v-0cb8c711=\"\" type=\"button\" class=\"d-button d-button-default disabled d-button-with-content --color-static bold --color-bg-fill --color-text-disabled custom-button bg-red disabled\" disabled=\"\"><div class=\"d-button-content\"><!----><span class=\"d-text --color-static --color-current --size-text-paragraph d-text-nowrap d-text-ellipsis d-text-nowrap\" style=\"text-underline-offset: auto;\"><!----><span data-v-7369c04b=\"\" class=\"circle-button-content\"> 声明原创 </span><!----><"
+      }
+    ],
+    "close_candidates": [
+      {
+        "tag": "SPAN",
+        "text": "",
+        "attrs": {
+          "class": "d-icon --color-current --color-static --size-icon-default d-modal-close d-clickable"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1598,
+          "y": 573,
+          "width": 16,
+          "height": 16
+        },
+        "outerHTML": "<span class=\"d-icon --color-current --color-static --size-icon-default d-modal-close d-clickable\"><svg width=\"100%\" height=\"100%\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5.70711 19.7071C5.31658 20.0976 4.68342 20.0976 4.29289 19.7071C3.90237 19.3166 3.90237 18.6834 4.29289 18.2929L10.5858 12L4.29289 5.70711C3.90237 5.31658 3.90237 4.68342 4.29289 4.29289C4.68342 3.90237 5.31658 3.90237 5.70711 4.29289L12 10.5858L18.2929 4.29289C18.6834 3.90237 19.3166 3.90237"
+      }
+    ],
+    "agreement_text_nodes": [
+      {
+        "tag": "SPAN",
+        "text": "我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置",
+        "attrs": {
+          "class": "d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label",
+          "style": "text-underline-offset: auto;"
+        },
+        "visible": true,
+        "rect": {
+          "x": 968,
+          "y": 691,
+          "width": 487,
+          "height": 23
+        },
+        "outerHTML": "<span class=\"d-text --color-static --color-text-title --size-text-paragraph d-text-nowrap d-text-ellipsis d-checkbox-label\" style=\"text-underline-offset: auto;\"><!----><span data-v-0cb8c711=\"\" class=\"ml6\"> 我已阅读并同意 <span data-v-0be1c3e4=\"\" data-v-0cb8c711=\"\" class=\"custom-link alink\">《原创声明须知》</span> ，如滥用声明，平台将驳回并予以相关处置 </span><!----><!----><!----></span>"
+      },
+      {
+        "tag": "SPAN",
+        "text": "我已阅读并同意 《原创声明须知》 ，如滥用声明，平台将驳回并予以相关处置",
+        "attrs": {
+          "data-v-0cb8c711": "",
+          "class": "ml6"
+        },
+        "visible": true,
+        "rect": {
+          "x": 974,
+          "y": 692,
+          "width": 481,
+          "height": 20
+        },
+        "outerHTML": "<span data-v-0cb8c711=\"\" class=\"ml6\"> 我已阅读并同意 <span data-v-0be1c3e4=\"\" data-v-0cb8c711=\"\" class=\"custom-link alink\">《原创声明须知》</span> ，如滥用声明，平台将驳回并予以相关处置 </span>"
+      },
+      {
+        "tag": "SPAN",
+        "text": "《原创声明须知》",
+        "attrs": {
+          "data-v-0be1c3e4": "",
+          "data-v-0cb8c711": "",
+          "class": "custom-link alink"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1076,
+          "y": 695,
+          "width": 107,
+          "height": 16
+        },
+        "outerHTML": "<span data-v-0be1c3e4=\"\" data-v-0cb8c711=\"\" class=\"custom-link alink\">《原创声明须知》</span>"
+      }
+    ]
+  },
+  "modal_screenshot": "/home/roots/nbdpsy-server/data/scene_captures/original_modal/03_modal_open_state.png",
+  "modal_close_attempted_via": "d-modal-close selector",
+  "modal_closed": true,
+  "checked_after_close": {
+    "row_present": true,
+    "row_visible": true,
+    "switch_present": true,
+    "switch_class": "d-switch d-clickable d-switch-default d-inline-block",
+    "checked": false
+  },
+  "final_screenshot": "/home/roots/nbdpsy-server/data/scene_captures/original_modal/04_final_state_before_cleanup.png",
+  "success": true,
+  "cleanup": {
+    "deleted": 1,
+    "remaining": 0
+  }
+}

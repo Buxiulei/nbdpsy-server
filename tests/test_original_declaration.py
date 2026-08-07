@@ -366,3 +366,53 @@ def test_image_path_behaviour_unchanged_by_default(monkeypatch):
     assert page.closed_by_x is True, "老路径就是「弹窗出现就 X 关掉」"
     assert all("同意" not in r for r in human.clicks)
     assert out["status"] == "done"  # 老路径拿乐观 checked 当终判(即本次报告的缺陷)
+
+
+# ---------------- 发布页真号探针的回放锁(account10,2026-08-07) ----------------
+
+
+def _publish_page_probe():
+    import json
+    import pathlib
+
+    path = (pathlib.Path(__file__).parent / "fixtures" / "pages"
+            / "original_modal_publish_page.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_probe_proves_publish_page_also_shows_consent_modal():
+    """**发布页也弹协议弹窗** —— 图文生产路径确实会走到这里,不是只有编辑页。"""
+    probe = _publish_page_probe()
+    assert probe["modal_appeared"] is True
+
+
+def test_probe_proves_checked_is_optimistic_but_reverts_on_close():
+    """三个数定性了图文生产的真实失败模式:
+
+    点 toggle → checked=True(乐观);X 关掉 → checked=**False**。
+    所以老逻辑的回读**没有**把它报成成功,而是重试到耗尽后落 error ——
+    是"一直没声明成功且如实报错",不是"静默假成功"。区别很大,别报错了性质。
+    """
+    probe = _publish_page_probe()
+    assert probe["checked_immediately_after_click"]["checked"] is True
+    assert probe["checked_after_close"]["checked"] is False
+
+
+def test_probe_backs_the_consent_and_confirm_selectors():
+    """选择器真值锁:协议框是可点的 .d-checkbox,「声明原创」初始为 disabled。
+
+    平台改版把这两样任何一个改了,这条会红——比等真号发布失败再回溯便宜得多。
+    """
+    probe = _publish_page_probe()
+    boxes = probe["modal_structure"]["checkboxes"]
+    clickable = [b for b in boxes
+                 if "d-checkbox" in b["attrs"].get("class", "")
+                 and "d-clickable" in b["attrs"].get("class", "")]
+    assert clickable, f"没有可点的 .d-checkbox: {[b['attrs'] for b in boxes]}"
+    assert _bnc._ORIGINAL_CONSENT_CANDIDATES[0].endswith(".d-checkbox.d-clickable")
+
+    button = probe["modal_structure"]["buttons"][0]
+    assert button["text"] == _bnc._ORIGINAL_CONFIRM_TEXT
+    # 初始禁用:原生 disabled 属性 + class 里也带 disabled(两处都读才不漏,同 step7 口径)
+    assert "disabled" in button["attrs"]
+    assert "disabled" in button["attrs"]["class"]

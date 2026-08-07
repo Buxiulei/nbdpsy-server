@@ -1477,11 +1477,13 @@ _ORIGINAL_TOGGLE_TRIES = 2
 _ORIGINAL_MODAL = ".d-modal.creator-modal-style"
 _ORIGINAL_CONSENT_TEXT = "我已阅读并同意"
 _ORIGINAL_CONFIRM_TEXT = "声明原创"
-# 协议复选框的选择器**没有夹具证据**(采集时只抓了弹窗顶层节点,没抓后代),
-# 故给候选列表并 fail-loud:一个都不命中就如实报错,绝不假装勾上了。
+# 协议复选框:首选已由**发布页真号探针**证实(account10,2026-08-07,
+# tests/fixtures/pages/original_modal_publish_page.json):可点的是那个
+# `div.d-grid.d-checkbox.d-checkbox-main-label.d-clickable`,里面的 input[type=checkbox]
+# 是 0×0 隐藏节点(点不着)。后两个候选留作平台改版时的兜底,全不命中即 fail-loud。
 _ORIGINAL_CONSENT_CANDIDATES = (
+    ".d-modal.creator-modal-style .d-checkbox.d-clickable",
     ".d-modal.creator-modal-style .d-checkbox",
-    ".d-modal.creator-modal-style input[type='checkbox']",
     ".d-modal.creator-modal-style [class*='checkbox']",
 )
 # 「声明原创」按钮当前可点否(三处 disabled 写法都读,与 step7 同口径)
