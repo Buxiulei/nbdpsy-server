@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import and_, func, update, or_, select
+from sqlalchemy import func, update, select
 
 import app.core.db as db_module
 from app.browser.browser_reaper import BrowserReaper
@@ -41,6 +41,26 @@ from app.services.interaction_backfill_scheduler import InteractionBackfillSched
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
 
+# 派发判据的唯一真源(见 app/services/queue_status.py 模块 docstring):什么算一次会话、
+# 闸放不放行、批次怎么排序、帽值默认取值。轮询端点的 queue 段读的是同一批函数 ——
+# 判据只此一份,派发层与可见性层不可能各说各话。
+from app.services.queue_status import (
+    LAYER_OPERATOR,
+    SOURCE_BROWSER,
+    SOURCE_PUBLISH,
+    browser_session_filter,
+    cap_allows,
+    configured_max_procs,
+    configured_operator_session_cap,
+    configured_session_cap,
+    layer_of,
+    norm_created,
+    publish_due_filter,
+    publish_session_filter,
+    queue_sort_key,
+    session_window_cutoff,
+)
+
 # browser_jobs 台账 repo(P1 产物):集成前分支上可能尚不存在,容缺导入 —— repo 为 None 时
 # Supervisor 跳过 browser_jobs 相关扫描(仅调度 publish_jobs),集成后自动生效;
 # 测试注入假 repo 按契约签名(recover_stale/list_dispatchable/claim_job_sync/finish_job_sync)验证。
@@ -54,9 +74,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # 已到点的发布任务积压到几条就告警(只告警,绝不据此改任务状态,理由见 _warn_publish_backlog)
 PUBLISH_BACKLOG_ALERT = 3
-
-# 同号会话频次总闸的统计窗口(秒):风控红线按"一小时几次"看,窗口就是一小时滚动
-SESSION_WINDOW_SECONDS = 3600
 
 
 def _sqlite_db_path() -> str:
@@ -119,16 +136,14 @@ class Supervisor:
             else getattr(settings, "ACCOUNT_PROC_TIMEOUT", 1800)
         )
         self._child_grace = child_grace if child_grace is not None else 10.0
-        self._max_procs = max_procs if max_procs is not None else settings.BROWSER_CONCURRENCY
+        self._max_procs = max_procs if max_procs is not None else configured_max_procs()
         self._session_cap = (
-            session_cap
-            if session_cap is not None
-            else getattr(settings, "ACCOUNT_HOURLY_SESSION_CAP", 4)
+            session_cap if session_cap is not None else configured_session_cap()
         )
         self._operator_session_cap = (
             operator_session_cap
             if operator_session_cap is not None
-            else getattr(settings, "ACCOUNT_HOURLY_OPERATOR_SESSION_CAP", 12)
+            else configured_operator_session_cap()
         )
         self._worker_tag = f"supervisor-{os.getpid()}"
         # account_id → 存活子进程(派生登记,子进程退出即回收移除)
@@ -423,34 +438,14 @@ class Supervisor:
                     PublishJob.created_by,
                 )
                 .where(PublishJob.status == "pending")
-                .where(
-                    or_(
-                        PublishJob.schedule_time.is_(None),
-                        PublishJob.schedule_time <= now,
-                    )
-                )
-                .where(
-                    or_(
-                        PublishJob.next_retry_at.is_(None),
-                        PublishJob.next_retry_at <= now,
-                    )
-                )
+                .where(publish_due_filter(now))
                 .order_by(PublishJob.id)
             )
             result = await session.execute(stmt)
             return [tuple(row) for row in result.all()]
 
-    @staticmethod
-    def _norm_created(value) -> datetime:
-        """把 created_at 归一成可排序 datetime(repo 侧可能给 ISO 字符串;缺失当最旧)。"""
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str) and value:
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                pass
-        return datetime.min
+    # created_at 归一(排序口径的一部分)在 queue_status 里,读侧排位次时按同一口径
+    _norm_created = staticmethod(norm_created)
 
     def _fair_order(self, accounts: list[int]) -> list[int]:
         """公平轮转序:新账号按账号号稳定补入轮转表尾,返回表序过滤出的有工作账号。"""
@@ -473,7 +468,7 @@ class Supervisor:
         work: dict[int, list[tuple[datetime, str, object, int]]] = {}
         for job_id, account_id, created, created_by in publish_rows:
             work.setdefault(account_id, []).append(
-                (self._norm_created(created), "publish", job_id, created_by or 0)
+                queue_sort_key(created, SOURCE_PUBLISH, job_id, created_by or 0)
             )
         for row in account_rows:
             acc = row.get("account_id")
@@ -481,9 +476,9 @@ class Supervisor:
                 # 契约上仅 op_images 允许无账号(已在 scan_once 分流),防御性跳过
                 continue
             work.setdefault(acc, []).append(
-                (
-                    self._norm_created(row.get("created_at")),
-                    "browser",
+                queue_sort_key(
+                    row.get("created_at"),
+                    SOURCE_BROWSER,
                     row["id"],
                     row.get("operator_id") or 0,
                 )
@@ -503,8 +498,8 @@ class Supervisor:
             )
             if not items:
                 continue  # 全批被会话总闸拦下:任务留队列,下轮按新窗口重估
-            publish_ids = sorted(jid for _c, kind, jid, _op in items if kind == "publish")
-            browser_ids = [jid for _c, kind, jid, _op in items if kind == "browser"]
+            publish_ids = sorted(jid for _c, src, jid, _op in items if src == SOURCE_PUBLISH)
+            browser_ids = [jid for _c, src, jid, _op in items if src == SOURCE_BROWSER]
             await self._spawn_account_worker(acc, publish_ids, browser_ids)
             dispatched.append(acc)
         # 本轮派过的账号移到轮转表尾(公平:下轮优先照顾没派到的账号)
@@ -531,24 +526,20 @@ class Supervisor:
         已知欠数:发布失败/排重试的行会把 ``started_at`` 清空(见 account_worker
         ``_apply_publish_decision``),那次真实发生过的会话事后无从计时,只能漏数。宁可
         少数不多数——多数会误伤正常派发,少数只是闸略松,业务侧自有节流兜底。
+
+        **"算不算一次会话"的行判据不写在这里**,取自 queue_status 的两个 filter——轮询
+        端点的 ``queue.detail.used`` 数的是同一批行,共用 filter 才不会两边各说一个数。
+        这里只负责投影(聚合成计数),读侧另按同一 filter 取时刻算 window_resets_at。
         """
         if not account_ids:
             return {}
-        cutoff = datetime.utcnow() - timedelta(seconds=SESSION_WINDOW_SECONDS)
+        cutoff = session_window_cutoff(datetime.utcnow())
         counts: dict[int, int] = {}
         async with self._session_factory() as session:
             browser_rows = await session.execute(
                 select(BrowserJob.account_id, func.count())
                 .where(BrowserJob.account_id.in_(account_ids))
-                .where(
-                    or_(
-                        and_(
-                            BrowserJob.status.in_(("done", "error")),
-                            BrowserJob.updated_at >= cutoff,
-                        ),
-                        BrowserJob.status == "running",
-                    )
-                )
+                .where(browser_session_filter(cutoff))
                 .group_by(BrowserJob.account_id)
             )
             for acc, n in browser_rows.all():
@@ -556,15 +547,7 @@ class Supervisor:
             publish_rows = await session.execute(
                 select(PublishJob.account_id, func.count())
                 .where(PublishJob.account_id.in_(account_ids))
-                .where(
-                    or_(
-                        and_(
-                            PublishJob.status == "published",
-                            PublishJob.started_at >= cutoff,
-                        ),
-                        PublishJob.status == "publishing",
-                    )
-                )
+                .where(publish_session_filter(cutoff))
                 .group_by(PublishJob.account_id)
             )
             for acc, n in publish_rows.all():
@@ -592,6 +575,10 @@ class Supervisor:
         证伪——skill 拿运营 apikey 跑批量逐篇组件回读,一小时 192 条 note_components_read
         全豁免直通,单号最高 51 次会话/时,是红线的 10 倍。运营配额闸
         (``OPERATOR_PENDING_QUOTA``)限的是**并发未终态数**,不限速率,拦不住这种打法。
+
+        分层与放行判据取自 queue_status(``layer_of`` / ``cap_allows``):轮询端点的
+        ``queue.blocked_by`` 用的是同一个判据,运营看到的 "session_cap" 与这里拦不拦
+        永远同进同出。
         """
         kept: list[tuple] = []
         budget = self._session_cap - recent  # 系统层剩余额度
@@ -599,18 +586,19 @@ class Supervisor:
         blocked = 0
         op_blocked = 0
         for item in items:
-            operator_id = item[3]
-            if operator_id and operator_id > 0:
-                if self._operator_session_cap <= 0 or op_budget > 0:
-                    kept.append(item)
-                    budget -= 1
-                    op_budget -= 1
-                else:
-                    op_blocked += 1
-            elif self._session_cap <= 0 or budget > 0:
+            layer = layer_of(item[3])
+            if cap_allows(
+                layer,
+                budget=budget,
+                op_budget=op_budget,
+                session_cap=self._session_cap,
+                operator_session_cap=self._operator_session_cap,
+            ):
                 kept.append(item)
                 budget -= 1
                 op_budget -= 1
+            elif layer == LAYER_OPERATOR:
+                op_blocked += 1
             else:
                 blocked += 1
         # 去重:同号连续被闸只吵一次,恢复派发后再超线才会再吵。两层各记各的

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.auth.context import current_operator
 from app.auth.guards import require_admin
 from app.core.config import settings
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.services import interaction_backfill
 from app.services.quota import assert_operator_quota
 
@@ -61,6 +61,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/interaction-backfills/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询互动补量结果",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, picked?, handled?, liked?, collected?, failed?, notes?, "
@@ -145,7 +146,7 @@ async def start_interaction_backfill_endpoint(
 async def get_interaction_backfill_endpoint(job_id: str) -> dict:
     """轮询补量结果:queued / running / done(附计数与逐篇明细)/ error / unknown。"""
     row = await load_job(job_id, interaction_backfill.JOB_KIND, "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     if row["status"] == "done":
         view.update(row.get("result") or {})
     return view

@@ -18,7 +18,7 @@ from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.xhs_account import XhsAccount
 from app.services import note_comment
 from app.services.quota import assert_operator_quota
@@ -59,6 +59,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-comments/{comment_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询评论结果",
         "admin_only": False, "params": {"comment_id": "path,str"},
         "returns": "{status, note_url?, commented?, reason?}",
@@ -126,7 +127,7 @@ async def get_note_comment_endpoint(comment_id: str) -> dict:
     直接点进去人工核对评论到底发出去没有——非幂等链路,核对是重试前的必要步骤。
     """
     row = await load_job(comment_id, "note_comment", "comment_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     if row["status"] == "done":
         view["note_url"] = result.get("note_url")

@@ -20,7 +20,26 @@ from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.services import browser_jobs_repo
+from app.services import browser_jobs_repo, queue_status
+
+# queue 段的对外说明,随每个轮询端点的 manifest 条目下发(一份文案,别每个 router 抄一遍)。
+# 最后一句是 2026-08-07 运营真踩过的坑:全矩阵满帽、11 条排队时,看到 queued 就重试,
+# 只会再灌一条进同一个队列。
+QUEUE_MANIFEST_NOTE = (
+    "排队态(queued)的响应带 queue 段:position(本任务在**同账号**待派队列里的位次,"
+    "1-based;排期未到点时为 null)/ ahead(前面还有几个)/ account_queue_depth(该号待派"
+    "总数)/ running(该号当前正在执行的任务 {id,kind,started_at,heartbeat_at};没有则 "
+    "null。browser 类任务库里没有开始时刻列,started_at 给 null,用 heartbeat_at 判还"
+    "活着)/ blocked_by + detail(在等什么)。blocked_by 四种取值:session_cap=该号近一"
+    "小时会话数已达帽值,detail 给 {used, cap, kind_of_cap(system|operator), "
+    "window_resets_at(额度重新有位的时刻,UTC;要等在飞会话跑完才解得开时为 null)};"
+    "account_busy=该号已有任务在跑(同号严格串行),detail 给在跑的 job;"
+    "global_concurrency=全局子进程数已达上限,detail 给 {running_procs, max_procs};"
+    "null=没被闸住,就是还没轮到(排期未到点时 detail 给 not_before)。"
+    "非排队态(running / 终态)queue 恒为 null。"
+    "**看到 queued 不要重试**——任务没丢,重试只会再灌一条进同一个队列,让所有人等更久;"
+    "按 queue 段判断还要等多久,等它自己轮到。"
+)
 
 
 async def load_job(job_id: str, kind: str, label: str) -> dict:
@@ -38,16 +57,22 @@ async def load_job(job_id: str, kind: str, label: str) -> dict:
     return row
 
 
-def base_view(row: dict) -> dict:
-    """台账行 → ``{"status", "reason"?}`` 公共外壳(结果字段由各端点自行追加)。
+async def base_view(row: dict) -> dict:
+    """台账行 → ``{"status", "reason"?, "queue"}`` 公共外壳(结果字段由各端点自行追加)。
 
     error 行带 ``unknown`` 标记(僵死恢复写入)时译成 ``unknown`` 语义——绝不冒充
     普通失败,那会让调用方以为"没做成"而放心重发。
+
+    ``queue``:排队态给排队可见性(见 ``QUEUE_MANIFEST_NOTE``),非排队态恒为 null。
+    做成 async 并收在这里,是为了让**所有**走本模块的轮询端点自动带上 queue 段——每个
+    router 各自 attach 一次的写法,迟早漏掉一个端点(而漏掉的那个恰恰是运营正在等的)。
     """
     result = row.get("result") or {}
+    queue = await queue_status.for_browser_job(row)
     if row["status"] == "error":
         return {
             "status": "unknown" if result.get("unknown") else "error",
             "reason": result.get("error"),
+            "queue": queue,
         }
-    return {"status": row["status"]}
+    return {"status": row["status"], "queue": queue}

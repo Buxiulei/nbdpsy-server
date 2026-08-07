@@ -248,7 +248,10 @@ async def test_get_status_reads_and_denied(tmp_path, monkeypatch):
         assert set(data.keys()) == {
             "job_id", "account_id", "title", "status", "note_id", "note_url",
             "error", "retries", "schedule_time", "next_retry_at", "created_at",
+            # 排队可见性:pending 时给位次/在等什么,终态恒为 null(本例是 published)
+            "queue",
         }
+        assert data["queue"] is None
         assert data["job_id"] == job_id
         assert data["account_id"] == acc
         assert data["status"] == "published"

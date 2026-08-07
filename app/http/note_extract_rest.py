@@ -21,7 +21,7 @@ from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.xhs_account import XhsAccount
 from app.services import note_extract, note_extract_comments
 from app.services.quota import assert_operator_quota
@@ -78,6 +78,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-extracts/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询评论抓取结果(POST /api/notes/extract 带 with_comments 时才有)",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, comments?[{comment_id,author,text,like_count,is_author_reply,"
@@ -176,7 +177,7 @@ async def extract_note_endpoint(payload: NoteExtractRequest) -> dict:
 async def get_note_extract_endpoint(job_id: str) -> dict:
     """轮询评论抓取:queued / running / done(附 comments)/ error / unknown。"""
     row = await load_job(job_id, note_extract_comments.JOB_KIND, "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     if row["status"] == "done":
         view["comments"] = result.get("comments") or []

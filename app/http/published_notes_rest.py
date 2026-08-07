@@ -29,7 +29,7 @@ from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.published_note import PublishedNote
 from app.models.xhs_account import XhsAccount
 from app.services import note_ledger, note_purpose, note_visibility
@@ -148,6 +148,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-ledger-syncs/{sync_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询台账同步结果",
         "admin_only": False, "params": {"sync_id": "path,str"},
         "returns": "{status, note_count?, refreshed?, linked?, linked_by_title?, orphan?, "
@@ -195,6 +196,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-purpose-backfills/{backfill_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询核心目的回填结果",
         "admin_only": False, "params": {"backfill_id": "path,str"},
         "returns": "{status, picked?, fetched?, classified?, unclassified?, purposes?, "
@@ -242,6 +244,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-visibility-changes/{change_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询可见性切换结果",
         "admin_only": False, "params": {"change_id": "path,str"},
         "returns": "{status, result_status?, permission_code?, permission_msg?, reason?}",
@@ -401,7 +404,7 @@ async def start_note_ledger_sync_endpoint(account_id: int) -> dict:
 async def get_note_ledger_sync_endpoint(sync_id: str) -> dict:
     """轮询台账同步结果:queued / running / done(附各项计数)/ error(附 reason)。"""
     row = await load_job(sync_id, "note_ledger_sync", "sync_id")
-    view = base_view(row)
+    view = await base_view(row)
     if row["status"] == "done":
         view.update(row.get("result") or {})
     return view
@@ -444,7 +447,7 @@ async def start_note_purpose_backfill_endpoint(
 async def get_note_purpose_backfill_endpoint(backfill_id: str) -> dict:
     """轮询回填结果:queued / running / done(附各项计数)/ error(附 reason)。"""
     row = await load_job(backfill_id, note_purpose.JOB_KIND, "backfill_id")
-    view = base_view(row)
+    view = await base_view(row)
     if row["status"] == "done":
         view.update(row.get("result") or {})
     return view
@@ -522,7 +525,7 @@ async def get_note_visibility_change_endpoint(change_id: str) -> dict:
     两者含义不同,合成一个键会让"什么都没改"被读成"已改成功"。
     """
     row = await load_job(change_id, "note_visibility", "change_id")
-    view = base_view(row)
+    view = await base_view(row)
     if row["status"] == "done":
         result = row.get("result") or {}
         view["result_status"] = result.get("status")

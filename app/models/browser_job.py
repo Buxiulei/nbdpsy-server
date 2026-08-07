@@ -14,7 +14,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -24,6 +24,10 @@ class BrowserJob(Base):
     """一条浏览器任务台账行;主键即对外轮询 id。"""
 
     __tablename__ = "browser_jobs"
+
+    # 轮询端点的 queue 段每次都按 (account_id, status) 取该号的待派队列 / 在跑行 / 窗口内
+    # 会话行,轮询频率是 3-5s/任务;没有这个索引它们全是全表扫,台账越长越慢。
+    __table_args__ = (Index("ix_browser_jobs_account_status", "account_id", "status"),)
 
     # 对外轮询 id(uuid hex;op_images 为 "opimg_{session_id}_{ext_job_id}" 复合串)
     id: Mapped[str] = mapped_column(primary_key=True)

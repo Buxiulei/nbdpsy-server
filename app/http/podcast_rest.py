@@ -18,7 +18,7 @@ from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.xhs_account import XhsAccount
 from app.publish.policy import podcast_collection_cover_reject
 from app.services import podcast_collection
@@ -64,6 +64,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/podcast-collections/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询播客合集创建结果",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, reason?, name?, collection_id?, confirmed_by?, "
@@ -143,7 +144,7 @@ async def get_podcast_collection_endpoint(job_id: str) -> dict:
     成功时更值钱,藏起来会让调用方只能靠换外部变量盲测。
     """
     row = await load_job(job_id, podcast_collection.KIND, "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     if row["status"] in ("done", "error"):
         for key in ("name", "collection_id", "confirmed_by", "cover_crop",

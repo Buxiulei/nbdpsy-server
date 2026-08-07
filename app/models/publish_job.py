@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -17,6 +17,10 @@ class PublishJob(Base):
     """
 
     __tablename__ = "publish_jobs"
+
+    # 同 browser_jobs:queue 段按 (account_id, status) 取该号待发布 / 发布中 / 窗口内
+    # 已发布行,轮询高频,没索引就是全表扫。
+    __table_args__ = (Index("ix_publish_jobs_account_status", "account_id", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("xhs_accounts.id"))

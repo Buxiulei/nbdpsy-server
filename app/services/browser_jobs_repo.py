@@ -34,6 +34,10 @@ from app.core.db import get_session
 from app.models.browser_job import BrowserJob
 from app.models.publish_job import PublishJob
 
+# 排期到没到点的判据与轮询端点的 queue 段共用一份(见 queue_status 模块 docstring):
+# 派发这一轮看不看得见这条,与运营看到的"排期未到"必须是同一个答案。
+from app.services.queue_status import schedule_due
+
 # 僵死判定阈值:running 行心跳超此秒数视为执行方已死(心跳周期 300s,三倍容错)。
 STALE_AFTER_SECONDS = 900
 
@@ -131,19 +135,7 @@ async def list_dispatchable() -> list[dict]:
             .scalars()
             .all()
         )
-    return [d for d in (_orm_to_dict(r) for r in rows) if _schedule_due(d, now)]
-
-
-def _schedule_due(job: dict, now: datetime) -> bool:
-    """排期是否到点:payload 无 ``not_before`` 视为立即可派;值坏了也放行(不卡死任务)。"""
-    raw = (job.get("payload") or {}).get("not_before")
-    if not raw:
-        return True
-    try:
-        return datetime.fromisoformat(raw) <= now
-    except (TypeError, ValueError):
-        logger.warning(f"[browser_jobs] not_before 值非法,按立即可派处理 job_id={job.get('id')}")
-        return True
+    return [d for d in (_orm_to_dict(r) for r in rows) if schedule_due(d, now)]
 
 
 async def recover_stale() -> int:

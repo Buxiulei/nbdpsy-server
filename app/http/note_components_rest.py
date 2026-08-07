@@ -39,7 +39,7 @@ from app.browser.text_formatter import get_display_length
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.published_note import PublishedNote
 from app.models.xhs_account import XhsAccount
 from app.services import counselor_quote, note_components
@@ -215,6 +215,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-components/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询笔记编辑结果(三组件 + 标题/正文/图片,逐项生效情况)",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, result_status?, applied?:{collection/collection_remove/quote/"
@@ -641,7 +642,7 @@ async def get_note_components_endpoint(job_id: str) -> dict:
     **失败时的逐项原因比成功时更值钱**,把它藏起来是这个接口最不该有的行为。
     """
     row = await load_job(job_id, "note_components", "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     # 终态(done / error)都下发;queued / running 时 result 本就还没有内容
     if row["status"] in ("done", "error"):

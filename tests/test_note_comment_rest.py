@@ -126,7 +126,10 @@ async def test_start_comment_202_and_payload(tmp_path, monkeypatch):
             f"/api/note-comments/{body['comment_id']}", headers=bearer(op_key)
         )
         assert poll.status_code == 200
-        assert poll.json() == {"status": "queued"}
+        # queue 段随排队态一起下发(排队可见性):这里只钉形状,细节见 tests/test_queue_status*.py
+        body_poll = poll.json()
+        assert body_poll["status"] == "queued"
+        assert body_poll["queue"]["position"] == 1
 
 
 async def test_comment_request_validation(tmp_path, monkeypatch):

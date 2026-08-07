@@ -16,7 +16,7 @@ from app.auth.context import current_operator
 from app.core.errors import NotFoundError
 from app.auth.guards import assert_account_access
 from app.core.db import get_session
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.xhs_account import XhsAccount
 from app.services import note_components_read
 from app.services.quota import assert_operator_quota
@@ -41,6 +41,7 @@ MANIFEST_ENTRIES = [
     {
         "method": "GET",
         "path": "/api/note-component-reads/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询组件状态读取结果",
         "admin_only": False,
         "params": {"job_id": "path,str"},
@@ -82,7 +83,7 @@ async def start_note_component_read_endpoint(
 async def get_note_component_read_endpoint(job_id: str) -> dict:
     """轮询组件状态读取结果;done 时平铺快照字段。"""
     row = await load_job(job_id, "note_components_read", "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     if row["status"] in ("done", "error"):
         for key in _RESULT_KEYS:

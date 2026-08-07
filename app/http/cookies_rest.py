@@ -18,7 +18,8 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.core.security import decrypt_cookies
 from app.models.xhs_account import XhsAccount
-from app.services import cookie_check
+from app.http.job_polling import QUEUE_MANIFEST_NOTE
+from app.services import cookie_check, queue_status
 from app.services.quota import assert_operator_quota
 
 router = APIRouter()
@@ -35,6 +36,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/cookie-checks/{check_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询 cookie 活性检测结果",
         "admin_only": False, "params": {"check_id": "path,str"},
         "returns": "{status, user_info?, reason?, wall?}",
@@ -77,7 +79,13 @@ async def get_cookie_check_endpoint(check_id: str) -> dict:
     operator = current_operator()
     async with get_session() as session:
         await assert_account_access(operator, entry["account_id"], session)
-    result: dict = {"status": entry["status"]}
+    # 本端点把台账的 queued/running 一律译成 checking,排队与在跑从 status 上分不出来
+    # ——queue 段正是补这个:checking 且 queue 非 null = 还在排队,里面有位次与原因。
+    # 手里只有 check_id,故多一次主键点查取台账行(get_check 走的是 sync 通道,拿不到)。
+    result: dict = {
+        "status": entry["status"],
+        "queue": await queue_status.for_browser_job_id(check_id),
+    }
     if entry.get("user_info") is not None:
         result["user_info"] = entry["user_info"]
     if entry.get("reason") is not None:

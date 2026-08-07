@@ -161,7 +161,10 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
         poll = await c.get(
             f"/api/note-components/{body['job_id']}", headers=bearer(op_key)
         )
-        assert poll.json() == {"status": "queued"}
+        # queue 段随排队态一起下发(排队可见性):这里只钉形状,细节见 tests/test_queue_status*.py
+        body_poll = poll.json()
+        assert body_poll["status"] == "queued"
+        assert body_poll["queue"]["position"] == 1
 
 
 async def test_request_validation(tmp_path, monkeypatch):

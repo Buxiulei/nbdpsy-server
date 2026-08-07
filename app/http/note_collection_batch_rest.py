@@ -23,7 +23,7 @@ from app.auth.guards import assert_account_access
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
-from app.http.job_polling import base_view, load_job
+from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.xhs_account import XhsAccount
 from app.services import note_collection_batch
 from app.services.quota import assert_operator_quota
@@ -74,6 +74,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/collection-batches/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询合集批量清理结果(逐篇明细 + 本轮没轮到的 remaining)",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, dry_run?, collection_id?, collection_name?, picked?, handled?, "
@@ -145,7 +146,7 @@ async def start_collection_batch_endpoint(
 async def get_collection_batch_endpoint(job_id: str) -> dict:
     """轮询合集批量清理结果:queued / running / done(逐篇明细)/ error / unknown。"""
     row = await load_job(job_id, note_collection_batch.JOB_KIND, "job_id")
-    view = base_view(row)
+    view = await base_view(row)
     result = row.get("result") or {}
     # 终态(done / error)都下发逐篇详情:**失败时的逐篇原因比成功时更值钱**
     # (2026-08-03 运营上报教训:把详情藏在 done 分支里,error 的调用方一个字都拿不到)。

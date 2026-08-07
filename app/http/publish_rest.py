@@ -37,7 +37,8 @@ from app.publish.policy import (
     video_ext_allowed,
 )
 from app.publish.runtime import get_active_scheduler
-from app.services import counselor_quote
+from app.http.job_polling import QUEUE_MANIFEST_NOTE
+from app.services import counselor_quote, queue_status
 from app.services.quota import assert_operator_quota
 
 # 发布任务状态枚举(与 DB / 调度器生命周期一致):校验 list_publish_jobs 的 status 入参用。
@@ -307,6 +308,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/publish-jobs/{job_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询发布任务状态(caller 须对该 job 的账号有 access)",
         "admin_only": False, "params": {"job_id": "path,int"},
         "returns": "{job_id, account_id, title, status, note_id, note_url, error, "
@@ -609,7 +611,12 @@ async def get_publish_status_endpoint(job_id: int) -> dict:
         if job is None:
             raise NotFoundError(f"发布任务 {job_id} 不存在")
         await assert_account_access(operator, job.account_id, session)
-        return _job_view(job)
+        # 发布同样会排队(会话总闸满帽时 pending 能排 40 分钟以上),queue 段与 browser
+        # 类任务同形。复用本会话,不另开一个。
+        return {
+            **_job_view(job),
+            "queue": await queue_status.for_publish_job(job, session),
+        }
 
 
 @router.get("/api/publish-jobs")

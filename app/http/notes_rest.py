@@ -18,7 +18,8 @@ from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.http.cookies_rest import _decrypt_account_cookies
 from app.models.xhs_account import XhsAccount
-from app.services import note_delete, note_export
+from app.http.job_polling import QUEUE_MANIFEST_NOTE
+from app.services import note_delete, note_export, queue_status
 from app.services.note_metrics_service import (
     account_trends,
     field_meta_block,
@@ -56,6 +57,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-exports/{export_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询笔记导出结果",
         "admin_only": False, "params": {"export_id": "path,str"},
         "returns": "{status, note_count?, reason?}",
@@ -80,6 +82,7 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "GET", "path": "/api/note-deletions/{deletion_id}",
+        "queue": QUEUE_MANIFEST_NOTE,
         "summary": "轮询笔记删除结果",
         "admin_only": False, "params": {"deletion_id": "path,str"},
         "returns": "{status, deleted?, remaining?, reason?}",
@@ -194,7 +197,11 @@ async def get_note_deletion_endpoint(deletion_id: str) -> dict:
     operator = current_operator()
     async with get_session() as session:
         await assert_account_access(operator, entry["account_id"], session)
-    result: dict = {"status": entry["status"]}
+    # 同 note-exports:台账的 queued 在这里也被译成 running,排队看不出来,补 queue 段
+    result: dict = {
+        "status": entry["status"],
+        "queue": await queue_status.for_browser_job_id(deletion_id),
+    }
     for key in ("deleted", "remaining", "reason"):
         if entry.get(key) is not None:
             result[key] = entry[key]
@@ -210,7 +217,12 @@ async def get_note_export_endpoint(export_id: str) -> dict:
     operator = current_operator()
     async with get_session() as session:
         await assert_account_access(operator, entry["account_id"], session)
-    result: dict = {"status": entry["status"]}
+    # 本端点把台账的 queued/running 一律译成 running,排队与在跑从 status 上分不出来
+    # ——queue 段正是补这个(同 cookie-checks:多一次主键点查取台账行)。
+    result: dict = {
+        "status": entry["status"],
+        "queue": await queue_status.for_browser_job_id(export_id),
+    }
     if entry.get("note_count") is not None:
         result["note_count"] = entry["note_count"]
     if entry.get("reason") is not None:
