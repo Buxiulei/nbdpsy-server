@@ -279,3 +279,108 @@ async def test_explicit_quoted_note_id_wins_over_counselor_for_video(tmp_path, m
         async with db_module.async_session() as s:
             job = await s.get(PublishJob, r.json()["job_id"])
             assert job.quoted_note_id == "explicit-note"
+
+
+# ---------------- PATCH:视频任务不许被静默改成图文 ----------------
+
+
+async def _make_video_job(c, tmp_path, key: str, acc: int) -> tuple:
+    """建一条 pending 视频任务,返回 (job_id, 视频路径)。"""
+    video = _make_video(tmp_path)
+    r = await c.post(
+        "/api/publish-jobs",
+        json={"account_id": acc, "title": "T", "content": "C", "video": video,
+              "schedule_time": "2099-01-01T09:00:00+08:00"},
+        headers=bearer(key),
+    )
+    assert r.status_code == 202, r.text
+    return r.json()["job_id"], video
+
+
+async def test_patch_images_onto_video_job_is_hard_rejected(tmp_path, monkeypatch):
+    """给视频任务 PATCH images → 422 硬拒,不做静默类型转换。
+
+    本端点没有 video 参数(换媒体=换内容,取消重建语义更清楚)。但"没有参数"只挡住了
+    图文→视频那个方向;反方向若放任 images 落库,一条视频任务会**静默变成图文任务**,
+    video_path 还留在库里,直到发布时才炸。类型迁移这种破坏性决定必须显式拒绝,
+    不能靠文档里一句警告兜底。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V11", "uV11", "op-video-patch")
+        job_id, video = await _make_video_job(c, tmp_path, "op-video-patch", acc)
+
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"images": ["https://cdn/1.png"]},
+            headers=bearer("op-video-patch"),
+        )
+        assert r.status_code == 422, r.text
+        assert "视频任务不可改成图文" in r.text
+        # 库里一个字节都不许动
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, job_id)
+            assert job.video_path == video
+            assert json.loads(job.images_json) == []
+
+
+async def test_patch_empty_images_onto_video_job_also_rejected(tmp_path, monkeypatch):
+    """连空 images 也拒:显式传这个字段就是在选图文那条路。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V12", "uV12", "op-video-patch2")
+        job_id, _ = await _make_video_job(c, tmp_path, "op-video-patch2", acc)
+
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"images": []},
+            headers=bearer("op-video-patch2"),
+        )
+        assert r.status_code == 422, r.text
+
+
+async def test_patch_video_job_other_fields_still_works(tmp_path, monkeypatch):
+    """视频任务改标题/正文/话题/时间照常 —— 硬拒只针对 images。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V13", "uV13", "op-video-patch3")
+        job_id, video = await _make_video_job(c, tmp_path, "op-video-patch3", acc)
+
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"title": "新标题", "topics": ["#心理"]},
+            headers=bearer("op-video-patch3"),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, job_id)
+            assert job.title == "新标题"
+            assert job.video_path == video, "改标题不该动 video_path"
+
+
+async def test_patch_images_on_image_job_unaffected(tmp_path, monkeypatch):
+    """回归:图文任务 PATCH images 照旧生效(硬拒只看 video_path 有没有)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V14", "uV14", "op-video-patch4")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={"account_id": acc, "title": "T", "content": "C",
+                  "images": ["https://cdn/1.png"],
+                  "schedule_time": "2099-01-01T09:00:00+08:00"},
+            headers=bearer("op-video-patch4"),
+        )
+        assert r.status_code == 202, r.text
+        job_id = r.json()["job_id"]
+
+        r = await c.patch(
+            f"/api/publish-jobs/{job_id}",
+            json={"images": ["https://cdn/2.png", "https://cdn/3.png"]},
+            headers=bearer("op-video-patch4"),
+        )
+        assert r.status_code == 200, r.text
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, job_id)
+            assert json.loads(job.images_json) == [
+                "https://cdn/2.png", "https://cdn/3.png"]

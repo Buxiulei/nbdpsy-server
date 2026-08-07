@@ -17,7 +17,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select, update
 
@@ -328,12 +328,15 @@ MANIFEST_ENTRIES = [
                               "ISO8601 带时区如 2026-01-01T09:00:00+08:00)",
         },
         "returns": "{ok:true, job:<同 GET 单条视图>} 改成功;{ok:false, status:<当前态>} 非 pending 改不了",
-        "errors": "400=images 越界;403=无该账号 access;404=job 不存在",
+        "errors": "400=images 越界;422=给**视频任务**传了 images(见 notes);"
+                  "403=无该账号 access;404=job 不存在",
         "notes": "仅 pending 可改(定时未到期/失败等待重试均属 pending);publishing/published/failed/"
                  "canceled 一律 ok:false。已在发/已终态的任务改不动,需另建新任务。空请求体 {} 为 no-op "
                  "返 ok:true;schedule_time 传空串等价 null(清空转立即发)。"
-                 "**改不了媒体类型**:本端点没有 video 参数,视频任务只能改标题/正文/话题/时间;"
-                 "给视频任务传 images 会把它改成图文任务,别这么干——要换媒体请取消后另建。",
+                 "**媒体类型改不了,而且是硬拒不是靠自觉**:本端点没有 video 参数(图文→视频"
+                 "自然不可达),给**视频任务**传 images 一律 422「视频任务不可改成图文,"
+                 "请取消后重建」,库里一个字节不动。视频任务能改的是标题/正文/话题/时间。"
+                 "要换媒体:cancel 掉再建一条新的。",
     },
 ]
 
@@ -563,6 +566,15 @@ async def patch_publish_job_endpoint(job_id: int, payload: PublishJobPatchReques
                 raise ValueError("content 不可为 null(不改请省略该字段)")
             changes["content"] = payload.content
         if "images" in fields:
+            # 视频任务硬拒改图 —— 本端点没有 video 参数,那只挡住了「图文→视频」一个方向;
+            # 反方向若放任 images 落库,一条视频任务会**静默变成图文任务**(video_path 还
+            # 留在库里),直到发布时才炸。类型迁移是破坏性决定,必须显式拒绝,不能靠 manifest
+            # 里一句警告兜底。422 与本仓 409/429 同源,走 HTTPException 的 detail 体。
+            if job.video_path:
+                raise HTTPException(
+                    status_code=422,
+                    detail="视频任务不可改成图文,请取消后重建",
+                )
             imgs = payload.images or []
             if not imgs:
                 raise ValueError("图文笔记至少需要 1 张图片")
