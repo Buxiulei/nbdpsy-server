@@ -24,13 +24,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import update, or_, select
+from sqlalchemy import and_, func, update, or_, select
 
 import app.core.db as db_module
 from app.browser.browser_reaper import BrowserReaper
 from app.browser.cookie_checker import CookieChecker
 from app.browser.egress_guard import EgressGuard
 from app.core.config import settings
+from app.models.browser_job import BrowserJob
 from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
 from app.services.content_archive import ArchiveReaper
@@ -54,6 +55,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # 已到点的发布任务积压到几条就告警(只告警,绝不据此改任务状态,理由见 _warn_publish_backlog)
 PUBLISH_BACKLOG_ALERT = 3
 
+# 同号会话频次总闸的统计窗口(秒):风控红线按"一小时几次"看,窗口就是一小时滚动
+SESSION_WINDOW_SECONDS = 3600
+
 
 def _sqlite_db_path() -> str:
     """从 ``settings.DATABASE_URL`` 提取 sqlite 文件路径(供 sync 侧台账直连与子进程 --db)。"""
@@ -74,7 +78,8 @@ class Supervisor:
     - ``include_dreamina``:是否内嵌即梦片段调度 + 产物 TTL 清理(同上开关语义)。
     - ``scan_interval`` / ``batch_per_account`` / ``proc_timeout`` / ``child_grace`` /
       ``max_procs``:分别兜底 ``WORKER_SCAN_INTERVAL``(5s)/ ``WORKER_BATCH_PER_ACCOUNT``
-      (3)/ ``ACCOUNT_PROC_TIMEOUT``(1800s)/ 停机宽限(10s)/ ``BROWSER_CONCURRENCY``。
+      (3)/ ``ACCOUNT_PROC_TIMEOUT``(1800s)/ 停机宽限(10s)/ ``BROWSER_CONCURRENCY``;
+    - ``session_cap``:同号一小时浏览器会话总闸,兜底 ``ACCOUNT_HOURLY_SESSION_CAP``(4)。
     """
 
     def __init__(
@@ -89,6 +94,7 @@ class Supervisor:
         proc_timeout: float | None = None,
         child_grace: float | None = None,
         max_procs: int | None = None,
+        session_cap: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._repo = repo if repo is not None else _default_browser_jobs_repo
@@ -111,6 +117,11 @@ class Supervisor:
         )
         self._child_grace = child_grace if child_grace is not None else 10.0
         self._max_procs = max_procs if max_procs is not None else settings.BROWSER_CONCURRENCY
+        self._session_cap = (
+            session_cap
+            if session_cap is not None
+            else getattr(settings, "ACCOUNT_HOURLY_SESSION_CAP", 4)
+        )
         self._worker_tag = f"supervisor-{os.getpid()}"
         # account_id → 存活子进程(派生登记,子进程退出即回收移除)
         self._procs: dict[int, asyncio.subprocess.Process] = {}
@@ -118,6 +129,8 @@ class Supervisor:
         self._rotation: list[int] = []
         # 进程内在途 op_images job id(防同一 job 重复起执行任务;真正互斥靠乐观认领)
         self._op_inflight: set[str] = set()
+        # 已因会话总闸被拦过的账号(日志去重:5s 一轮,每轮都吵就没人看了)
+        self._governed_accounts: set[int] = set()
         # 内部后台 task 登记(子进程回收 / op_images 执行),停机时统一收尾
         self._tasks: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
@@ -384,8 +397,8 @@ class Supervisor:
             f"按账号: {by_account} —— 未到点的定时稿不计入,这里积压说明派发或执行侧有问题"
         )
 
-    async def _due_publish_jobs(self) -> list[tuple[int, int, datetime | None]]:
-        """SQL 直查到期 pending 发布任务:(id, account_id, created_at),按 id 升序。
+    async def _due_publish_jobs(self) -> list[tuple[int, int, datetime | None, int | None]]:
+        """SQL 直查到期 pending 发布任务:(id, account_id, created_at, created_by),按 id 升序。
 
         到期语义与 PublishScheduler.scan_once 一致:schedule_time 与 next_retry_at
         均为空或已到。冷却/日上限判定在 account_worker 侧执行(见 CLI 契约),此处不做门。
@@ -393,7 +406,12 @@ class Supervisor:
         now = datetime.utcnow()
         async with self._session_factory() as session:
             stmt = (
-                select(PublishJob.id, PublishJob.account_id, PublishJob.created_at)
+                select(
+                    PublishJob.id,
+                    PublishJob.account_id,
+                    PublishJob.created_at,
+                    PublishJob.created_by,
+                )
                 .where(PublishJob.status == "pending")
                 .where(
                     or_(
@@ -439,12 +457,13 @@ class Supervisor:
 
         - 同账号已有存活子进程 → 跳过(同账号严格串行);
         - 全局子进程数达 ``max_procs`` → 本轮停派(排队等下轮);
+        - 同号一小时会话总闸(``_apply_session_cap``)可能滤掉本批的系统自发任务;
         - 派过的账号移到轮转表尾:单账号灌大批量不饿死其他账号。
         """
-        work: dict[int, list[tuple[datetime, str, object]]] = {}
-        for job_id, account_id, created in publish_rows:
+        work: dict[int, list[tuple[datetime, str, object, int]]] = {}
+        for job_id, account_id, created, created_by in publish_rows:
             work.setdefault(account_id, []).append(
-                (self._norm_created(created), "publish", job_id)
+                (self._norm_created(created), "publish", job_id, created_by or 0)
             )
         for row in account_rows:
             acc = row.get("account_id")
@@ -452,26 +471,136 @@ class Supervisor:
                 # 契约上仅 op_images 允许无账号(已在 scan_once 分流),防御性跳过
                 continue
             work.setdefault(acc, []).append(
-                (self._norm_created(row.get("created_at")), "browser", row["id"])
+                (
+                    self._norm_created(row.get("created_at")),
+                    "browser",
+                    row["id"],
+                    row.get("operator_id") or 0,
+                )
             )
         if not work:
             return
 
+        recent = await self._recent_session_counts(list(work.keys()))
         dispatched: list[int] = []
         for acc in self._fair_order(list(work.keys())):
             if acc in self._procs:
                 continue  # 同账号严格串行:已有存活子进程,本轮不再派
             if len(self._procs) >= self._max_procs:
                 break  # 全局子进程封顶,余下账号排队等下轮
-            items = sorted(work[acc])[: self._batch]
-            publish_ids = sorted(jid for _c, kind, jid in items if kind == "publish")
-            browser_ids = [jid for _c, kind, jid in items if kind == "browser"]
+            items = self._apply_session_cap(
+                acc, sorted(work[acc])[: self._batch], recent.get(acc, 0)
+            )
+            if not items:
+                continue  # 全批被会话总闸拦下:任务留队列,下轮按新窗口重估
+            publish_ids = sorted(jid for _c, kind, jid, _op in items if kind == "publish")
+            browser_ids = [jid for _c, kind, jid, _op in items if kind == "browser"]
             await self._spawn_account_worker(acc, publish_ids, browser_ids)
             dispatched.append(acc)
         # 本轮派过的账号移到轮转表尾(公平:下轮优先照顾没派到的账号)
         for acc in dispatched:
             self._rotation.remove(acc)
             self._rotation.append(acc)
+
+    # ---------------- 同号会话频次总闸 ----------------
+
+    async def _recent_session_counts(self, account_ids: list[int]) -> dict[int, int]:
+        """数各账号近 ``SESSION_WINDOW_SECONDS`` 内的浏览器会话数(含在飞),按号返回。
+
+        一次会话 = 起一次 camoufox。计数**不分触发方**(系统的、运营的都算),因为风控
+        看的是号本身的行为频次,不管是谁点的。
+
+        两个来源缺一不可:
+
+        - ``browser_jobs``:终态行(done/error)按 ``updated_at`` 落窗口 + 全部 running 行
+          (在飞会话不看时间——它正占着一次);``queued`` 不算,还没起浏览器,数进去会自锁;
+        - ``publish_jobs``:发布链在 account_worker 里直接调 ``sync_client.publish_once``,
+          **不在 browser_jobs 留痕**,不单独数就会漏掉最重的那类会话。已发布行按
+          ``started_at``(会话开始时刻)落窗口,``publishing`` 行按在飞计入。
+
+        已知欠数:发布失败/排重试的行会把 ``started_at`` 清空(见 account_worker
+        ``_apply_publish_decision``),那次真实发生过的会话事后无从计时,只能漏数。宁可
+        少数不多数——多数会误伤正常派发,少数只是闸略松,业务侧自有节流兜底。
+        """
+        if not account_ids:
+            return {}
+        cutoff = datetime.utcnow() - timedelta(seconds=SESSION_WINDOW_SECONDS)
+        counts: dict[int, int] = {}
+        async with self._session_factory() as session:
+            browser_rows = await session.execute(
+                select(BrowserJob.account_id, func.count())
+                .where(BrowserJob.account_id.in_(account_ids))
+                .where(
+                    or_(
+                        and_(
+                            BrowserJob.status.in_(("done", "error")),
+                            BrowserJob.updated_at >= cutoff,
+                        ),
+                        BrowserJob.status == "running",
+                    )
+                )
+                .group_by(BrowserJob.account_id)
+            )
+            for acc, n in browser_rows.all():
+                counts[acc] = counts.get(acc, 0) + int(n or 0)
+            publish_rows = await session.execute(
+                select(PublishJob.account_id, func.count())
+                .where(PublishJob.account_id.in_(account_ids))
+                .where(
+                    or_(
+                        and_(
+                            PublishJob.status == "published",
+                            PublishJob.started_at >= cutoff,
+                        ),
+                        PublishJob.status == "publishing",
+                    )
+                )
+                .group_by(PublishJob.account_id)
+            )
+            for acc, n in publish_rows.all():
+                counts[acc] = counts.get(acc, 0) + int(n or 0)
+        return counts
+
+    def _apply_session_cap(
+        self, account_id: int, items: list[tuple], recent: int
+    ) -> list[tuple]:
+        """按剩余会话额度过滤本批任务,返回可派的部分(可能为空)。
+
+        风控红线:同号一小时 ≤4-5 次浏览器会话(2026-08-07 实测 5 次就把号弹上验证墙)。
+        各业务模块只守自己的闸,谁也看不见别人——只有派发层看得见全部 kind,闸开在这。
+
+        - **系统自发任务**(operator_id 非正)按剩余额度放行,超了就留在队列里,下轮扫描
+          按滚动窗口重新估(不改状态、不失败、不排期,一小时后自然轮到);
+        - **运营触发任务**(operator_id>0)一律放行 —— 人工意图优先,运营侧另有配额闸;
+          但它照样吃掉一格额度,后面的系统任务据此收紧;
+        - 帽值 ≤0 = 关闸(运维逃生口,与本仓其它 "0=关闭" 的开关同款语义)。
+        """
+        if self._session_cap <= 0:
+            return items
+        budget = self._session_cap - recent
+        kept: list[tuple] = []
+        blocked = 0
+        for item in items:
+            operator_id = item[3]
+            if operator_id and operator_id > 0:
+                kept.append(item)
+                budget -= 1
+            elif budget > 0:
+                kept.append(item)
+                budget -= 1
+            else:
+                blocked += 1
+        if blocked:
+            # 去重:同号连续被闸只吵一次,恢复派发后再超线才会再吵
+            if account_id not in self._governed_accounts:
+                self._governed_accounts.add(account_id)
+                logger.warning(
+                    f"[supervisor] 会话总闸:账号 {account_id} 近一小时已 {recent} 次浏览器会话"
+                    f"(帽值 {self._session_cap}),本轮 {blocked} 个系统任务延后"
+                )
+        else:
+            self._governed_accounts.discard(account_id)
+        return kept
 
     async def _spawn_account_worker(
         self, account_id: int, publish_ids: list, browser_ids: list

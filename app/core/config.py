@@ -241,6 +241,10 @@ class Settings(BaseSettings):
     WORKER_BATCH_PER_ACCOUNT: int = 3
     # 账号子进程硬超时(秒):超时视作僵死强杀,其任务由僵死恢复按 kind 语义处置
     ACCOUNT_PROC_TIMEOUT: int = 1800
+    # 同号一小时浏览器会话总闸(0 = 关闸):supervisor 派发层按滚动小时窗数该号全部
+    # 会话(browser_jobs + publish_jobs,不分触发方),达帽后**系统自发任务**延后派发,
+    # 运营触发的不拦。风控红线实测:同号一小时 5 次就把号弹上验证墙。
+    ACCOUNT_HOURLY_SESSION_CAP: int = 4
 
     @property
     def retry_delays(self) -> list[int]:
