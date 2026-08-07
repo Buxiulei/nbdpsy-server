@@ -2434,20 +2434,38 @@ def read_catalog(page, account_id: int, note_id: str) -> Dict[str, Any]:
         responses.detach()
 
 
-# ---------------- 视频笔记封面(骨架:选择器待真号 fixtures 落定) ----------------
+# ---------------- 视频笔记封面(结构已由真号探针证实为**内联**,非弹窗) ----------------
 #
-# ⚠️ **本段的选择器全部是占位值,一个都没有真号验证过**(fixtures 取证并行进行中,
-# 落在 data/scene_captures/video_cover/)。所以这里刻意写成 fail-loud:任何一步定位不到
-# 就带着**当场取证**报 error,绝不静默往下走、绝不假装设上了。封面失败**不阻断发布**
-# (语义对齐三组件),平台自动截取的第一帧就是兜底。
+# 真号探针 + 截图实证(account9,2026-08-07,data/scene_captures/video_cover/):
+# 封面区是**内联**的,点「设置封面」**不弹任何弹窗** —— 探针报 warning_no_modal 的原因是
+# 它点的是**区标题**「设置封面」(那是文案不是按钮)。截图里的真实结构是:
+#   .publish-page-content-cover
+#     ├─ 「设置封面」标题 + 「默认截取第一帧作为封面…」说明 + 「优质封面示例」链接
+#     ├─ 右上「PK封面」开关(**绝不碰**)
+#     ├─ 左侧一块灰色方块(≈112×150)  ← 本地上传入口
+#     └─ 「智能推荐封面」+ 3 张平台推荐图(**绝不碰**,点了就是选平台的图不是你的)
 #
-# 换真值时要改的就是下面这几个常量 + 补命中路径的单测;控制流本身不必动。
-_COVER_SECTION = ".publish-page-content-cover"          # 封面区容器(视频页 fixtures 实测有)
-_COVER_ENTRY_TEXT = "设置封面"                            # 封面区入口文案(fixtures 实测有)
-_COVER_MODAL = "[class*='cover'][class*='modal'], .d-modal"  # 占位:封面弹窗
-_COVER_UPLOAD_INPUT = "input[type='file'][accept*='image']"  # 占位:弹窗内本地上传 input
-_COVER_CONFIRM_TEXT = "确定"                              # 占位:弹窗确认按钮文案
-# 上传后等封面预览渲染出来的窗口(秒)
+# 因此正确形状是「往封面区里的隐藏 file input 直接 set_input_files」,与视频/图片上传同源
+# (绝不点上传按钮 —— 真桌面上会弹原生 GTK 文件框卡死整条流程)。
+#
+# ⚠️ 仍缺的一块:封面区**后代 DOM 没有被探针 dump**,所以「灰色方块那个元素的 class」与
+# 「file input 是否一开始就在 DOM 里」两件事没有直接证据。故下面对 input 给候选 + 对入口
+# 给候选,并 fail-loud:定位不到就带当场取证报 error,绝不假装设上了。
+_COVER_SECTION = ".publish-page-content-cover"
+# 封面区内的隐藏 file input(候选;首选按 accept 收口避开视频那个)
+_COVER_INPUT_CANDIDATES = (
+    ".publish-page-content-cover input[type='file'][accept*='image']",
+    ".publish-page-content-cover input[type='file']",
+)
+# 灰色上传位(候选;截图确认它在推荐图**左侧**、是封面区里第一个方块)
+_COVER_ENTRY_CANDIDATES = (
+    ".publish-page-content-cover .cover-upload",
+    ".publish-page-content-cover [class*='upload']",
+)
+# 平台推荐封面/PK 封面:**绝不碰**。点推荐图 = 选了平台的图而不是运营给的封面,
+# 是"看起来成功了其实换错图"的静默错误,比失败更难发现。
+_COVER_FORBIDDEN = ("智能推荐封面", "PK封面", "优质封面示例")
+# 灌图后等封面预览渲染的窗口(秒)
 _COVER_APPLY_TIMEOUT_S = 30.0
 
 
@@ -2461,81 +2479,89 @@ def _cover_probe(page) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001 — 取证本身绝不制造新异常
         evidence["cover_section_present"] = False
         evidence["cover_section_text"] = ""
-    try:
-        evidence["cover_modal_present"] = page.query_selector(_COVER_MODAL) is not None
-    except Exception:  # noqa: BLE001
-        evidence["cover_modal_present"] = False
-    try:
-        evidence["file_inputs"] = len(page.query_selector_all("input[type='file']"))
-    except Exception:  # noqa: BLE001
-        evidence["file_inputs"] = 0
+    for key, selector in (("file_inputs_in_cover", _COVER_INPUT_CANDIDATES[1]),
+                          ("imgs_in_cover", ".publish-page-content-cover img")):
+        try:
+            evidence[key] = len(page.query_selector_all(selector))
+        except Exception:  # noqa: BLE001
+            evidence[key] = 0
     return evidence
+
+
+def _first_match(page, selectors):
+    """按序取第一个命中的元素;全不命中返回 ``(None, None)``。"""
+    for selector in selectors:
+        try:
+            found = page.query_selector(selector)
+        except Exception:  # noqa: BLE001
+            found = None
+        if found is not None:
+            return found, selector
+    return None, None
 
 
 def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[str, Any]:
     """给视频笔记设自定义封面 → ``{"status": "done"|"error", ...}``。
 
-    ⚠️ **骨架实现,选择器未经真号验证**(见本段顶部注释)。控制流是确定的:
-    点开封面区的「设置封面」→ 等弹窗 → 往弹窗内的 file input ``set_input_files``
-    (与视频/图片上传同源:**绝不点上传按钮**,真桌面上会弹原生 GTK 文件框卡死流程)
-    → 点确认 → 回读封面预览确认真换上了。
+    形状已由真号截图证实是**内联**(不是弹窗,见本段顶部)。做法与视频/图片上传同源:
+    找封面区里的隐藏 ``input[type=file]`` 直接 ``set_input_files``,**绝不点上传按钮**
+    (真桌面上会弹原生 GTK 文件框卡死流程)。input 不在 DOM 里时才点一下灰色上传位
+    把它挂出来,再灌。
 
-    每一步失败都立刻返回 error 并附 ``observed`` 当场取证。**绝不返回 done 除非回读到
-    封面真的变了** —— 这条产品线的失败普遍是静默的(合集被服务端丢弃、活动点击不生效
-    都是先例),"没报错"从来不算数。
+    **绝不碰**「智能推荐封面」的 3 张图与「PK封面」开关:点推荐图 = 换成平台的图而不是
+    运营给的封面,那是"看着成功其实换错图"的静默错误,比失败更难发现。
 
-    调用方(sync_client)对 error 的处理是**告警不阻断**:笔记照发,退回平台自动封面。
+    调用方(sync_client)对 error 的处理是**告警不阻断**:笔记照发,退回平台自动首帧。
     """
-    entry = _find_text_in_section(page, _COVER_SECTION, _COVER_ENTRY_TEXT)
-    if entry is None:
+    if page.query_selector(_COVER_SECTION) is None:
         return {"status": "error",
-                "reason": f"cover_entry_not_found: 封面区里没有「{_COVER_ENTRY_TEXT}」入口",
-                "observed": _cover_probe(page)}
-    human.click(entry, reason="打开封面设置弹窗")
-    human.wait(0.8, 1.6, context="等封面弹窗渲染")
-
-    deadline = time.monotonic() + _COVER_APPLY_TIMEOUT_S
-    upload_input = None
-    while time.monotonic() < deadline:
-        try:
-            upload_input = page.query_selector(_COVER_UPLOAD_INPUT)
-        except Exception:  # noqa: BLE001
-            upload_input = None
-        if upload_input is not None:
-            break
-        page.wait_for_timeout(400)
-    if upload_input is None:
-        return {"status": "error",
-                "reason": "cover_upload_input_not_found: 封面弹窗里没找到本地上传的 "
-                          "file input(选择器待真号 fixtures 落定)",
+                "reason": f"cover_section_not_found: 页面上没有封面区 {_COVER_SECTION}",
                 "observed": _cover_probe(page)}
 
+    upload, used = _first_match(page, _COVER_INPUT_CANDIDATES)
+    if upload is None:
+        # file input 可能懒挂载:点一下灰色上传位再找(点的是上传位,不是推荐图)
+        entry, entry_sel = _first_match(page, _COVER_ENTRY_CANDIDATES)
+        if entry is None:
+            return {"status": "error",
+                    "reason": "cover_upload_entry_not_found: 封面区里既没有 file input,"
+                              "也没找到本地上传位(选择器候选全未命中;封面区后代 DOM 尚无探针取证)",
+                    "observed": _cover_probe(page)}
+        human.click(entry, reason=f"点封面区的本地上传位({entry_sel})")
+        human.wait(0.6, 1.2, context="等封面上传入口挂载")
+        deadline = time.monotonic() + _COVER_APPLY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            upload, used = _first_match(page, _COVER_INPUT_CANDIDATES)
+            if upload is not None:
+                break
+            page.wait_for_timeout(400)
+    if upload is None:
+        return {"status": "error",
+                "reason": "cover_file_input_not_found: 点了上传位仍没等到 file input",
+                "observed": _cover_probe(page)}
+
+    before = _cover_probe(page)
     try:
-        upload_input.set_input_files([cover_path])
+        upload.set_input_files([cover_path])
     except Exception as exc:  # noqa: BLE001 — 灌文件失败如实报,不静默
         return {"status": "error",
                 "reason": f"cover_set_input_failed: {exc}",
-                "observed": _cover_probe(page)}
-    human.wait(1.0, 2.0, context="等封面上传渲染")
+                "observed": before}
+    human.wait(1.0, 2.0, context="等封面预览渲染")
 
-    confirm = _find_text_in_section(page, _COVER_MODAL, _COVER_CONFIRM_TEXT)
-    if confirm is None:
-        return {"status": "error",
-                "reason": f"cover_confirm_not_found: 封面弹窗里没有「{_COVER_CONFIRM_TEXT}」按钮"
-                          "(弹窗可能还开着并盖住发布按钮,选择器待 fixtures 落定)",
-                "observed": _cover_probe(page)}
-    human.click(confirm, reason="确认封面")
-    human.wait(0.8, 1.5, context="等封面弹窗关闭")
-
-    evidence = _cover_probe(page)
-    if evidence.get("cover_modal_present"):
-        # 弹窗没关掉是**高危**状态:2026-08-02 事故就是残留弹窗盖住发布按钮,
-        # 最后只报一句"发布超时"。如实报错,让调用方的 error 路径去收拾。
-        return {"status": "error",
-                "reason": "cover_modal_not_closed: 点了确认但封面弹窗仍在,"
-                          "它会盖住发布按钮",
-                "observed": evidence}
-    return {"status": "done", "cover_path": cover_path, "observed": evidence}
+    # 回读:封面区里的图片数变多了才算真换上(与"点了就当成功"划清界限)。
+    deadline = time.monotonic() + _COVER_APPLY_TIMEOUT_S
+    after = before
+    while time.monotonic() < deadline:
+        after = _cover_probe(page)
+        if after.get("imgs_in_cover", 0) > before.get("imgs_in_cover", 0):
+            return {"status": "done", "cover_path": cover_path,
+                    "observed": {"input_selector": used, **after}}
+        page.wait_for_timeout(500)
+    return {"status": "error",
+            "reason": "cover_preview_unchanged: 灌了封面图但封面区预览没变化"
+                      f"(图片数 {before.get('imgs_in_cover')} → {after.get('imgs_in_cover')})",
+            "observed": {"input_selector": used, **after}}
 
 
 def _find_text_in_section(page, section_selector: str, text: str):

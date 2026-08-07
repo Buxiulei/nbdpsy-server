@@ -1694,3 +1694,119 @@ def test_panel_tried_evidence_survives_the_panel_covering_the_entry(monkeypatch)
     assert out["reason"].startswith("activity_card_not_found:")
     assert "面板已打开" in out["reason"], out["reason"]
     assert out["observed"]["panel_opened"] is True
+
+
+# ---------------- 视频封面:内联结构(真号截图证实非弹窗) ----------------
+
+
+class _CoverPage:
+    """封面区的最小替身:内联、隐藏 file input、灌图后预览多一张 img。"""
+
+    def __init__(self, *, section=True, has_input=True, entry=True, preview_grows=True):
+        self._section = section
+        self._has_input = has_input
+        self._entry = entry
+        self._preview_grows = preview_grows
+        self.imgs = 3           # 截图实测:一开始就有 3 张「智能推荐封面」
+        self.files = None
+        self.entry_clicked = False
+
+    def query_selector(self, sel):
+        if sel == bnc._COVER_SECTION:
+            return _FakeSection(self) if self._section else None
+        if "input[type='file']" in sel:
+            if not self._has_input and not self.entry_clicked:
+                return None
+            return _FakeUpload(self)
+        if "upload" in sel:
+            return "ENTRY" if self._entry else None
+        return None
+
+    def query_selector_all(self, sel):
+        if sel.endswith("img"):
+            return ["img"] * self.imgs
+        if "input[type='file']" in sel:
+            return [1] if (self._has_input or self.entry_clicked) else []
+        return []
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+
+class _FakeSection:
+    def __init__(self, page):
+        self._page = page
+
+    def inner_text(self):
+        return "设置封面 默认截取第一帧作为封面 智能推荐封面"
+
+
+class _FakeUpload:
+    def __init__(self, page):
+        self._page = page
+
+    def set_input_files(self, paths):
+        self._page.files = paths
+        if self._page._preview_grows:
+            self._page.imgs += 1
+
+
+class _CoverHuman:
+    def __init__(self, page):
+        self.page = page
+        self.clicks = []
+
+    def click(self, target, reason="", **_k):
+        self.clicks.append(reason)
+        if target == "ENTRY":
+            self.page.entry_clicked = True
+
+    def wait(self, *_a, **_k):
+        return None
+
+
+def test_cover_set_via_hidden_input_without_clicking_upload_button():
+    """封面走 set_input_files 直传,**不点任何上传按钮**(避原生 GTK 文件框卡死)。"""
+    page = _CoverPage()
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert page.files == ["/data/cover.jpg"]
+    assert human.clicks == [], "file input 已在 DOM 里就不该点任何东西"
+
+
+def test_cover_clicks_upload_slot_only_when_input_missing():
+    """input 懒挂载时才点灰色上传位;**绝不点推荐图**(点了是换成平台的图)。"""
+    page = _CoverPage(has_input=False)
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert len(human.clicks) == 1 and "上传位" in human.clicks[0]
+    assert all(kw not in human.clicks[0] for kw in bnc._COVER_FORBIDDEN)
+
+
+def test_cover_reports_error_when_preview_never_changes():
+    """灌了图但封面区预览没变 → error(不许"点了就当成功")。"""
+    page = _CoverPage(preview_grows=False)
+    out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("cover_preview_unchanged:")
+
+
+def test_cover_missing_section_is_loud():
+    """封面区都不在 → 明确报错带取证,绝不静默跳过。"""
+    page = _CoverPage(section=False)
+    out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("cover_section_not_found:")
+    assert "observed" in out
+
+
+def test_cover_no_input_and_no_entry_is_loud():
+    """既没 input 也没上传位 → 报错说清"封面区后代 DOM 尚无探针取证"。"""
+    page = _CoverPage(has_input=False, entry=False)
+    out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("cover_upload_entry_not_found:")
