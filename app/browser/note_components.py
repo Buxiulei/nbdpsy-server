@@ -1544,7 +1544,34 @@ def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
         return {"ok": False, "observed": observed,
                 "reason": "original_consent_checkbox_not_found: 协议弹窗里没找到"
                           "「我已阅读并同意」复选框(选择器候选全未命中)"}
-    human.click(consent, reason=f"勾选「{_ORIGINAL_CONSENT_TEXT}《原创声明须知》」")
+    # 点的是那个 16×16 的 simulator 方块,**不是**上面查到的宽容器。
+    # 真号录屏实测(2026-08-07,账号2)发布页协议弹窗三个矩形(页面坐标):
+    #   容器 .d-checkbox.d-checkbox-main-label : x=506 y=483 w=508 h=23  中心 (760,494)
+    #   simulator 方块 .d-checkbox-simulator   : x=506 y=486 w=16  h=16  中心 (514,494)
+    #   链接《原创声明须知》.custom-link        : x=636       w=107      → 页面 636~743
+    # 先说清楚**不是**什么原因:"容器太宽点不中小方块"这个假设已被推翻 —— 实测点容器
+    # 几何中心 (760,494)(距方块 246px、落在链接之后的纯文字区)照样勾选成功,整个
+    # d-clickable 容器都绑同一个 toggle。真问题是**随机偏移撞上了链接**:human.click
+    # 默认 random_offset=True,落点取容器宽度 30%~70% 的随机位置,对 w=508 就是页面
+    # 658~862,与链接区间 636~743 **重叠 658~743,约占随机区间 40%**。落到
+    # <a class="custom-link"> 上时链接吃掉事件、不冒泡到父级 toggle,于是"点在容器里却
+    # 没勾上" —— 生产 e2e 就是这么失败的;录屏那次精确点 760,恰在链接右侧 17px 侥幸避开。
+    # 方块内部不含链接,点它必然只触发 toggle,把这 40% 风险清零。
+    # random_offset=False:16×16 上再叠 ±20% 偏移只有 ±3px 振幅,毫无拟人价值,却把
+    # 落点推向方块边缘徒增风险 —— 拟人性由 human 层的贝塞尔移动/悬停/按压时序承担,
+    # 不靠这 3px。定位不到方块才回退点宽容器(旧行为,带那 40% 风险,聊胜于不点)。
+    try:
+        simulator_target = page.query_selector(_ORIGINAL_CONSENT_SIMULATOR)
+    except Exception:  # noqa: BLE001
+        simulator_target = None
+    consent_reason = f"勾选「{_ORIGINAL_CONSENT_TEXT}《原创声明须知》」"
+    if simulator_target is not None:
+        observed["consent_click_target"] = "simulator"
+        human.click(simulator_target, random_offset=False,
+                    reason=f"{consent_reason}(点 simulator 方块)")
+    else:
+        observed["consent_click_target"] = "container"
+        human.click(consent, reason=f"{consent_reason}(方块没定位到,回退点容器)")
     human.wait(0.4, 0.9, context="等「声明原创」按钮解禁")
     # 回读勾选态:模拟器 class 掉了 unchecked 才算真勾上(隐藏 input 0×0 不可用)
     try:
@@ -1555,7 +1582,14 @@ def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         simulator_class = None
     observed["consent_simulator_class"] = simulator_class
-    observed["consent_ticked"] = consent_ticked_from_simulator_class(simulator_class)
+    ticked = consent_ticked_from_simulator_class(simulator_class)
+    observed["consent_ticked"] = ticked
+    # 读态没确认就**不往下走**:再等 8s 按钮解禁只是把同一个失败拖成另一个 reason,
+    # 还把真因(没勾上)糊成"按钮没解禁"。读不到 class 也算没勾上(读不到 ≠ 好了)。
+    if not ticked:
+        return {"ok": False, "observed": observed,
+                "reason": "original_consent_not_ticked: 点了协议复选框但回读 simulator "
+                          f"class={simulator_class!r} 仍是未勾态"}
 
     deadline = time.monotonic() + _ORIGINAL_CONFIRM_TIMEOUT_S
     enabled = None

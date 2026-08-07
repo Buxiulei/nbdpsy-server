@@ -203,11 +203,15 @@ from app.browser import note_components as _bnc
 
 
 class _FakeEl:
-    """最小元素替身:能报文案/class,也能在子树里找文案(供 _find_text_in_section 用)。"""
+    """最小元素替身:能报文案/class,也能在子树里找文案(供 _find_text_in_section 用)。
 
-    def __init__(self, text="", children=()):
+    ``selector`` 记的是"这个替身是从哪个选择器查出来的",供点击 spy 断言**点了谁**。
+    """
+
+    def __init__(self, text="", children=(), selector=None):
         self._text = text
         self._children = list(children)
+        self.selector = selector
 
     def inner_text(self):
         return self._text
@@ -222,7 +226,8 @@ class _FakeEl:
 class _ConsentModalPage:
     """会弹协议弹窗的假页面:必须勾同意 + 点「声明原创」才算真声明。"""
 
-    def __init__(self, *, checkbox_found=True, button_ever_enables=True):
+    def __init__(self, *, checkbox_found=True, button_ever_enables=True,
+                 simulator_missing_first_n=0, consent_click_effective=True):
         self.modal_open = False
         self.consent_ticked = False
         self.declared = False          # 只有点了「声明原创」才 True
@@ -231,6 +236,12 @@ class _ConsentModalPage:
         self.closed_by_x = False
         self._checkbox_found = checkbox_found
         self._button_ever_enables = button_ever_enables
+        # simulator 方块查不到的前 N 次(模拟"渲染晚一拍"→ 走回退点宽容器)
+        self._simulator_missing_first_n = simulator_missing_first_n
+        self._simulator_queries = 0
+        # 点了协议复选框会不会真勾上 —— False 复刻"落点撞《原创声明须知》链接、
+        # 事件被链接吃掉没冒泡到 toggle"的生产失败态
+        self.consent_click_effective = consent_click_effective
 
     # --- 被测代码会用到的 page API ---
     def query_selector(self, sel):
@@ -243,14 +254,19 @@ class _ConsentModalPage:
         if sel == _bnc._ORIGINAL_MODAL_CLOSE:
             return "EL:x" if self.modal_open else None
         if sel == _bnc._ORIGINAL_CONSENT_SIMULATOR:
+            self._simulator_queries += 1
             if not self.modal_open:
                 return None
+            if self._simulator_queries <= self._simulator_missing_first_n:
+                return None
             cls = "d-checkbox-simulator" + ("" if self.consent_ticked else " unchecked")
-            return _FakeEl(cls)
+            return _FakeEl(cls, selector=sel)
         if sel == _bnc._ORIGINAL_CONFIRM_BUTTON:
             return _FakeEl(_bnc._ORIGINAL_CONFIRM_TEXT) if self.modal_open else None
         if "checkbox" in sel or "d-checkbox" in sel:
-            return "EL:consent" if (self.modal_open and self._checkbox_found) else None
+            if not (self.modal_open and self._checkbox_found):
+                return None
+            return _FakeEl("d-checkbox d-checkbox-main-label d-clickable", selector=sel)
         return None
 
     def query_selector_all(self, sel):
@@ -273,15 +289,21 @@ class _ConsentHuman:
     def __init__(self, page):
         self.page = page
         self.clicks = []
+        # 点击 spy:每次点击记 (被点元素的选择器, random_offset, reason)
+        self.click_log = []
 
-    def click(self, target, reason="", **_k):
+    def click(self, target, reason="", random_offset=True, **_k):
         self.clicks.append(reason)
+        self.click_log.append(
+            (getattr(target, "selector", target), random_offset, reason)
+        )
         if "开关" in reason:
             self.page.modal_open = True
             self.page.optimistic_checked = True   # ← 乐观翻转,弹窗还没确认
             self.page.saw_optimistic_true = True  # 记账:之后关弹窗会把它打回 False
         elif "同意" in reason:
-            self.page.consent_ticked = True
+            if self.page.consent_click_effective:
+                self.page.consent_ticked = True
         elif "声明原创" in reason:
             if self.page.consent_ticked:
                 self.page.declared = True
@@ -365,6 +387,70 @@ def test_no_modal_falls_back_to_checked_readback(monkeypatch):
     out, human = _run_consent(page)
     assert out["status"] == "done", out
     assert all("同意" not in r for r in human.clicks), "没弹窗就不该去勾任何协议框"
+
+
+# ---------------- 勾选的**点击目标**:16×16 的 simulator 方块,不是宽容器 ----------------
+#
+# 真号录屏实测(2026-08-07,账号2)三个矩形:
+#   容器 .d-checkbox.d-checkbox-main-label : x=506 y=483 w=508 h=23  中心 (760,494)
+#   simulator 方块 .d-checkbox-simulator   : x=506 y=486 w=16  h=16  中心 (514,494)
+#   链接《原创声明须知》.custom-link        : x=636       w=107      → 页面 636~743
+# human.click 默认 random_offset=True → 落点是容器宽度 30%~70% 的随机位置,对 w=508
+# 就是页面 658~862,与链接区间 636~743 **重叠 658~743,约占随机区间 40%**。
+
+
+def _consent_click(human):
+    """从 spy 里取"勾同意"那一次点击 (selector, random_offset, reason)。"""
+    hits = [c for c in human.click_log if "同意" in c[2]]
+    assert len(hits) == 1, f"勾同意应恰好点一次: {human.click_log}"
+    return hits[0]
+
+
+def test_consent_click_targets_the_simulator_square(monkeypatch):
+    """勾选点的必须是 simulator 方块,且**不加随机偏移**。
+
+    点宽容器时随机偏移有约 40% 概率落进《原创声明须知》链接,链接吃掉事件不冒泡到
+    父级 toggle → 勾不上。方块里不含链接,点它必然只触发 toggle。
+    """
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage()
+    out, human = _run_consent(page)
+
+    selector, random_offset, _reason = _consent_click(human)
+    assert selector == _bnc._ORIGINAL_CONSENT_SIMULATOR, (
+        f"勾选必须点 simulator 方块,实际点了 {selector!r} —— 宽容器有撞链接风险"
+    )
+    assert random_offset is False, "16×16 的方块上随机偏移毫无拟人价值,还可能点出界"
+    assert out["status"] == "done", out
+    assert page.declared is True
+
+
+def test_consent_falls_back_to_container_when_simulator_missing(monkeypatch):
+    """simulator 方块定位不到(平台改版 / 渲染晚一拍)→ 回退点宽容器,不是干脆不点。"""
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    # 第 1 次查 simulator(取点击目标)扑空,之后(回读勾选态)才查得到
+    page = _ConsentModalPage(simulator_missing_first_n=1)
+    out, human = _run_consent(page)
+
+    selector, _random_offset, _reason = _consent_click(human)
+    assert selector in _bnc._ORIGINAL_CONSENT_CANDIDATES, (
+        f"simulator 缺失时应回退点容器,实际点了 {selector!r}"
+    )
+    assert out["status"] == "done", out
+    assert page.declared is True
+
+
+def test_consent_readback_unticked_stops_the_chain(monkeypatch):
+    """点了但回读 simulator 仍是 unchecked(复刻撞链接)→ 立刻报错,不往下走。"""
+    monkeypatch.setattr(_bnc, "_scroll_row_to_mid_viewport", lambda *a, **k: None)
+    page = _ConsentModalPage(consent_click_effective=False)
+    out, human = _run_consent(page)
+
+    assert out["status"] == "error", f"没勾上就不许继续: {out}"
+    assert "consent" in out["reason"], out["reason"]
+    assert page.declared is False, "读态没确认就绝不能去点「声明原创」"
+    assert all("声明原创" not in r for r in human.clicks), human.clicks
+    assert page.modal_open is False, "走不完必须关弹窗,否则盖住发布按钮"
 
 
 def test_legacy_close_modal_path_can_never_declare(monkeypatch):
