@@ -35,8 +35,11 @@
   点坐标。**不得写死坐标**:组件设置会改变页面高度顶动按钮,每次重算。
 - **活动是互斥单选,但旧活动注入正文的话题不回收**(设计 2.7③):故重试只重试**同一个
   活动**、且有次数上限,**绝不做"换个活动重试"**——反复切换会让话题单调累积并真发出去。
-- **绝不点删除、绝不点合集的 ``.close-icon``(移除合集)、绝不点「取消关联」**:所有会
-  撤销/删除的按钮在本模块里只被**读**,读到就当"已是目标态"跳过,永远不点。
+- **绝不点删除、绝不点「取消关联」**:所有会撤销/删除的按钮在本模块里只被**读**,读到就当
+  "已是目标态"跳过,永远不点。合集的 ``.close-icon``(移除合集)2026-08-07 起**开了一个
+  受控例外**:只有 ``_remove_collection``(调用方显式请求移出时才跑的那一步)可以点它,
+  且必须以 ``.collection-plugin-choose`` 为容器 scope + 名字比对通过 + 点完当场回读;
+  ``_set_collection``(加入路径)对它的"绝不点"一字不改。
 - 全程 ``SyncHumanActions``;``page.evaluate`` **只用于只读取证**,不做任何 JS 合成点击
   或 JS 设值。等待用 ``page.wait_for_timeout``(同步 API 下 ``time.sleep`` 期间 response
   监听器一个都不会触发,见 ``creator_note_list`` 模块 docstring)。
@@ -87,6 +90,14 @@ _COLLECTION_POPOVER_ITEM = (
 )
 _COLLECTION_CHOSEN = ".collection-plugin-choose"
 _COLLECTION_EMPTY_TEXT = "选择合集"
+# 移出合集的 × (2026-08-07 运营需求 P0)。**必须以 .collection-plugin-choose 为容器 scope**:
+# 裸 .close-icon 在页面上不唯一(引用区 / 图片卡都可能有同名类),而这是唯一一个会把笔记
+# 从合集里摘出去的按钮。它**只在悬停 chip 之后才渲染**(用户 2026-08-07 编辑页实拍),
+# 静态 dump 里查不到 —— 所以"查不到 ×"既是失败,也是"这篇不在合集里"的辅助反证。
+_COLLECTION_CLOSE_ICON = f"{_COLLECTION_CHOSEN} .close-icon"
+# 通用弹窗容器:点 × 之后**有没有确认弹窗是未验证点**(设计 docs/design/2026-08-07-collection-remove-design.md §6-2,取证轮未跑到),
+# 故只用它做 fail-loud 探测,绝不按文案猜哪个按钮是"确认"。
+_ANY_MODAL = ".d-modal"
 _QUOTE_CONTAINER = ".quote-note-container"
 _QUOTE_MODAL = ".d-modal.select-note-modal"
 _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card"
@@ -812,6 +823,139 @@ def _reveal_in_more_panel(page, human, activity_name: str) -> tuple:
 
 
 # ---------------- 单个组件的设置动作 ----------------
+
+
+def _visible_modal_texts(page) -> List[str]:
+    """当前页上**可见**的弹窗文案(只读探测,读不出就当没有)。
+
+    只服务于移出合集那一步的 fail-loud:点 × 之后页面上冒出任何弹窗,都说明我们踩进了
+    一个没被验证过的交互分支,此时**唯一正确的动作是停手并把原文交给人**。
+    """
+    texts: List[str] = []
+    try:
+        nodes = page.query_selector_all(_ANY_MODAL)
+    except Exception:  # noqa: BLE001 — 探测失败不当成"有弹窗",URL/回读还有兜底
+        return texts
+    for node in nodes:
+        try:
+            if node.is_visible() and _norm(node.inner_text()):
+                texts.append(_norm(node.inner_text())[:200])
+        except Exception:  # noqa: BLE001
+            continue
+    return texts
+
+
+def _remove_collection(
+    page, human: SyncHumanActions, responses: ComponentResponses, collection_id: str,
+    collection_name: str | None = None,
+) -> Dict[str, Any]:
+    """移出合集:确认当前所在合集就是目标 → **悬停 chip 让 × 显出来** → 点 × → 读回空态。
+
+    与 ``_set_collection`` 对称的幂等语义(运营 2026-08-07 需求第三节 1):
+
+    ==================== ============ ==========================================
+    当前态                目标 C        结果
+    ==================== ============ ==========================================
+    空态(「选择合集」)   移出 C       ``skipped`` —— 本就不在,**零点击**
+    在 C 里               移出 C       悬停 → 点 × → 回读空态 → ``done``
+    在 D 里(D≠C,已比对) 移出 C       ``skipped``,reason 带出实际所在合集名
+    已选但名字比对不了     移出 C       ``error``,**绝不点 ×**
+    ==================== ============ ==========================================
+
+    这是本模块唯一一处**被允许点 ``.close-icon``** 的地方(模块 docstring 那条"绝不点合集
+    的 .close-icon"是加入路径的纪律,一字不改)。开这个受控例外的代价用四道闸补上:
+
+    1. **名字比对不过绝不动手** —— 移出是破坏性操作,点错等于把笔记从**正确的**合集里
+       摘出来;``collection_name`` 是主路径(已选态开不了弹层,拿不到 id→名映射);
+    2. **选择器以 ``.collection-plugin-choose`` 为容器 scope** —— 裸 ``.close-icon`` 不唯一;
+    3. **未验证的弹窗即停** —— 点 × 后是否有确认弹窗、是立即生效还是要提交才落地,都是
+       设计 docs/design/2026-08-07-collection-remove-design.md §6 的未验证点(取证轮未跑到)。见到任何可见弹窗就抛 ``NoteComponentsError``
+       中止**整单**:页面处于不可预期态,继续走下去会带着弹窗去点发布,而那是一次全量
+       覆盖提交;
+    4. **点完当场回读** —— chip 必须回到空态或至少不再含目标名,不然报 ``collection_not_removed``。
+
+    Raises:
+        NoteComponentsError: 点 × 前后出现未验证的弹窗(硬失败,调用方据此弃提交)。
+    """
+    target_name = _norm(collection_name or "")
+    if not target_name:
+        # 兜一次 list_v2 被动缓存 —— 已选态基本拿不到(弹层没开过就不会发这个接口),
+        # 所以 collection_name 才是主路径,与 _set_collection 已选态同款取舍。
+        catalog = parse_collections(responses.latest(_COLLECTION_API_MARK))
+        hit = next((c for c in catalog if c["id"] == str(collection_id)), None)
+        target_name = _norm(hit["name"]) if hit else ""
+
+    chosen = read_collection_label(page)
+    if not chosen or _COLLECTION_EMPTY_TEXT in chosen:
+        return {"status": "skipped", "collection_id": str(collection_id),
+                "name": target_name,
+                "reason": "collection_already_absent: 该笔记本就不在任何合集里,零点击"}
+    if not target_name:
+        return {
+            "status": "error",
+            "reason": f"collection_remove_unverifiable: 该笔记在合集「{_norm(chosen)[:20]}」里,"
+                      f"但无法确认它就是目标 id={collection_id}(已选态开不了弹层拿不到 "
+                      "id→名映射);移出是破坏性操作,比对不上**绝不动手**——"
+                      "请求里带 remove_collection_name 即可确认",
+        }
+    if target_name not in _norm(chosen):
+        return {
+            "status": "skipped", "collection_id": str(collection_id), "name": target_name,
+            "reason": f"collection_in_another_not_target: 该笔记在合集「{_norm(chosen)[:20]}」里,"
+                      f"不在目标「{target_name}」里 —— 本就不在目标合集,幂等语义下不算失败,"
+                      f"一次都没点",
+        }
+
+    # 弹窗基线取在动手**之前**:判据是"点 × 之后**新**冒出来的弹窗",不是"页面上有弹窗"。
+    # 编辑器页本就可能挂着别的(隐藏或常驻的)`.d-modal` 容器,拿"有没有"当判据会把这个
+    # 能力整个卡死;而真正要拦的是那个**因为我们点了 × 才出现**的确认框。
+    baseline_modals = _visible_modal_texts(page)
+    if baseline_modals:
+        logger.warning(
+            f"[note_components] 移出前页面已可见弹窗 {baseline_modals},作为基线排除"
+        )
+
+    _scroll_row_to_mid_viewport(page, human, _COLLECTION_CHOSEN)
+    chip = page.query_selector(_COLLECTION_CHOSEN)
+    if chip is None:
+        return {"status": "error",
+                "reason": "collection_chip_vanished: 滚动后合集展示条不见了,拒绝盲点"}
+    # × 是 hover 态才渲染的(实拍):不悬停就查不到它,更点不到
+    human.hover(chip, reason=f"悬停合集「{target_name}」让移出的 × 显出来")
+    human.wait(0.4, 0.9, context="等 hover 态的 × 渲染")
+    close_icon = page.query_selector(_COLLECTION_CLOSE_ICON)
+    if close_icon is None:
+        return {
+            "status": "error",
+            "reason": f"close_icon_not_found_after_hover: 悬停合集展示条后仍查不到 "
+                      f"{_COLLECTION_CLOSE_ICON};当时 chip 文案 {_norm(chosen)[:40]!r}"
+                      f"(它也可能是「这篇其实不在合集里」的反证,请先用 "
+                      "note-component-reads 核对当前状态)",
+        }
+
+    human.click(close_icon, reason=f"移出合集「{target_name}」")
+    human.wait(0.6, 1.2, context="等移出生效")
+
+    modals = [t for t in _visible_modal_texts(page) if t not in baseline_modals]
+    if modals:
+        # 未验证点:确认弹窗的形态/文案/按钮全没取证过。**绝不盲点**——猜错按钮的代价
+        # 从"没移出"到"删了别的东西"都有可能。原文带出来给人看,补完取证再实现这一支。
+        raise NoteComponentsError(
+            f"collection_remove_unknown_modal: 点 × 后冒出未验证过的弹窗 {modals};"
+            f"确认弹窗形态尚未取证(设计 docs/design/2026-08-07-collection-remove-design.md §6-2),**绝不盲点任何按钮**,整单中止不提交。"
+            f"笔记是否已被移出未知,请人工核对后再决定"
+        )
+
+    current = read_collection_label(page)
+    if current is not None and target_name in _norm(current):
+        return {
+            "status": "error",
+            "reason": f"collection_not_removed: 点了 × 之后合集区仍是 {current!r},"
+                      f"「{target_name}」没被摘掉",
+            "observed": current,
+        }
+    return {"status": "done", "collection_id": str(collection_id), "name": target_name,
+            "observed": current}
 
 
 def _set_collection(
@@ -1738,6 +1882,8 @@ def apply_components(
     *,
     collection_id: Optional[str] = None,
     collection_name: Optional[str] = None,
+    remove_collection_id: Optional[str] = None,
+    remove_collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
     activity_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -1750,7 +1896,10 @@ def apply_components(
     按钮翻转成「取消关联」),**不等于**服务端接受 —— 私密笔记的合集绑定会被服务端静默
     丢弃(设计 2.6),那要靠提交后重进页面回读才发现。
     """
+    # **移出排第 0**:将来"换合集"分两次请求接力时,顺序才是对的(先摘旧的再挂新的)。
     steps = (
+        ("collection_remove", remove_collection_id, lambda cid: _remove_collection(
+            page, human, responses, cid, collection_name=remove_collection_name)),
         ("collection", collection_id, lambda cid: _set_collection(
             page, human, responses, cid, collection_name=collection_name)),
         ("quote", quoted_note_id, lambda nid: _set_quote(page, human, responses, nid)),
@@ -1764,6 +1913,10 @@ def apply_components(
             human.wait(0.8, 1.8, context="组件设置间隔")
         try:
             outcomes[key] = step(str(value))
+        except NoteComponentsError:
+            # 硬失败(目前只有"移出后冒出未验证弹窗"这一支)**必须打断整单**:页面已处于
+            # 不可预期态,再往下走就是带着弹窗去点发布,而那是一次全量覆盖提交。
+            raise
         except Exception as exc:  # noqa: BLE001 — 单项异常不阻断其余项
             logger.warning(f"[note_components] {key} 设置异常: {exc}")
             outcomes[key] = {"status": "error", "reason": f"{key}_exception: {exc}"}
@@ -2011,7 +2164,8 @@ def _run_edit_steps(
 
 
 def _skipped_components(
-    collection_id: Optional[str], quoted_note_id: Optional[str], activity_id: Optional[str]
+    collection_id: Optional[str], quoted_note_id: Optional[str], activity_id: Optional[str],
+    remove_collection_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """弃提交时组件步一步都没走:请求过的组件如实记「因前序失败未执行」。
 
@@ -2020,6 +2174,7 @@ def _skipped_components(
     return {
         key: {"status": "error", "reason": _SKIPPED_REASON}
         for key, value in (
+            ("collection_remove", remove_collection_id),
             ("collection", collection_id),
             ("quote", quoted_note_id),
             ("activity", activity_id),
@@ -2037,6 +2192,8 @@ def set_note_components(
     *,
     collection_id: Optional[str] = None,
     collection_name: Optional[str] = None,
+    remove_collection_id: Optional[str] = None,
+    remove_collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
     activity_id: Optional[str] = None,
     title: Optional[str] = None,
@@ -2055,6 +2212,9 @@ def set_note_components(
         account_id: 账号 id(日志用)。
         note_id: 目标笔记的平台 id(深链定位,设计 3.2 —— 台账 title 会过期,只认 id)。
         collection_id / quoted_note_id / activity_id: 要设置的三组件,均可选。
+        remove_collection_id: 要**移出**的合集 id(与 collection_id 加入对称,幂等:
+            本就不在 → skipped 不算失败)。``remove_collection_name`` 强烈建议同传 ——
+            浏览器层靠名字确认"当前所在合集就是目标",比对不上绝不动手。
         title: 整体替换标题;``None``=不改,``""``=清空(两者语义不同,编辑设计 3.1)。
         content: 整体替换正文;``None``=不改(不支持清空,编辑设计 1.2)。
         add_images: 追加到图序末尾的**本地路径**列表(REST 层已落好盘)。
@@ -2119,7 +2279,8 @@ def set_note_components(
             )
             return _compose(
                 note_id,
-                _skipped_components(collection_id, quoted_note_id, activity_id),
+                _skipped_components(collection_id, quoted_note_id, activity_id,
+                                    remove_collection_id),
                 {}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_before,
@@ -2133,6 +2294,8 @@ def set_note_components(
             page, human, responses,
             collection_id=collection_id,
             collection_name=collection_name,
+            remove_collection_id=remove_collection_id,
+            remove_collection_name=remove_collection_name,
             quoted_note_id=quoted_note_id,
             activity_id=activity_id,
         )
@@ -2140,6 +2303,26 @@ def set_note_components(
         # ⑥ 提交决策:组件 done/skipped 或**任一编辑步 done** 都算"有东西可提交"
         in_editor_ok = [k for k, v in outcomes.items() if v["status"] in ("done", "skipped")]
         edits_ok = [k for k, v in edits["outcomes"].items() if v.get("status") == "done"]
+        # ⑥bis **移出的幂等零点击不提交**:``collection_remove`` 落 skipped 表示"本就不在
+        # 该合集",编辑器里一个字都没改。若这次请求只有它算数,就**不点发布** —— 提交是
+        # 全量覆盖语义,为一次零变更付一次覆盖风险毫无道理;存量清理会对上百篇非目标笔记
+        # 跑这条路,每篇白提交一次就是上百次真发布。生效结论直接取编辑器内回读(那本就是
+        # "它不在这个合集里"的直接证据,不需要提交后再确认一遍)。
+        if (
+            (outcomes.get("collection_remove") or {}).get("status") == "skipped"
+            and in_editor_ok == ["collection_remove"] and not edits_ok
+        ):
+            logger.info(
+                f"[note_components] 账号{account_id} note_id={note_id}: 本就不在合集 "
+                f"{remove_collection_id},零点击零提交(幂等)"
+            )
+            return _compose(
+                note_id, outcomes, {"collection_remove": True}, submitted=False,
+                permission_before=permission_before, permission_after=permission_before,
+                body_before=body_before, body_after=body_after,
+                edit_outcomes=edits["outcomes"], images_before=images_before,
+                images_after=None, topics_dropped=edits["topics_dropped"],
+            )
         if not in_editor_ok and not edits_ok:
             # 编辑器里一项都没设上 —— 提交毫无意义,而每次提交都是一次全量覆盖,不做
             logger.warning(
@@ -2178,7 +2361,8 @@ def set_note_components(
         human.wait(1.5, 3.0, context="等提交落地")
         verified, permission_after, readback = _verify_after_submit(
             page, account_id, note_id,
-            collection_id=collection_id, quoted_note_id=quoted_note_id,
+            collection_id=collection_id, remove_collection_id=remove_collection_id,
+            quoted_note_id=quoted_note_id,
             activity_id=activity_id, outcomes=outcomes, responses=responses,
             title=title, content=content,
             wants_add=bool(add_images), wants_remove=bool(remove_image_indexes),
@@ -2222,6 +2406,7 @@ def _verify_after_submit(
     quoted_note_id: Optional[str],
     activity_id: Optional[str],
     outcomes: Dict[str, Dict[str, Any]],
+    remove_collection_id: Optional[str] = None,
     responses: ComponentResponses,
     title: Optional[str] = None,
     content: Optional[str] = None,
@@ -2254,6 +2439,24 @@ def _verify_after_submit(
         logger.error(f"[note_components] 回读进不去更新页(生效情况未确认): {exc.reason}")
         return {k: None for k in outcomes}, None, extra
 
+    if remove_collection_id:
+        # 判据与"加入"相反,且**两档证据分开**:空态是强证据(chip 整个没了);
+        # "非空但已不含目标名"是弱底线(引用区那次踩过的坑——提交后显示形态可能变,
+        # 只认精确空态会假阴性)。名字都不知道时非空态**判不了**,记 None(未确认)而不是
+        # 乐观当 True —— 这条产品线的失败是静默的。
+        name = _norm((outcomes.get("collection_remove") or {}).get("name") or "")
+        current = read_collection_label(page)
+        gone = current is None or _COLLECTION_EMPTY_TEXT in current
+        if gone:
+            verified["collection_remove"] = True
+        elif name:
+            verified["collection_remove"] = name not in _norm(current)
+        else:
+            verified["collection_remove"] = None
+        if verified["collection_remove"] is not True:
+            logger.error(
+                f"[note_components] 移出合集回读未确认:期望「{name}」不在,实读 {current!r}"
+            )
     if collection_id:
         name = (outcomes.get("collection") or {}).get("name") or ""
         current = read_collection_label(page)

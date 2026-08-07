@@ -32,10 +32,11 @@ class _El:
     """假元素:只提供被测代码真用到的能力(读文本/读 value/取矩形/子查询/被点)。"""
 
     def __init__(self, text="", *, on_click=None, value="", children=None, href=None,
-                 on_type=None):
+                 on_type=None, on_hover=None):
         self._text = text
         self.on_click = on_click
         self.on_type = on_type   # 被 type_text 输入时的副作用(他人笔记检索框用)
+        self.on_hover = on_hover  # 被 hover 时的副作用(合集 chip 的 × 是 hover 才显)
         self._value = value
         self._children = children or {}
         self._href = href
@@ -69,6 +70,7 @@ class _Human:
     def __init__(self, _page=None):
         self.clicks = []
         self.typed = []
+        self.hovers = []
 
     def wait(self, *_a, **_kw):
         pass
@@ -79,8 +81,11 @@ class _Human:
     def scroll_to_element(self, _el):
         pass
 
-    def hover(self, *_a, **_kw):
-        pass
+    def hover(self, target=None, *, reason="", **_kw):
+        self.hovers.append((reason, getattr(target, "inner_text", lambda: "")()
+                            if hasattr(target, "inner_text") else target))
+        if hasattr(target, "on_hover") and target.on_hover:
+            target.on_hover()
 
     def navigate(self, *_a, **_kw):
         pass
@@ -121,6 +126,10 @@ class Editor:
         body="原有正文",
         title="目标笔记",
         drop_collection_on_submit=False,
+        close_icon_hover_gated=True,
+        close_icon_absent=False,
+        silent_close_icon=False,
+        modal_after_close_icon=None,
         silent_activity_clicks=0,
         permission_before_submit=None,
         permission_after_submit=None,
@@ -151,6 +160,15 @@ class Editor:
         self.other_query = ""
 
         self.drop_collection_on_submit = drop_collection_on_submit
+        # ── 移出合集的可配坏行为(用户 2026-08-07 实拍锁定操作面,其余按 fail-loud 预设)──
+        # hover_gated: × 只在悬停 chip 后才出现(实拍事实);absent: 悬停了也没有 ×;
+        # silent: 点了 × chip 却不消失;modal_after: 点 × 后弹出一个我们没验证过的弹窗。
+        self.close_icon_hover_gated = close_icon_hover_gated
+        self.close_icon_absent = close_icon_absent
+        self.silent_close_icon = silent_close_icon
+        self.modal_after_close_icon = modal_after_close_icon
+        self.chip_hovered = False
+        self.modal_text = None
         self.silent_activity_clicks = silent_activity_clicks
         self.permission_before_submit = permission_before_submit
         self.permission_after_submit = permission_after_submit
@@ -201,6 +219,19 @@ class Editor:
         )
 
     # ---- 点击副作用 ----
+
+    def _hover_chip(self):
+        self.chip_hovered = True
+
+    def _click_close_icon(self):
+        """点 × :实拍只锁到"点 × 即移出",生效时机与确认弹窗未验证,故两者都可配。"""
+        if self.modal_after_close_icon is not None:
+            self.modal_text = self.modal_after_close_icon
+            return
+        if self.silent_close_icon:
+            return
+        self.collection = None
+        self.chip_hovered = False
 
     def _open_popover(self):
         self.popover_open = True
@@ -258,7 +289,18 @@ class Editor:
             label = self.collection or "选择合集"
             return [_El(label, on_click=self._open_popover)]
         if sel == bnc._COLLECTION_CHOSEN:
-            return [_El(self.collection)] if self.collection else []
+            if not self.collection:
+                return []
+            return [_El(self.collection, on_hover=self._hover_chip)]
+        if sel == bnc._COLLECTION_CLOSE_ICON:
+            # × 是 hover 态才渲染的(实拍):静态查不到,悬停后才出现
+            if not self.collection or self.close_icon_absent:
+                return []
+            if self.close_icon_hover_gated and not self.chip_hovered:
+                return []
+            return [_El("", on_click=self._click_close_icon)]
+        if sel == bnc._ANY_MODAL:
+            return [_El(self.modal_text)] if self.modal_text else []
         if sel == bnc._COLLECTION_POPOVER_ITEM:
             if not self.popover_open:
                 return []
@@ -1810,3 +1852,209 @@ def test_cover_no_input_and_no_entry_is_loud():
     out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
     assert out["status"] == "error"
     assert out["reason"].startswith("cover_upload_entry_not_found:")
+# ================= 移出合集(P0,2026-08-07 运营需求)=================
+#
+# 幂等矩阵四格 + 三条 fail-loud 闸(× 找不到 / chip 不消失 / 冒出没验证过的弹窗)。
+# 判据来源:用户 2026-08-07 编辑页四张实拍(× 是 hover 态才显);**取证轮的 DOM dump
+# 当时尚未跑到**,故"点 × 后是否有确认弹窗、是否立即生效"一律按 fail-loud 写死:
+# 见到任何可见弹窗就中止整单,绝不盲点确认。
+
+
+def _remove(editor, **kw):
+    human = _Human(editor.page)
+    out = bnc._remove_collection(
+        editor.page, human, _StubResponses(), kw.pop("collection_id", "c1"), **kw
+    )
+    return out, human
+
+
+def test_remove_skipped_when_note_in_no_collection():
+    """空态:本就不在任何合集 → skipped(幂等语义,不算失败),且**零点击零悬停**。"""
+    editor = Editor(collection=None)
+    out, human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "skipped"
+    assert human.clicks == [] and human.hovers == []
+
+
+def test_remove_done_when_chip_is_target():
+    """在目标合集里:先悬停 chip 让 × 显出来 → 点 × → chip 回到空态 → done。"""
+    editor = Editor(collection="咨询师简介")
+    out, human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "done", out
+    assert out["name"] == "咨询师简介"
+    assert editor.collection is None
+    # 悬停必须发生在点击**之前** —— × 静态不存在,不悬停就点不到
+    assert human.hovers, "没有悬停 chip,× 根本不会出现"
+    assert len(human.clicks) == 1
+
+
+def test_remove_skipped_when_in_another_collection():
+    """在别的合集里 = 本就不在目标合集 → skipped;reason 必须带出实际所在合集名。"""
+    editor = Editor(collection="心理咨询师")
+    out, human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "skipped"
+    assert "心理咨询师" in out["reason"]
+    assert human.clicks == []
+
+
+def test_remove_refuses_when_name_cannot_be_verified():
+    """比对不上就**绝不点 ×**:移出是破坏性操作,瞎点可能把笔记从正确的合集里摘出来。"""
+    editor = Editor(collection="咨询师简介")
+    out, human = _remove(editor)  # 不传 name,响应缓存也是空的
+    assert out["status"] == "error"
+    assert out["reason"].startswith("collection_remove_unverifiable:")
+    assert human.clicks == []
+
+
+def test_remove_errors_when_close_icon_absent_after_hover():
+    """悬停了 × 仍不出现 → fail-loud,reason 带当时 chip 文案(它也是"不在合集"的反证)。"""
+    editor = Editor(collection="咨询师简介", close_icon_absent=True)
+    out, human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("close_icon_not_found_after_hover:")
+    assert "咨询师简介" in out["reason"]
+    assert human.clicks == []
+
+
+def test_remove_errors_when_chip_survives_the_click():
+    """点了 × chip 还在 → collection_not_removed(绝不拿"没报错"当成功凭据)。"""
+    editor = Editor(collection="咨询师简介", silent_close_icon=True)
+    out, _human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("collection_not_removed:")
+
+
+def test_remove_aborts_whole_request_on_unverified_modal():
+    """点 × 后冒出没验证过的弹窗:**整单中止**(硬错),绝不猜哪个按钮是"确认"。
+
+    弹窗形态是设计 §7 的未验证点,取证轮没跑到。此时页面处于不可预期态,继续走下去
+    就是在弹窗上盲操作、并且可能带着弹窗去点发布 —— 一次全量覆盖提交的代价太大。
+    """
+    editor = Editor(collection="咨询师简介",
+                    modal_after_close_icon="确认移出该合集?")
+    with pytest.raises(bnc.NoteComponentsError) as exc:
+        _remove(editor, collection_name="咨询师简介")
+    assert exc.value.reason.startswith("collection_remove_unknown_modal:")
+    assert "确认移出该合集?" in exc.value.reason
+
+
+def test_remove_ignores_modals_that_were_already_there():
+    """判据是"**新**冒出来的弹窗",不是"页面上有弹窗"。
+
+    编辑器页本就可能挂着别的 ``.d-modal`` 容器,拿"有没有"当判据会把这个能力整个卡死;
+    真正要拦的是那个**因为我们点了 × 才出现**的确认框。基线里的那个不算。
+    """
+    editor = Editor(collection="咨询师简介")
+    editor.modal_text = "页面上本来就有的别的弹窗"
+    out, _human = _remove(editor, collection_name="咨询师简介")
+    assert out["status"] == "done", out
+
+
+# ---------------- apply_components 编排 ----------------
+
+
+def test_remove_step_runs_before_join_step(monkeypatch):
+    """移出排在加入**之前**:将来"换合集"分两次请求接力时顺序才是对的。"""
+    order = []
+    monkeypatch.setattr(bnc, "_remove_collection",
+                        lambda *a, **kw: order.append("remove") or {"status": "done"})
+    monkeypatch.setattr(bnc, "_set_collection",
+                        lambda *a, **kw: order.append("join") or {"status": "done"})
+    editor = Editor()
+    out = bnc.apply_components(
+        editor.page, _Human(editor.page), _StubResponses(),
+        collection_id="c1", remove_collection_id="c2",
+    )
+    assert order == ["remove", "join"]
+    assert set(out) == {"collection", "collection_remove"}
+
+
+def test_remove_only_request_touches_no_other_step(monkeypatch):
+    """只传移出:引用 / 活动 / 加入三步一步都不许跑。"""
+    for name in ("_set_collection", "_set_quote", "_set_activity"):
+        monkeypatch.setattr(bnc, name, lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("没请求的组件步被跑了")))
+    editor = Editor(collection="咨询师简介")
+    out = bnc.apply_components(
+        editor.page, _Human(editor.page), _StubResponses(),
+        remove_collection_id="c1", remove_collection_name="咨询师简介",
+    )
+    assert list(out) == ["collection_remove"]
+    assert out["collection_remove"]["status"] == "done"
+
+
+# ---------------- 全流程:提交 + 回读三态 ----------------
+
+
+def test_remove_full_flow_is_done(monkeypatch, wired):
+    """在目标合集 → 移出 → 提交 → 重进页面回读确认空态 → applied.collection_remove=True。"""
+    editor = Editor(collection="咨询师简介")
+    _wire(monkeypatch, editor, wired)
+    out = _run(editor, remove_collection_id="c1", remove_collection_name="咨询师简介")
+    assert out["status"] == "done", out
+    assert out["applied"] == {"collection_remove": True}
+    assert out["submitted"] is True
+    assert editor.submitted == 1
+
+
+def test_remove_full_flow_reports_false_when_platform_restores(monkeypatch, wired):
+    """提交后重进页面合集又回来了(服务端没接受)→ applied=False,绝不报 done。"""
+    editor = Editor(collection="咨询师简介")
+    _wire(monkeypatch, editor, wired)
+    original_submit = editor.submit
+
+    def submit_then_restore():
+        original_submit()
+        editor.collection = "咨询师简介"   # 服务端把绑定又写回来了
+
+    monkeypatch.setattr(editor, "submit", submit_then_restore)
+    out = _run(editor, remove_collection_id="c1", remove_collection_name="咨询师简介")
+    assert out["applied"]["collection_remove"] is False
+    assert out["status"] == "failed"
+
+
+def test_remove_full_flow_reports_none_when_readback_page_dies(monkeypatch, wired):
+    """回读进不去页面 → applied=None(未确认),如实上报,不乐观当成功。"""
+    editor = Editor(collection="咨询师简介")
+    _wire(monkeypatch, editor, wired)
+    calls = {"n": 0}
+    real_open = bnc.open_update_page
+
+    def flaky_open(page, account_id, note_id):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise bnc.NoteComponentsError("editor_not_ready: 回读进不去")
+        return real_open(page, account_id, note_id)
+
+    monkeypatch.setattr(bnc, "open_update_page", flaky_open)
+    out = _run(editor, remove_collection_id="c1", remove_collection_name="咨询师简介")
+    assert out["applied"]["collection_remove"] is None
+
+
+def test_remove_noop_never_submits(monkeypatch, wired):
+    """本就不在该合集 → **一次发布都不点**:提交是全量覆盖语义,零变更不值得付这个风险。
+
+    存量清理会对上百篇非目标笔记跑这条路,每篇白提交一次就是上百次真发布。
+    """
+    editor = Editor(collection=None)
+    _wire(monkeypatch, editor, wired, publish=False)
+    out = _run(editor, remove_collection_id="c1", remove_collection_name="咨询师简介")
+    assert out["status"] == "done"
+    assert out["applied"] == {"collection_remove": True}
+    assert out["submitted"] is False
+    assert editor.submitted == 0
+
+
+def test_remove_aborted_edit_marks_step_as_not_executed(monkeypatch, wired):
+    """前序破坏性编辑步失败弃提交时,移出步也要如实记「因前序失败未执行」。"""
+    editor = Editor(collection="咨询师简介")
+    _wire(monkeypatch, editor, wired, publish=False)
+    monkeypatch.setattr(
+        bnc, "_run_edit_steps",
+        lambda *a, **kw: {"aborted": True, "abort_reason": "图片闸不过",
+                          "outcomes": {}, "topics_dropped": [], "removed": 0, "added": 0},
+    )
+    out = _run(editor, remove_collection_id="c1", remove_collection_name="咨询师简介",
+               title="新标题")
+    assert out["aborted_before_submit"] is True
+    assert out["components"]["collection_remove"]["reason"] == bnc._SKIPPED_REASON

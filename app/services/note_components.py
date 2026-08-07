@@ -40,8 +40,12 @@ from app.models.published_note import PublishedNote
 from app.services import browser_jobs_repo
 from app.services.cookie_check import load_account_cookies
 
-# 三个组件字段名(REST 请求体 / payload / publish_jobs 列名三处同名,别再各起一套)
-COMPONENT_FIELDS = ("collection_id", "quoted_note_id", "activity_id")
+# 组件字段名(REST 请求体 / payload / publish_jobs 列名三处同名,别再各起一套)。
+# ``remove_collection_id`` 是 2026-08-07 新增的**移出**合集(与加入对称,幂等),
+# 它与 ``collection_id`` 在 REST 层互斥(同传 422),这里只负责同名直传。
+COMPONENT_FIELDS = (
+    "collection_id", "remove_collection_id", "quoted_note_id", "activity_id",
+)
 # 已发布笔记编辑字段名(设计 docs/design/2026-08-03-note-editing-design.md 3.1);
 # payload 里有任一非空值即"这次请求要改内容,不只是挂组件"。
 EDIT_FIELDS = (
@@ -58,6 +62,8 @@ def start_components(
     related_counselor: str | None = None,
     edits: dict | None = None,
     collection_name: str | None = None,
+    remove_collection_id: str | None = None,
+    remove_collection_name: str | None = None,
 ) -> str:
     """REST 触发一次三组件设置 / 笔记编辑;登记 browser_jobs 台账,返回轮询 id。
 
@@ -72,6 +78,8 @@ def start_components(
         "note_id": note_id,
         "collection_id": collection_id,
         "collection_name": collection_name,
+        "remove_collection_id": remove_collection_id,
+        "remove_collection_name": remove_collection_name,
         "quoted_note_id": quoted_note_id,
         "activity_id": activity_id,
         "related_counselor": related_counselor,
@@ -112,6 +120,13 @@ async def execute(account_id: int, payload: dict) -> dict:
         if payload.get("collection_name") and components.get("collection_id")
         else None
     )
+    # 移出侧同款辅助字段,且**比加入侧更要紧**:名字比对不上时浏览器层会拒绝点 ×
+    # (移出是破坏性操作,点错等于把笔记从正确的合集里摘出来)。
+    remove_collection_name = (
+        str(payload.get("remove_collection_name")).strip()
+        if payload.get("remove_collection_name") and components.get("remove_collection_id")
+        else None
+    )
     # 编辑字段**同名直传**给浏览器层(``set_note_components`` 的可选参数与这里同名)。
     # 用 ``is not None`` 而不是真值判断:``title=""`` 是"清空标题"这一合法意图(设计 3.1),
     # 真值判断会把它当成"没请求"静默丢掉。纯组件 payload 不含这些键 → ``edits`` 为空,
@@ -123,9 +138,9 @@ async def execute(account_id: int, payload: dict) -> dict:
     }
     if not any(components.values()) and not edits:
         return {
-            "error": "no_component_requested: collection_id / quoted_note_id / "
-                     "activity_id / 编辑字段(title / content / 图片增删)至少要给一个,"
-                     "否则这次编辑什么都不会改"
+            "error": "no_component_requested: collection_id / remove_collection_id / "
+                     "quoted_note_id / activity_id / 编辑字段(title / content / 图片增删)"
+                     "至少要给一个,否则这次编辑什么都不会改"
         }
 
     try:
@@ -138,7 +153,7 @@ async def execute(account_id: int, payload: dict) -> dict:
             async with browser_slot():
                 result = await asyncio.to_thread(
                     _apply_sync, account_id, cookies, note_id, components, edits,
-                    collection_name,
+                    collection_name, remove_collection_name,
                 )
         # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
         return await _sync_ledger(account_id, note_id, result)
@@ -160,6 +175,7 @@ def _apply_sync(
     components: dict,
     edits: dict | None = None,
     collection_name: str | None = None,
+    remove_collection_name: str | None = None,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
@@ -173,7 +189,8 @@ def _apply_sync(
             raise NoteComponentsError(f"browser_start_failed: {start.get('error')}")
         return set_note_components(
             client.page, account_id, note_id, **components,
-            collection_name=collection_name, **(edits or {})
+            collection_name=collection_name,
+            remove_collection_name=remove_collection_name, **(edits or {})
         )
     finally:
         client.stop()

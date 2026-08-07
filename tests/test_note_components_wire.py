@@ -129,11 +129,14 @@ def _wire(
     monkeypatch.setattr(bnc, "apply_content_edit", _step("content", "content"))
 
     def fake_apply_components(_page, _human, _responses, *, collection_id=None,
-                              collection_name=None, quoted_note_id=None, activity_id=None):
+                              collection_name=None, remove_collection_id=None,
+                              remove_collection_name=None, quoted_note_id=None,
+                              activity_id=None):
         calls.append("components")
         return {
             key: components.get(key, {"status": "done", "name": "身边的心理学"})
-            for key, value in (("collection", collection_id),
+            for key, value in (("collection_remove", remove_collection_id),
+                               ("collection", collection_id),
                                ("quote", quoted_note_id),
                                ("activity", activity_id))
             if value

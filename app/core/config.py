@@ -241,6 +241,17 @@ class Settings(BaseSettings):
     # 真正决定"多久补完"的是日上限,不是这个值。
     INTERACTION_BACKFILL_INTERVAL: int = 1800
 
+    # ── 合集批量清理(note_collection_batch,2026-08-07 运营移出需求 P1/P2)──
+    # 两个上限差一个数量级,因为**两条路的代价差一个数量级**:
+    # - 移出(dry_run=false)每篇是一次真「更新」提交(全量覆盖语义),比点赞收藏重得多,
+    #   所以取比互动补量还保守的 5 篇/轮 —— 存量 ~100 篇摊几天清完完全可接受,
+    #   **清理是一次性任务,慢比封号便宜**;
+    # - 扫描(dry_run=true)只开页读一眼合集区,**零点击零提交**,风险约等于浏览笔记,
+    #   所以放到 60 篇/轮(实际做几篇由单轮时间预算决定,剩下的下一轮接着来)。
+    # 调大移出那个值等于加快踩风控墙的速度,风险由业务侧承担。
+    NOTE_COLLECTION_REMOVE_ROUND_LIMIT: int = 5
+    NOTE_COLLECTION_SCAN_ROUND_LIMIT: int = 60
+
     # ── 草稿箱周清理(draft_clean_scheduler)──
     # 扫描间隔(秒,0=关闭);语义=每号每 7 天清一次草稿箱(本系统不用草稿,全是垃圾)。
     DRAFT_CLEAN_INTERVAL: int = 86400

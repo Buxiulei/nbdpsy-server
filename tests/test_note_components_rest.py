@@ -153,6 +153,7 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
         # 时推导根本不跑,登记的就是调用方给的那个 id。
         assert payload == {
             "note_id": "6a4ce556", "collection_id": "c1", "collection_name": None,
+            "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": "n-quote", "activity_id": "43561",
             "related_counselor": None,
         }
@@ -688,3 +689,88 @@ async def test_related_counselor_underivable_still_422(tmp_path, monkeypatch):
         )
         assert r.status_code == 422
         assert "推导不出" in r.text
+
+
+# ---------------- 移出合集(P0,2026-08-07)----------------
+
+
+async def test_remove_collection_is_exclusive_with_join(tmp_path, monkeypatch):
+    """加入与移出**同一次请求同时给 → 422**:语义相反,换合集的页面交互尚未取证。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("移出互斥号", "uNcRmEx", _COOKIES)
+        url = f"/api/accounts/{acc}/note-components"
+        r = await c.post(url, json={
+            "note_id": "n1", "collection_id": "c1", "remove_collection_id": "c2",
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+        assert "remove_collection_id" in r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import func, select
+
+            assert await s.scalar(select(func.count()).select_from(BrowserJob)) == 0
+
+
+async def test_remove_collection_name_alone_is_not_a_component(tmp_path, monkeypatch):
+    """只给 remove_collection_name(没有 id)不构成组件请求 → 422(与 collection_name 同款)。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("移出裸名号", "uNcRmNm", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "n1", "remove_collection_name": "咨询师简介",
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+
+
+async def test_remove_collection_reaches_payload_without_drift(tmp_path, monkeypatch):
+    """两个新字段按**同名**落进 payload:字段级漂移没有测试兜底,这里就是那道兜底。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("移出登记号", "uNcRmReg", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "n-target",
+            "remove_collection_id": "6a69e9e316fb000000000001",
+            "remove_collection_name": "咨询师简介",
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import select
+
+            row = await s.scalar(select(BrowserJob))
+        payload = json.loads(row.payload)
+        assert row.kind == "note_components"
+        assert payload["remove_collection_id"] == "6a69e9e316fb000000000001"
+        assert payload["remove_collection_name"] == "咨询师简介"
+        assert payload["collection_id"] is None
+
+
+def test_service_passes_remove_fields_to_browser_layer(monkeypatch):
+    """服务层 → 浏览器层的**参数名**不许漂:``_apply_sync`` 收到什么就得原样传下去。"""
+    seen = {}
+
+    def fake_set(page, account_id, note_id, **kwargs):
+        seen.update(kwargs)
+        return {"status": "done", "applied": {}}
+
+    class _Client:
+        def __init__(self, *_a, **_kw):
+            self.page = object()
+
+        def start(self):
+            return {"success": True}
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(note_components, "set_note_components", fake_set)
+    monkeypatch.setattr(note_components, "SyncClient", _Client)
+    note_components._apply_sync(
+        1, _COOKIES, "n1",
+        {"collection_id": None, "remove_collection_id": "c1",
+         "quoted_note_id": None, "activity_id": None},
+        None, None, "咨询师简介",
+    )
+    assert seen["remove_collection_id"] == "c1"
+    assert seen["remove_collection_name"] == "咨询师简介"

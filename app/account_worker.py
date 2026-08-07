@@ -403,6 +403,10 @@ def _resolve_execute(kind: str) -> Callable[[Optional[int], dict], Any]:
         from app.services import note_components
 
         return lambda account_id, payload: note_components.execute(account_id, payload)
+    if kind == "note_collection_batch":
+        from app.services import note_collection_batch
+
+        return lambda account_id, payload: note_collection_batch.execute(account_id, payload)
     if kind == "note_ledger_sync":
         from app.services import note_ledger
 

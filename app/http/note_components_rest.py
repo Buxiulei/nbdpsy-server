@@ -104,7 +104,22 @@ MANIFEST_ENTRIES = [
         "params": {
             "account_id": "path,int",
             "note_id": "body,str(要编辑的笔记平台 id,**必填**,深链定位)",
-            "collection_id": "body,str|None(加入哪个合集,取自 GET /collections)",
+            "collection_id": "body,str|None(**把这篇笔记归拢进该合集——它会成为合集成员、"
+                             "出现在合集页;这不是『引用/提及』某个合集**,只想在正文里导流到"
+                             "合集请自行写进 content 文案。加入哪个合集,取自 GET /collections)",
+            "remove_collection_id": "body,str|None(把这篇笔记**移出**该合集,与 collection_id "
+                                    "加入对称;取自 GET /collections。**幂等**:笔记本就不在该"
+                                    "合集(空态、或在别的合集里)→ components.collection_remove."
+                                    "status='skipped'、applied.collection_remove=true,"
+                                    "**不算失败且一次发布都不点**(零变更不值得付一次全量覆盖"
+                                    "提交的风险),可安全重跑;与 collection_id **同时传 → 422**"
+                                    "(换合集请分两次请求:先移出、回读确认、再加入))",
+            "remove_collection_name": "body,str|None(要移出的那个合集的名字,**强烈建议每次带 "
+                                      "remove_collection_id 时都传**——浏览器层靠它确认「当前"
+                                      "所在合集就是目标」,比对不上会报 "
+                                      "collection_remove_unverifiable 并**一次都不点**"
+                                      "(移出是破坏性操作,点错等于把笔记从正确的合集里摘出来);"
+                                      "单独给不构成组件请求)",
             "collection_name": "body,str|None(该合集的名字,**建议每次带 collection_id 时都顺带传**"
                                "——你从 GET /collections 本就有 id→名映射。笔记已在某合集时"
                                "「加入合集」按钮根本不渲染,浏览器层只能靠名字确认已选的是不是"
@@ -134,8 +149,9 @@ MANIFEST_ENTRIES = [
         },
         "returns": '{job_id, status:"queued"}',
         "errors": "403=无该号授权;404=账号不存在,或**带编辑字段时**台账里查无此 note_id;"
-                  "422=note_id 为空,或八个字段一个都没给,或只给了 related_counselor 但"
-                  "推导不出任何公开推介笔记(以上三种这次编辑都什么都不会改);"
+                  "422=note_id 为空,或九个字段一个都没给,或只给了 related_counselor 但"
+                  "推导不出任何公开推介笔记(以上三种这次编辑都什么都不会改),"
+                  "或 collection_id 与 remove_collection_id 同时给(加入与移出语义相反);"
                   "422 还包括编辑字段自身不合法:title 显示长度 >20 / content 为空串或 >900 / "
                   "给了图片操作却没给 expected_image_count / remove 下标重复或越界 / "
                   "删完原图剩 <1 / 改完总数 >18 / add_images 落盘失败 / "
@@ -162,6 +178,13 @@ MANIFEST_ENTRIES = [
                  "不传只能报 collection_chosen_unverifiable —— 那不是失败,是「没法确认」,"
                  "reason 里带着实读到的合集名,名字对得上就视为已挂,"
                  "可用 note-component-reads 复核。"
+                 "**移出合集(remove_collection_id)另有三条**(2026-08-07 上线):"
+                 "① **幂等且零风险**——笔记本就不在该合集时 skipped、**一次发布都不点**,"
+                 "所以拿它扫一批笔记做清理是安全的,重跑也安全;真移出时才走一次正常提交;"
+                 "② **必须带 remove_collection_name**——比对不上一律拒绝动手,理由见参数说明;"
+                 "③ **确认弹窗尚未取证**:点移除的 × 之后若平台弹出任何弹窗,系统**绝不盲点**,"
+                 "整单中止(不提交)并把弹窗原文放进 error(collection_remove_unknown_modal);"
+                 "看到它请把原文回报给我们补取证,别自行重试。"
                  "**引用推导仅在显式引用意图时进行**(2026-08-04 收口):只传 "
                  "collection_id/activity_id/编辑项时**绝不**顺带推导出引用——本端点对已"
                  "发布笔记只做被请求的事(发布端点 POST /api/publish-jobs 的隐式推导是"
@@ -194,8 +217,8 @@ MANIFEST_ENTRIES = [
         "method": "GET", "path": "/api/note-components/{job_id}",
         "summary": "轮询笔记编辑结果(三组件 + 标题/正文/图片,逐项生效情况)",
         "admin_only": False, "params": {"job_id": "path,str"},
-        "returns": "{status, result_status?, applied?:{collection/quote/activity/title/"
-                   "content/image_add/image_remove: true|false|null}, "
+        "returns": "{status, result_status?, applied?:{collection/collection_remove/quote/"
+                   "activity/title/content/image_add/image_remove: true|false|null}, "
                    "failed?:[{component,reason}], submitted?, permission_before?, "
                    "permission_after?, permission_preserved?, permission_restored?, "
                    "body_appended?, topics_injected?, topics_dropped?, images_before?, "
@@ -207,6 +230,9 @@ MANIFEST_ENTRIES = [
                  "`partially_applied`=只有一部分生效(哪项没成看 failed)。"
                  "applied 的每个值是三态:true=回读确认生效;false=回读确认**没**生效;"
                  "null=没能回读(未确认)——**只有 true 才算数**,这条产品线的失败是静默的。"
+                 "applied.collection_remove 同款三态,但它的 true 有两种来路:真移出后重进"
+                 "页面确认合集区已不含目标(submitted=true),或**笔记本就不在该合集**"
+                 "(幂等零点击,submitted=false)——两者都是「现在它确实不在那个合集里」。"
                  "一项都没生效时整体落 error(reason 里带 note_components_all_failed)。"
                  "submitted=有没有观察到那次提交请求的响应;"
                  "permission_preserved=false 表示可见性档位被这次提交改动了(严重),"
@@ -314,6 +340,18 @@ class NoteComponentsRequest(BaseModel):
                     "skipped(视为成功)而非报错;不带且无法确认时报 "
                     "collection_chosen_unverifiable。单独出现不构成组件请求",
     )
+    remove_collection_id: str | None = Field(
+        default=None, max_length=64,
+        description="把这篇笔记**移出**该合集(与 collection_id 加入对称,幂等:本就不在 → "
+                    "skipped 不算失败);与 collection_id **同时传 → 422**,换合集请分两次请求",
+    )
+    remove_collection_name: str | None = Field(
+        default=None, max_length=64,
+        description="要移出的那个合集的名字,**强烈建议每次带 remove_collection_id 时都传**:"
+                    "浏览器层靠它确认「当前所在合集就是目标」,比对不上**绝不点移除**"
+                    "(移出是破坏性操作,点错等于把笔记从正确的合集里摘出来);"
+                    "单独出现不构成组件请求",
+    )
     quoted_note_id: str | None = Field(default=None, max_length=64)
     activity_id: str | None = Field(default=None, max_length=64)
     related_counselor: str | None = Field(
@@ -364,6 +402,7 @@ class NoteComponentsRequest(BaseModel):
         if not any(
             (
                 self.collection_id,
+                self.remove_collection_id,
                 self.quoted_note_id,
                 self.activity_id,
                 self.related_counselor,
@@ -374,8 +413,25 @@ class NoteComponentsRequest(BaseModel):
             )
         ):
             raise ValueError(
-                "collection_id / quoted_note_id / activity_id / related_counselor / "
-                "title / content / add_images / remove_image_indexes 至少要给一个"
+                "collection_id / remove_collection_id / quoted_note_id / activity_id / "
+                "related_counselor / title / content / add_images / "
+                "remove_image_indexes 至少要给一个"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _collection_join_and_remove_are_exclusive(self):
+        """加入与移出**不许同一次请求同时给** → 422。
+
+        「换合集」在页面上是不是原子的、点 chip 主体会不会重新弹出下拉,都还没取证
+        (设计 docs/design/2026-08-07-collection-remove-design.md §1.1)。语义歧义(先移后加?原子换?)不该由服务端替调用方静默选一个 ——
+        真要换合集就分两次请求:先移出旧的,确认生效,再加入新的。
+        """
+        if self.collection_id and self.remove_collection_id:
+            raise ValueError(
+                "collection_id 与 remove_collection_id 不能同时给(加入与移出语义相反,"
+                "「换合集」的页面交互尚未取证);请分两次请求:先移出旧合集,回读确认后"
+                "再加入新合集"
             )
         return self
 
@@ -538,7 +594,8 @@ async def start_note_components_endpoint(
     # 编辑什么都不会改,却要真提交一次全量覆盖的发布,一样是纯风险零收益,和请求体校验
     # 那一关同样拦掉。
     if edits is None and not any(
-        (payload.collection_id, quoted_note_id, payload.activity_id)
+        (payload.collection_id, payload.remove_collection_id, quoted_note_id,
+         payload.activity_id)
     ):
         # 用 422 而不是裸 ValueError(→400):与请求体校验那一关同样的失败语义,
         # 调用方不该因为"拦在哪一层"看到两种状态码。
@@ -561,6 +618,8 @@ async def start_note_components_endpoint(
         payload.activity_id,
         payload.related_counselor,
         collection_name=payload.collection_name,
+        remove_collection_id=payload.remove_collection_id,
+        remove_collection_name=payload.remove_collection_name,
         edits=edits,
     )
     return {"job_id": job_id, "status": "queued"}
