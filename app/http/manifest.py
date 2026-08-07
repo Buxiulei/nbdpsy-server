@@ -77,7 +77,8 @@ MANIFEST_ENTRIES = [{
     "admin_only": False, "params": {},
     "returns": "{service, version, description, base_url, auth, caller, workflows, constraints, error_contract, endpoints}",
     "errors": "401=apikey 缺失/无效/停用",
-    "notes": "接入后第一站,一次拿全上手信息。",
+    "notes": "接入后第一站,一次拿全上手信息。端点按能力域分组、最近的变更记录、"
+             "以及当前仍未消除的已知边界,在 GET /api/guide(本接口的超集视角)。",
 }]
 
 

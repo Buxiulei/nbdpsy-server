@@ -14,6 +14,7 @@ from app.http import (
     downloads,
     dreamina_rest,
     extension_rest,
+    guide,
     interaction_backfill_rest,
     manifest,
     note_comment_rest,
@@ -37,6 +38,7 @@ from app.http import (
 ALL_ROUTERS = [
     system.router,
     manifest.router,
+    guide.router,
     accounts_rest.router,
     admin_rest.router,
     cookies_import.router,
@@ -66,6 +68,7 @@ ALL_ROUTERS = [
 ALL_MANIFEST_ENTRIES = [
     *system.MANIFEST_ENTRIES,
     *manifest.MANIFEST_ENTRIES,
+    *guide.MANIFEST_ENTRIES,
     *accounts_rest.MANIFEST_ENTRIES,
     *admin_rest.MANIFEST_ENTRIES,
     *cookies_import.MANIFEST_ENTRIES,
