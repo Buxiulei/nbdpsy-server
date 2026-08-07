@@ -87,7 +87,10 @@ def patched_sync_client(monkeypatch):
     monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
     monkeypatch.setattr(
         sc, "apply_original_declaration",
-        lambda page, human: {"status": "done", "observed": "checked_on"},
+        # **kw 必须留:合并层裁决后调用点会带 handle_consent_modal=True(三路径统一),
+        # 假件签名锁死的话那个 kwarg 会 TypeError——被 sync_client 的 try/except 吞成
+        # status=error,测试照绿但这条链再也没被真正走到(静默失效,比红更糟)。
+        lambda page, human, **kw: {"status": "done", "observed": "checked_on"},
     )
     monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
 
