@@ -866,7 +866,10 @@ def _remove_collection(
     的 .close-icon"是加入路径的纪律,一字不改)。开这个受控例外的代价用四道闸补上:
 
     1. **名字比对不过绝不动手** —— 移出是破坏性操作,点错等于把笔记从**正确的**合集里
-       摘出来;``collection_name`` 是主路径(已选态开不了弹层,拿不到 id→名映射);
+       摘出来;``collection_name`` 是主路径(已选态开不了弹层,拿不到 id→名映射)。比对
+       判据是**全等**不是包含:同族合集名互为前缀时(「科普」/「科普合集」)包含判据会
+       在笔记其实属于「科普合集」时通过,然后把它从那个**错误**的合集里摘掉、回读空态、
+       报成功——静默的破坏。不全等但包含时 fail-loud 带出 chip 原文,零点击零提交;
     2. **选择器以 ``.collection-plugin-choose`` 为容器 scope** —— 裸 ``.close-icon`` 不唯一;
     3. **未验证的弹窗即停** —— 点 × 后是否有确认弹窗、是立即生效还是要提交才落地,都是
        设计 docs/design/2026-08-07-collection-remove-design.md §6 的未验证点(取证轮未跑到)。见到任何可见弹窗就抛 ``NoteComponentsError``
@@ -898,10 +901,24 @@ def _remove_collection(
                       "id→名映射);移出是破坏性操作,比对不上**绝不动手**——"
                       "请求里带 remove_collection_name 即可确认",
         }
-    if target_name not in _norm(chosen):
+    chosen_name = _norm(chosen)
+    if chosen_name != target_name:
+        if target_name in chosen_name:
+            # 包含但不全等:要么是同族合集名(「科普」vs「科普合集」——此时笔记压根不在
+            # 目标里,点下去就是从**错误**的合集里摘人),要么是 chip 文案带了我们没取证过
+            # 的装饰字符(× 之类)。两者在这里分不开,而代价不对称,所以一律不动手。
+            return {
+                "status": "error", "collection_id": str(collection_id),
+                "name": target_name,
+                "reason": f"collection_remove_unverifiable: 合集区文案 {chosen_name[:40]!r} "
+                          f"只是**包含**目标「{target_name}」而不全等;同族合集名互为前缀时"
+                          f"(「科普」/「科普合集」)按包含动手等于把笔记从错误的合集里摘出来,"
+                          f"移出是破坏性操作,比不到全等**绝不动手**,零点击零提交——"
+                          f"请按合集区实际文案传 remove_collection_name",
+            }
         return {
             "status": "skipped", "collection_id": str(collection_id), "name": target_name,
-            "reason": f"collection_in_another_not_target: 该笔记在合集「{_norm(chosen)[:20]}」里,"
+            "reason": f"collection_in_another_not_target: 该笔记在合集「{chosen_name[:20]}」里,"
                       f"不在目标「{target_name}」里 —— 本就不在目标合集,幂等语义下不算失败,"
                       f"一次都没点",
         }
@@ -2450,7 +2467,9 @@ def _verify_after_submit(
         if gone:
             verified["collection_remove"] = True
         elif name:
-            verified["collection_remove"] = name not in _norm(current)
+            # 与 ``_remove_collection`` 的比对判据**同一条**:全等才算"还在这个合集里"。
+            # 用包含会把「科普合集」判成「科普」还在,同族名下回执直接反过来。
+            verified["collection_remove"] = _norm(current) != name
         else:
             verified["collection_remove"] = None
         if verified["collection_remove"] is not True:

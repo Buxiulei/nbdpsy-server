@@ -1950,6 +1950,69 @@ def test_remove_ignores_modals_that_were_already_there():
     assert out["status"] == "done", out
 
 
+# ---------------- 名字比对必须全等(同族合集名) ----------------
+#
+# 「科普」与「科普合集」并存时,包含判据会一路放行:笔记明明在「科普合集」里,请求移出
+# 「科普」照样点 ×、回读空态、报 done —— 笔记被从**错误的**合集里摘了出来,回执还是成功。
+# 移出是破坏性操作,这条比对是唯一防线,所以三处判据(动手闸 / 提交后回读 / P1 扫描名单)
+# 一律改全等。加入侧的同款包含判据不动:那边错判只是良性 skip。
+
+
+def test_remove_refuses_when_chip_only_contains_target_name():
+    """chip「科普合集」+ 目标「科普」:包含但不全等 → fail-loud,**零点击零悬停**。
+
+    reason 里必须带当场 chip 原文 —— chip 文案会不会掺装饰字符尚未取证,这条 fail-loud
+    正好把真实文案交给真号首验去收敛。
+    """
+    editor = Editor(collection="科普合集")
+    out, human = _remove(editor, collection_id="c2", collection_name="科普")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("collection_remove_unverifiable:")
+    assert "'科普合集'" in out["reason"], out["reason"]
+    assert human.clicks == [] and human.hovers == []
+    assert editor.collection == "科普合集", "笔记被从错误的合集里摘出去了"
+
+
+def test_remove_skips_when_chip_is_a_prefix_of_the_target():
+    """反方向(chip「科普」+ 目标「科普合集」):本就不在目标合集 → skipped,一次都没点。"""
+    editor = Editor(collection="科普")
+    out, human = _remove(editor, collection_id="c2", collection_name="科普合集")
+    assert out["status"] == "skipped"
+    assert out["reason"].startswith("collection_in_another_not_target:")
+    assert human.clicks == []
+
+
+def test_remove_exact_name_still_goes_through():
+    """全等命中不回归:该点的还得点,该 done 的还得 done。"""
+    editor = Editor(collection="科普")
+    out, human = _remove(editor, collection_id="c2", collection_name="科普")
+    assert out["status"] == "done", out
+    assert editor.collection is None
+    assert len(human.clicks) == 1
+
+
+def _verify_remove(editor, monkeypatch, *, step_name):
+    monkeypatch.setattr(bnc, "open_update_page", lambda *_a, **_kw: None)
+    verified, _permission, _extra = bnc._verify_after_submit(
+        editor.page, 1, "n1",
+        collection_id=None, quoted_note_id=None, activity_id=None,
+        remove_collection_id="c2",
+        outcomes={"collection_remove": {"status": "done", "name": step_name}},
+        responses=_StubResponses(),
+    )
+    return verified["collection_remove"]
+
+
+def test_verify_readback_reads_sibling_name_as_target_absent(monkeypatch):
+    """提交后回读到「科普合集」:目标「科普」确实不在里面 —— 用包含会反过来判成"还在"。"""
+    assert _verify_remove(Editor(collection="科普合集"), monkeypatch, step_name="科普") is True
+
+
+def test_verify_readback_still_catches_the_target_surviving(monkeypatch):
+    """全等命中不回归:目标名原样躺在合集区 = 没移掉,照旧判 False。"""
+    assert _verify_remove(Editor(collection="科普"), monkeypatch, step_name="科普") is False
+
+
 # ---------------- apply_components 编排 ----------------
 
 

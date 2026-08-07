@@ -162,6 +162,34 @@ async def test_scan_single_note_failure_does_not_stop_the_round(monkeypatch):
     assert out["notes"][0]["reason"].startswith("editor_not_ready:")
 
 
+async def test_scan_membership_is_exact_match_not_substring(monkeypatch):
+    """同族合集名(「科普」/「科普合集」):名单判据必须全等,含包含判据就是假阳性。
+
+    这份名单正是 P2 批量移出的输入 —— 「科普合集」的笔记混进「科普」的名单,下一步就会
+    被从**正确的**合集里摘出去。扫描路只读,但它的错会一路喂到破坏性操作。
+    """
+    _wire(monkeypatch)
+    _no_gap(monkeypatch)
+    labels = {"n1": "科普合集", "n2": "科普", "n3": "科"}
+    current = {"note_id": None}
+
+    def track(_page, _account_id, note_id):
+        current["note_id"] = note_id
+
+    monkeypatch.setattr(svc, "open_update_page", track)
+    monkeypatch.setattr(svc, "read_collection_label", lambda _p: labels[current["note_id"]])
+    monkeypatch.setattr(svc, "set_note_components", lambda *_a, **_kw: (_ for _ in ()).throw(
+        AssertionError("扫描路调了提交路径")))
+
+    out = await svc.execute(
+        1, _payload(["n1", "n2", "n3"], dry_run=True, collection_name="科普")
+    )
+    assert [n["in_collection"] for n in out["notes"]] == [False, True, False]
+    assert out["in_collection"] == 1
+    # 判不进名单的那两篇要留下实读文案,人工才能看出是同族名撞的
+    assert out["notes"][0]["label"] == "科普合集"
+
+
 # ---------------- 移出路(P2):三态 + 只认 applied is True ----------------
 
 

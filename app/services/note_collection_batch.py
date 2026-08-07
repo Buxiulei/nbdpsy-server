@@ -49,6 +49,7 @@ from app.browser.browser_gate import browser_slot
 from app.browser.login_detector import PAGE_TEXT_JS, classify_wall_text, is_wall_url
 from app.browser.note_components import (
     NoteComponentsError,
+    _norm,  # 名字比对的空白归一必须与浏览器层同一条,否则两边名单对不上
     open_update_page,
     read_collection_label,
     set_note_components,
@@ -256,9 +257,11 @@ def _scan_one(page, account_id: int, note_id: str, collection_name: str) -> dict
         open_update_page(page, account_id, note_id)
         label = read_collection_label(page)
         entry["label"] = label
-        # 判据与 ``_remove_collection`` 的名字比对**同一条**:合集区文案含目标名即成员。
+        # 判据与 ``_remove_collection`` 的名字比对**同一条**:合集区文案**全等**目标名才算
+        # 成员。用包含判据会把「科普合集」的笔记算进「科普」的名单,而这份名单正是 P2 批量
+        # 移出的输入 —— 假阳性会一路喂到破坏性操作。
         # 读不到(None=空态)就是不在任何合集里,不是"未知"。
-        entry["in_collection"] = bool(label and collection_name in label)
+        entry["in_collection"] = bool(label) and _norm(label) == _norm(collection_name)
     except NoteComponentsError as exc:
         entry["status"] = "error"
         entry["reason"] = exc.reason
