@@ -178,3 +178,104 @@ async def test_explicit_empty_images_without_video_still_400(tmp_path, monkeypat
         )
         assert r.status_code == 400, r.text
         assert "图片" in r.json()["error"]
+
+
+# ---------------- 视频与图文共用同一个请求模型:全字段生效 ----------------
+
+
+async def test_video_job_carries_every_component_field(tmp_path, monkeypatch):
+    """视频请求沿用 PublishNoteRequest 的**全部**可选字段,一个都不许在路上掉。
+
+    这条锁的是"视频没有另造窄版模型"这件事本身:话题 / 定时 / 三组件 / 咨询师 /
+    笔记目的全部与图文同一套语义,漏任何一列都会在这里红。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        fake = _install_fake_scheduler()
+        acc = await _account_with_operator("号V8", "uV8", "op-video-full")
+        video = _make_video(tmp_path)
+        r = await c.post(
+            "/api/publish-jobs",
+            json={
+                "account_id": acc, "title": "T", "content": "C",
+                "video": video,
+                "topics": ["#心理", "#情绪"],
+                "schedule_time": "2099-01-01T09:00:00+08:00",
+                "collection_id": "col-1",
+                "quoted_note_id": "note-1",
+                "activity_id": "act-1",
+                "related_counselor": "李宇",
+                "note_purpose": "推介咨询师",
+            },
+            headers=bearer("op-video-full"),
+        )
+        assert r.status_code == 202, r.text
+        job_id = r.json()["job_id"]
+        # 带 schedule_time 就不该立即入队(与图文同一套定时语义)
+        assert fake.submitted == []
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, job_id)
+            assert job.video_path == video
+            assert json.loads(job.topics_json) == ["#心理", "#情绪"]
+            assert job.collection_id == "col-1"
+            assert job.quoted_note_id == "note-1"
+            assert job.activity_id == "act-1"
+            assert job.related_counselor == "李宇"
+            assert job.note_purpose == "推介咨询师"
+            # +08:00 → naive UTC(与图文 _parse_schedule_time 同一套)
+            assert job.schedule_time.hour == 1
+            assert job.schedule_time.tzinfo is None
+
+
+async def test_video_job_derives_quoted_note_from_counselor(tmp_path, monkeypatch):
+    """没给 quoted_note_id 时,视频任务同样按 related_counselor 推导引用哪篇。
+
+    推导链是端点体里无条件跑的 counselor_quote.resolve_quoted_note_id —— 这条用例
+    钉死它没被"视频跳过图片校验"那段挡在分支外。
+    """
+    from app.http import publish_rest as pr
+
+    async def _fake_resolve(session, account_id, title, counselor):
+        return "derived-note-id" if counselor == "李宇" else None
+
+    monkeypatch.setattr(pr.counselor_quote, "resolve_quoted_note_id", _fake_resolve)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V9", "uV9", "op-video-quote")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={
+                "account_id": acc, "title": "T", "content": "C",
+                "video": _make_video(tmp_path), "related_counselor": "李宇",
+            },
+            headers=bearer("op-video-quote"),
+        )
+        assert r.status_code == 202, r.text
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, r.json()["job_id"])
+            assert job.quoted_note_id == "derived-note-id"
+
+
+async def test_explicit_quoted_note_id_wins_over_counselor_for_video(tmp_path, monkeypatch):
+    """显式 quoted_note_id 优先于 related_counselor 推导(与图文同一套优先级)。"""
+    from app.http import publish_rest as pr
+
+    async def _boom(*a, **k):
+        raise AssertionError("显式 quoted_note_id 时不该走推导")
+
+    monkeypatch.setattr(pr.counselor_quote, "resolve_quoted_note_id", _boom)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        _install_fake_scheduler()
+        acc = await _account_with_operator("号V10", "uV10", "op-video-explicit")
+        r = await c.post(
+            "/api/publish-jobs",
+            json={
+                "account_id": acc, "title": "T", "content": "C",
+                "video": _make_video(tmp_path),
+                "quoted_note_id": "explicit-note", "related_counselor": "李宇",
+            },
+            headers=bearer("op-video-explicit"),
+        )
+        assert r.status_code == 202, r.text
+        async with db_module.async_session() as s:
+            job = await s.get(PublishJob, r.json()["job_id"])
+            assert job.quoted_note_id == "explicit-note"

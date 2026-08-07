@@ -696,7 +696,13 @@ class SyncClient:
             if topics:
                 r6 = atomic.step6_set_publish_options(tags=topics)
                 if not r6.get("success"):
-                    logger.warning(f"步骤6警告: {r6.get('error')}")
+                    # 逐话题的失败原因(content_box_focus_failed / no_floating_layer / …)
+                    # 一并打出来:只丢一句 error 的话,运营看到的永远是"话题没上",
+                    # 分不清是正文框没聚焦还是这个话题在平台上根本不存在。
+                    logger.warning(
+                        f"步骤6警告: {r6.get('error')} | 逐话题失败明细: "
+                        f"{r6.get('topics_failed')}"
+                    )
 
             # step6.5 三组件(设计 3.1:step6 之后、step7 之前);失败仅告警,不阻断发布
             component_result = self._apply_components(atomic, responses, components)

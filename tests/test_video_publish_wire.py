@@ -285,3 +285,123 @@ async def test_scheduler_runner_routes_video(monkeypatch, tmp_path):
             done = await s.get(PublishJob, job_id)
             assert done.status == "published"
             assert json.loads(done.images_json) == []
+
+
+# ---------------- 视频分支同样跑到三组件 / 话题 / 原创声明 ----------------
+
+
+def test_video_branch_runs_topics_components_and_original(monkeypatch):
+    """视频发布走到 step6 之后照样设三组件 + 原创声明,顺序与图文一致(都在 step7 之前)。
+
+    这条锁的是"三组件那一段没有被我的媒体分支圈进去" —— 它必须留在分支外、两条路共用。
+    """
+    from app.browser import sync_client as sc
+
+    holder = {}
+    seen = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(
+        sc, "apply_original_declaration",
+        lambda page, human: {"status": "done", "observed": "checked_on"},
+    )
+
+    class _FakeResponses:
+        def attach(self, page):
+            seen["attached"] = True
+
+        def detach(self):
+            seen["detached"] = True
+
+    monkeypatch.setattr(sc, "ComponentResponses", _FakeResponses)
+
+    def _fake_apply_components(page, human, responses, **kw):
+        seen["components"] = kw
+        holder["atomic"].calls.append("components")
+        return {k.replace("_id", ""): {"status": "done"} for k in kw if kw[k]}
+
+    monkeypatch.setattr(sc, "apply_components", _fake_apply_components)
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note(
+        "标题", "正文", [], ["#心理"],
+        {"collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1"},
+        video_path="/data/a.mp4",
+    )
+
+    assert r["success"] is True
+    calls = holder["atomic"].calls
+    # 话题 → 三组件 → 原创声明 → 发布门 → step7,顺序不许乱
+    assert calls.index("step6") < calls.index("components") < calls.index("step7")
+    assert calls.index("components") < calls.index("submit_gate")
+    assert seen["attached"] is True and seen["detached"] is True
+    assert seen["components"] == {
+        "collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1"}
+    assert r["components"]["original_declaration"]["status"] == "done"
+    assert r["topics_applied"] == ["#心理"]
+
+
+def test_video_branch_component_failure_does_not_block_publish(monkeypatch):
+    """三组件里有失败项(如视频页可能没有活动区)→ 照发不误,失败只回显不阻断。"""
+    from app.browser import sync_client as sc
+
+    holder = {}
+
+    class _Fake(_FakeAtomicBase):
+        def __init__(self, page, job_tag=None):
+            super().__init__(page, job_tag)
+            holder["atomic"] = self
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _Fake)
+    monkeypatch.setattr(sc, "SyncHumanActions", lambda page, **k: object())
+    monkeypatch.setattr(
+        sc, "apply_original_declaration",
+        lambda page, human: {"status": "done"},
+    )
+    monkeypatch.setattr(sc, "ComponentResponses", lambda: type(
+        "R", (), {"attach": lambda self, p: None, "detach": lambda self: None})())
+    monkeypatch.setattr(sc, "apply_components", lambda *a, **k: {
+        "activity": {"status": "error",
+                     "reason": "activity_section_absent: 页面上一张活动卡都没有…"},
+    })
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    r = client.publish_note(
+        "标题", "正文", [], None, {"activity_id": "a1"}, video_path="/data/a.mp4")
+
+    assert r["success"] is True, "组件失败绝不能阻断发布"
+    assert "step7" in holder["atomic"].calls
+    assert r["components"]["activity"]["status"] == "error"
+    assert "activity_section_absent" in r["components"]["activity"]["reason"]
+
+
+def test_account_worker_video_job_passes_components(monkeypatch):
+    """account_worker 视频分支把三组件一并交给发布层(不是只传路径)。"""
+    import app.account_worker as aw
+
+    monkeypatch.setattr(aw, "_load_account_cookies", lambda db, aid: [])
+    seen = {}
+
+    def _fake_publish_once(account_id, cookies, title, content, image_paths,
+                           topics=None, components=None, job_tag=None, video_path=None):
+        seen.update(topics=topics, components=components, video_path=video_path)
+        return aw.sync_client.PublishResult(success=True, note_url="u")
+
+    monkeypatch.setattr(aw.sync_client, "publish_once", _fake_publish_once)
+
+    job = {
+        "id": 11, "title": "T", "content": "C",
+        "images_json": "[]", "topics_json": '["#心理"]',
+        "video_path": "/data/a.mp4",
+        "collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1",
+    }
+    assert aw._execute_publish("db.sqlite", 1, job).success is True
+    assert seen["topics"] == ["#心理"]
+    assert seen["components"] == {
+        "collection_id": "c1", "quoted_note_id": "n1", "activity_id": "a1"}

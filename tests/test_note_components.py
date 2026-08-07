@@ -1338,3 +1338,75 @@ def test_collection_flow_probes_band_before_click(monkeypatch, wired):
 
     assert result["status"] == "done"
     assert bnc._COLLECTION_BUTTON in editor.row_band_probes
+
+
+# ---------------- 活动卡缺失的归因分辨 ----------------
+
+
+def test_activity_missing_reason_distinguishes_no_section_from_no_card():
+    """活动卡找不到时,「这个页型压根没有活动区」与「活动区在但没这张卡」必须分得开。
+
+    为什么必须分:视频笔记页的真号 fixtures **没有采到活动卡**(图文页有),而平台
+    08-03 还有过把编辑页活动区整个收走的前科。两种情形都走"告警不阻断"这条路,但
+    运营的动作完全不同 —— 前者是"这个页型可能就没有,带 job_id 上报给我们确认",
+    后者是"活动下线了,重新拉一次活动列表"。混成一句话等于让运营去猜。
+    """
+    absent = bnc.explain_activity_card_missing("心理健康周", card_count=0, scrolls=6)
+    present_but_missing = bnc.explain_activity_card_missing(
+        "心理健康周", card_count=4, scrolls=6)
+
+    assert absent.startswith("activity_section_absent:")
+    assert "视频" in absent or "该页型" in absent
+    assert present_but_missing.startswith("activity_card_not_found:")
+    assert "4" in present_but_missing  # 有几张卡要说出来,才知道是"区空"还是"卡没了"
+    assert absent != present_but_missing
+
+
+def test_activity_missing_reason_carries_activity_name_and_scrolls():
+    """两种归因都要带上活动名与已滚轮数(取证:证明不是没滚够就下的结论)。"""
+    for count in (0, 3):
+        reason = bnc.explain_activity_card_missing("心理健康周", card_count=count, scrolls=6)
+        assert "心理健康周" in reason
+        assert "6" in reason
+
+
+class _NoopHuman:
+    """只满足 _set_activity 会用到的两个动作(下滚触发懒渲染 + 停顿)。"""
+
+    def scroll(self, *_a, **_k):
+        return None
+
+    def wait(self, *_a, **_k):
+        return None
+
+
+class _StubResponses:
+    """活动列表响应的最小替身(内容不重要,parse_activities 已被打桩)。"""
+
+    def latest(self, _mark):
+        return {}
+
+
+def _set_activity_with(monkeypatch, card_count: int):
+    """跑 _set_activity,把"活动卡定位不到 + 页面上有几张卡"两件事打成桩。"""
+    monkeypatch.setattr(bnc, "read_activity_action_text", lambda p, n: None)
+    monkeypatch.setattr(bnc, "count_activity_cards", lambda p: card_count)
+    monkeypatch.setattr(
+        bnc, "parse_activities",
+        lambda raw: [{"id": "act-1", "name": "心理健康周", "desc": ""}],
+    )
+    return bnc._set_activity(object(), _NoopHuman(), _StubResponses(), "act-1")
+
+
+def test_set_activity_reports_section_absent_when_no_cards(monkeypatch):
+    """页面上一张活动卡都没有 → error 的 reason 走 activity_section_absent 那支。"""
+    out = _set_activity_with(monkeypatch, card_count=0)
+    assert out["status"] == "error"
+    assert out["reason"].startswith("activity_section_absent:")
+
+
+def test_set_activity_reports_card_not_found_when_section_has_cards(monkeypatch):
+    """活动区里有别的卡、只是没有目标那张 → activity_card_not_found。"""
+    out = _set_activity_with(monkeypatch, card_count=5)
+    assert out["status"] == "error"
+    assert out["reason"].startswith("activity_card_not_found:")

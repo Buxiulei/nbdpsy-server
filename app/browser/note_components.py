@@ -599,6 +599,44 @@ def read_activity_action_text(page, activity_name: str) -> Optional[str]:
     return _norm(action.inner_text()) if action is not None else None
 
 
+def count_activity_cards(page) -> int:
+    """页面上「关联活动」区里渲染了几张活动卡(读不到算 0)。
+
+    只用来给"目标活动卡找不到"这件事**归因**:0 张 = 整个活动区都不在,
+    >0 张 = 区在、只是没有目标那张。用已在生产验证的 ``.activity-card``
+    选择器,不去猜活动区容器的 class。
+    """
+    try:
+        return len(page.query_selector_all(_ACTIVITY_CARD))
+    except Exception:  # noqa: BLE001 — 归因辅助,读不到就当 0,绝不制造新异常
+        return 0
+
+
+def explain_activity_card_missing(
+    activity_name: str, card_count: int, scrolls: int
+) -> str:
+    """目标活动卡找不到时的失败原因文案(纯函数,两种成因分开说)。
+
+    为什么必须分开:**视频笔记页的真号 fixtures 里没有出现活动卡**(图文页有),
+    而平台 2026-08-03 还把编辑页的活动区整个收走过。两种情形都走"告警不阻断发布",
+    但运营的下一步动作完全相反 —— 一个是"这个页型可能压根没有活动区,带 job_id
+    上报给我们确认",一个是"活动下线了,重新拉一次活动列表"。混成一句话等于让运营猜。
+
+    两种文案都带上活动名与已下滚轮数(取证:证明结论不是"没滚够"滚出来的)。
+    """
+    if card_count <= 0:
+        return (
+            f"activity_section_absent: 页面上一张活动卡都没有(已下滚 {scrolls} 轮触发"
+            f"懒渲染),疑该页型没有「关联活动」这个设置区 —— 视频笔记页真号采集里就没采到"
+            f"活动卡。活动没设上,但笔记照发;要「{activity_name}」真挂上请带 job_id 上报"
+        )
+    return (
+        f"activity_card_not_found: 活动区里有 {card_count} 张活动卡,但没有名为"
+        f"「{activity_name}」的那张(已下滚 {scrolls} 轮触发懒渲染)。活动频繁上下线,"
+        f"请重新拉取活动列表确认它还在"
+    )
+
+
 def _activity_linked(page, activity_name: str) -> bool:
     """该活动是否已关联 —— 判据是按钮文案翻转成「取消关联」(实测唯一可靠信号)。"""
     return read_activity_action_text(page, activity_name) == _ACTIVITY_LINKED_TEXT
@@ -1187,10 +1225,13 @@ def _set_activity(
             if action_text is not None:
                 break
     if action_text is None:
+        # 找不到目标卡,先分清是「整个活动区不在」还是「区在但没这张卡」再报 ——
+        # 两者运营动作相反,见 explain_activity_card_missing。
         return {
             "status": "error",
-            "reason": f"activity_card_not_found: 页面上没有名为「{name}」的活动卡"
-                      f"(已下滚 {_ACTIVITY_REVEAL_SCROLLS} 轮触发懒渲染仍未出现)",
+            "reason": explain_activity_card_missing(
+                name, count_activity_cards(page), _ACTIVITY_REVEAL_SCROLLS
+            ),
         }
     if action_text == _ACTIVITY_LINKED_TEXT:
         # 本来就关联着 —— 绝不点「取消关联」
