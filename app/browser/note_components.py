@@ -628,6 +628,18 @@ def classify_activity_action(action_text: Optional[str]) -> str:
     return "unknown"
 
 
+def consent_ticked_from_simulator_class(simulator_class: Optional[str]) -> bool:
+    """协议复选框勾上了没(纯函数):模拟器元素的 class 里**没有** ``unchecked`` 才算勾上。
+
+    为什么不读隐藏 ``input.checked``:探针实测那个 input 的 rect 是 0×0(拿不到也点不着),
+    与「原创声明」大开关同一套路 —— 这套组件库把真实状态放在模拟器元素的 class 上。
+    读不到 class(None)一律算**没勾上**:读不到 ≠ 好了。
+    """
+    if not simulator_class:
+        return False
+    return "unchecked" not in simulator_class
+
+
 def probe_activity_section(page) -> Dict[str, Any]:
     """回读「关联活动」区的存在性证据:卡片数 + 容器选择器 + 区标题文案。
 
@@ -1482,10 +1494,15 @@ _ORIGINAL_CONFIRM_TEXT = "声明原创"
 # `div.d-grid.d-checkbox.d-checkbox-main-label.d-clickable`,里面的 input[type=checkbox]
 # 是 0×0 隐藏节点(点不着)。后两个候选留作平台改版时的兜底,全不命中即 fail-loud。
 _ORIGINAL_CONSENT_CANDIDATES = (
+    ".d-modal.creator-modal-style .d-checkbox.d-checkbox-main-label",
     ".d-modal.creator-modal-style .d-checkbox.d-clickable",
-    ".d-modal.creator-modal-style .d-checkbox",
     ".d-modal.creator-modal-style [class*='checkbox']",
 )
+# 「声明原创」按钮真值(探针 account10);文案匹配作兜底
+_ORIGINAL_CONFIRM_BUTTON = ".d-modal.creator-modal-style button.custom-button.bg-red"
+# 勾选态**看模拟器元素的 class 有没有 unchecked** —— 隐藏 input 的 rect 是 0×0、
+# 拿不到也点不着,与大开关同套路(探针 account10 实测)。
+_ORIGINAL_CONSENT_SIMULATOR = ".d-modal.creator-modal-style .d-checkbox-simulator"
 # 「声明原创」按钮当前可点否(三处 disabled 写法都读,与 step7 同口径)
 _ORIGINAL_CONFIRM_ENABLED_JS = r"""(text) => {
     const modal = document.querySelector('.d-modal.creator-modal-style');
@@ -1529,6 +1546,16 @@ def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
                           "「我已阅读并同意」复选框(选择器候选全未命中)"}
     human.click(consent, reason=f"勾选「{_ORIGINAL_CONSENT_TEXT}《原创声明须知》」")
     human.wait(0.4, 0.9, context="等「声明原创」按钮解禁")
+    # 回读勾选态:模拟器 class 掉了 unchecked 才算真勾上(隐藏 input 0×0 不可用)
+    try:
+        simulator = page.query_selector(_ORIGINAL_CONSENT_SIMULATOR)
+        simulator_class = (
+            simulator.get_attribute("class") if simulator is not None else None
+        )
+    except Exception:  # noqa: BLE001
+        simulator_class = None
+    observed["consent_simulator_class"] = simulator_class
+    observed["consent_ticked"] = consent_ticked_from_simulator_class(simulator_class)
 
     deadline = time.monotonic() + _ORIGINAL_CONFIRM_TIMEOUT_S
     enabled = None
@@ -1546,7 +1573,12 @@ def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
                 "reason": f"original_confirm_never_enabled: 勾了同意但「{_ORIGINAL_CONFIRM_TEXT}」"
                           f"{_ORIGINAL_CONFIRM_TIMEOUT_S:.0f}s 内没解禁"}
 
-    button = _find_text_in_section(page, _ORIGINAL_MODAL, _ORIGINAL_CONFIRM_TEXT)
+    try:
+        button = page.query_selector(_ORIGINAL_CONFIRM_BUTTON)
+    except Exception:  # noqa: BLE001
+        button = None
+    if button is None:  # 真值选择器没命中就退回按文案找(平台改 class 时的兜底)
+        button = _find_text_in_section(page, _ORIGINAL_MODAL, _ORIGINAL_CONFIRM_TEXT)
     if button is None:
         return {"ok": False, "observed": observed,
                 "reason": f"original_confirm_not_found: 读到按钮可点,但按文案取不到"
@@ -1561,6 +1593,18 @@ def _complete_original_consent(page, human: SyncHumanActions) -> Dict[str, Any]:
     if still_open:
         return {"ok": False, "observed": observed,
                 "reason": "original_modal_not_closed: 点了声明原创但弹窗仍在"}
+    # 成功终态判据 = **弹窗消失** 且 **开关行回读 checked 为真**,两个都要。
+    # 单看弹窗消失不够:点 X 关掉弹窗同样"消失",而探针实测那条路 checked 会被重置成
+    # False —— 正是这个差别把"真声明了"和"把弹窗关掉了"区分开。
+    try:
+        final_checked = page.evaluate(_ORIGINAL_CHECKED_JS)
+    except Exception:  # noqa: BLE001
+        final_checked = None
+    observed["final_checked"] = final_checked
+    if final_checked is not True:
+        return {"ok": False, "observed": observed,
+                "reason": "original_switch_not_on_after_confirm: 弹窗关了但开关行回读"
+                          f"checked={final_checked!r},不是开态"}
     return {"ok": True, "observed": observed, "reason": ""}
 
 
@@ -2448,9 +2492,18 @@ def read_catalog(page, account_id: int, note_id: str) -> Dict[str, Any]:
 # 因此正确形状是「往封面区里的隐藏 file input 直接 set_input_files」,与视频/图片上传同源
 # (绝不点上传按钮 —— 真桌面上会弹原生 GTK 文件框卡死整条流程)。
 #
-# ⚠️ 仍缺的一块:封面区**后代 DOM 没有被探针 dump**,所以「灰色方块那个元素的 class」与
-# 「file input 是否一开始就在 DOM 里」两件事没有直接证据。故下面对 input 给候选 + 对入口
-# 给候选,并 fail-loud:定位不到就带当场取证报 error,绝不假装设上了。
+# ⚠️ 三轮探针共 4 种策略都**没能触发出任何弹窗**,这个"没有弹窗"的结论别再花成本重验。
+# 后续接手的人请先读完这段:
+#   - 触发点疑似 `.publish-page-content-cover .cover .upload-cover` 那个 tile
+#     (文案「设置封面 遇到问题?」),但它是**瞬时态**:平台自动生成 3 张候选帧之后
+#     它疑似被替换/改名,存在**竞态窗口** —— 也就是说"进编辑器就去点"和"等候选帧出来再点"
+#     看到的 DOM 可能不是一个东西;
+#   - 第一轮的启发式定位还误点过页面**底部无关的 activity-cover 横幅**(同名 cover 咬人,
+#     与活动区/话题区那个「更多」同型),所以任何封面定位都必须收口在
+#     `.publish-page-content-cover` 容器内,绝不全页找 `[class*='cover']`。
+# 「灰色方块的 class」与「file input 是否一开始就在 DOM 里」仍无直接证据(封面区后代 DOM
+# 尚未被 dump),故 input 与入口各给候选并 fail-loud:定位不到就带当场取证报 error,
+# 绝不假装设上了。
 _COVER_SECTION = ".publish-page-content-cover"
 # 封面区内的隐藏 file input(候选;首选按 accept 收口避开视频那个)
 _COVER_INPUT_CANDIDATES = (

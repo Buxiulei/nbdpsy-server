@@ -735,12 +735,15 @@ class SyncClient:
             if cover_result is not None:
                 component_result["cover"] = cover_result
             try:
-                # 视频路径走**协议弹窗链**(勾同意 → 等「声明原创」解禁 → 点它);
-                # 图文路径维持上线前行为 —— 图文发布页是否也弹这个弹窗尚无真号证据,
-                # 在拿到证据前不动正在跑的生产链路(详见交给 lead 的单独缺陷报告)。
+                # **两条路径都走协议弹窗链**(勾同意 → 等「声明原创」解禁 → 点它 → 回读)。
+                # 图文原本走的是"见弹窗就 X 关掉 + 回读 checked",探针(account10 发布页)
+                # 与生产数据双实锤该序列**从未真正声明成功过**:08-05 上线至今全部 published
+                # 任务的 original_declaration 都是 error「original_not_applied」。
+                # 一个从未工作过的功能没有"保持不变"的保护价值,故一并切过来;
+                # 页面若不弹协议弹窗,链路内部自动回退老判据,不误伤。
                 component_result["original_declaration"] = apply_original_declaration(
                     atomic.page, SyncHumanActions(atomic.page),
-                    handle_consent_modal=bool(video_path),
+                    handle_consent_modal=True,
                 )
             except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断发布
                 component_result["original_declaration"] = {
