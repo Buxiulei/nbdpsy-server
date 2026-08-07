@@ -45,6 +45,7 @@ _IDEMPOTENT_KINDS = (
     "cookie_check", "note_export", "note_ledger_sync", "note_purpose_backfill",
     "note_components_read",
     "note_media_sync",  # 纯只读快照,重跑零副作用
+    "note_extract_comments",  # 他人笔记评论只读抓取,结果按 note_id 覆盖写缓存
 )
 
 # 进程内消费任务强引用集合:防未完成的 asyncio.Task 被 GC 提前回收。
