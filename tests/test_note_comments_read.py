@@ -274,7 +274,36 @@ def test_empty_comment_area_returns_empty_not_error():
     result, human = _run(page, max_count=20)
     assert result["comments"] == []
     assert result["complete"] is True
+    assert result["stop_reason"] == "empty"
     assert human.hovers == 0  # 没有评论可 hover,别乱动鼠标
+
+
+def test_empty_while_platform_says_there_are_comments_is_not_complete():
+    """选择器整体失配 ≠ 这篇没人评论 —— 平台标称数就在入参里,不许报 complete=True。
+
+    真号那篇标称 17 条。假设某天平台改版让 ``.parent-comment`` 全失配(页面上一条都读
+    不到),报 ``complete=True`` + ``stop_reason=empty`` 时,机器读起来就是"这篇没人评论"
+    —— 运营据此得出的"对标笔记零互动"结论是彻头彻尾的假信息。
+    """
+    page = _PagingPage([[]])
+    result, human = _run(page, max_count=20, expected_total=17)
+    assert result["comments"] == []
+    assert result["complete"] is False, "标称 17 条却一条没读到,绝不许声称抓完"
+    assert result["stop_reason"] == "empty_but_expected"
+    assert result["expected_total"] == 17, "得把标称数一起交出去,调用方才知道差多少"
+    assert human.scrolls == 0  # 读不到就停手,别在失配的页面上白滚
+
+
+def test_empty_and_platform_also_says_zero_is_genuinely_empty():
+    """标称就是 0:那才是真的没人评论,不许报 empty_but_expected 吓唬调用方。
+
+    这条路径在更早的 ``reached_expected_total`` 判据上就返回了(0 条 >= 标称 0),
+    断言的是**结论**:抓完了、没有可疑。
+    """
+    page = _PagingPage([[]])
+    result, _ = _run(page, max_count=20, expected_total=0)
+    assert result["complete"] is True
+    assert result["stop_reason"] != "empty_but_expected"
 
 
 # ---------------- 撞墙 ----------------

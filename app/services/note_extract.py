@@ -458,7 +458,36 @@ def cache_store(note_id: str, payload: dict) -> None:
 
 def cache_load(note_id: str) -> dict | None:
     """读缓存;不存在/损坏/超 24h 一律当没有。"""
-    path = cache_path(note_id)
+    return _read_fresh(cache_path(note_id))
+
+
+def cache_sweep_expired() -> int:
+    """懒清理:把过期/损坏的缓存件从盘上**删掉**,返回删除数。
+
+    **为什么必须真删而不是只在读取时当没有**:缓存件里装的是**他人**的笔记正文、评论
+    原话与评论者 user_id。TTL 到了就该从我方磁盘上消失,而不是字节永久堆着、只是不再被
+    读到。形态照 ``upload_service.sweep_expired`` —— 写新缓存时顺手扫一遍,零后台循环、
+    零新实体。过期判据直接复用 ``_read_fresh``(与读路径同一条规则,不另写一套 TTL)。
+
+    在途写入的 ``.tmp`` 件不在 ``*.json`` 里,天然不会被扫到。
+    """
+    root = Path(settings.DATA_DIR) / "note_extracts"
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for path in root.glob("*.json"):
+        if _read_fresh(path) is not None:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            logger.warning(f"[note_extract] 过期缓存删除失败 {path.name}: {exc}")
+    return removed
+
+
+def _read_fresh(path: Path) -> dict | None:
+    """读一个缓存件;不存在/损坏/超 TTL 返回 None。"""
     if not path.is_file():
         return None
     try:
@@ -562,6 +591,8 @@ async def extract(
             await _fill_image_bed(payload, client, operator, session)
 
         cache_store(payload["note_id"], payload)
+        # 懒清理:落新件时顺手把过期的他人内容从盘上扫掉(见 cache_sweep_expired)。
+        cache_sweep_expired()
         return payload
     finally:
         if owns_client:
@@ -573,39 +604,100 @@ async def _fill_image_bed(payload: dict, client, operator, session) -> None:
 
     下不动的图 ``url`` 留 None 并在 ``unavailable`` 里记一笔 —— **绝不重排剩下的图**,
     序号就是"第几张图",错位了拆解时对不上原帖。
+
+    **超限的那张要在这里先滤掉**:``save_images`` 是"全部通过才落盘",单张超
+    ``UPLOAD_MAX_MB`` 直接 ValueError,整批一起放弃。而 ``download_image`` 的兜底恰恰会
+    退到永久链 —— 那是**原图**(实测同一张图签名件 112KB、原图 15.0MB,差 139 倍),
+    一张退到原图就足以让本来好好的其余几张全变 None。逐张过滤,别让一张拖垮整批。
     """
     from datetime import datetime as _dt
 
     from app.services.upload_service import save_images
 
+    max_bytes = settings.UPLOAD_MAX_MB * 1024 * 1024
     downloaded: list[tuple[int, bytes]] = []
+    oversize: list[int] = []
     for index, item in enumerate(payload["images"]):
         data = await download_image(item, client)
-        if data:
-            item["bytes"] = len(data)
-            downloaded.append((index, data))
-    if not downloaded:
-        payload["unavailable"]["images"] = (
-            f"{len(payload['images'])} 张图一张都没下下来:签名 URL 与永久链都失败,"
-            f"多半是平台 CDN 策略变了;signed_url / permanent_url 仍原样给出,可自行带 Referer 试"
-        )
-        return
-    try:
-        saved = await save_images(
-            session,
-            operator,
-            [(f"{i:02d}.img", data) for i, data in downloaded],
-            _dt.utcnow(),
-        )
-    except ValueError as exc:
-        payload["unavailable"]["images"] = f"图床落盘失败:{exc}(signed_url / permanent_url 仍可用)"
-        return
-    for (index, _data), url in zip(downloaded, saved["urls"]):
-        payload["images"][index]["url"] = url
-    payload["image_batch"] = {"batch_id": saved["batch_id"], "expires_at": saved["expires_at"].isoformat()}
+        if not data:
+            continue
+        item["bytes"] = len(data)
+        if len(data) > max_bytes:
+            oversize.append(item["ordinal"])
+            logger.warning(
+                f"[note_extract] 第 {item['ordinal']} 张 {len(data)} 字节超图床单张上限,"
+                f"跳过入库(多半是签名链失效退到了永久原图链)"
+            )
+            continue
+        downloaded.append((index, data))
+
+    if downloaded:
+        try:
+            saved = await save_images(
+                session,
+                operator,
+                [(f"{i:02d}.img", data) for i, data in downloaded],
+                _dt.utcnow(),
+            )
+        except ValueError as exc:
+            payload["unavailable"]["images"] = f"图床落盘失败:{exc}(signed_url / permanent_url 仍可用)"
+            return
+        for (index, _data), url in zip(downloaded, saved["urls"]):
+            payload["images"][index]["url"] = url
+        payload["image_batch"] = {
+            "batch_id": saved["batch_id"], "expires_at": saved["expires_at"].isoformat()
+        }
+        _mark_batch_source(saved["batch_id"], payload)
+
+    _explain_missing_images(payload, oversize)
+
+
+def _explain_missing_images(payload: dict, oversize: list[int]) -> None:
+    """把"哪几张没进图床、为什么"写进 ``unavailable``(两种原因分开说,别混成一句)。"""
     missing = [img["ordinal"] for img in payload["images"] if not img["url"]]
-    if missing:
-        payload["unavailable"]["images"] = (
-            f"第 {missing} 张没下下来(其余已进图床);这几张的 signed_url / permanent_url "
-            f"仍原样给出,可自行带 Referer 试"
+    if not missing:
+        return
+    reasons = []
+    failed = [o for o in missing if o not in oversize]
+    if failed:
+        reasons.append(
+            f"第 {failed} 张没下下来(签名 URL 与永久链都失败,多半是平台 CDN 策略变了)"
         )
+    if oversize:
+        reasons.append(
+            f"第 {oversize} 张超过图床单张 {settings.UPLOAD_MAX_MB}MB 上限没入库"
+            f"(签名展示图约 100-200KB,退到永久链拿回的是原图,实测可达 15MB)"
+        )
+    payload["unavailable"]["images"] = (
+        ";".join(reasons) + ";这几张的 signed_url / permanent_url 仍原样给出,可自行带 Referer 取"
+    )
+
+
+def _mark_batch_source(batch_id: str, payload: dict) -> None:
+    """在图床批次目录里落一个来源标记:盘上区分"代下的他人素材"与"运营自己上传的素材"。
+
+    代下的图进的是与运营自有素材同一个桶(``DATA_DIR/uploads/{batch_id}/``)、同一张
+    ``upload_batches`` 表,而 publish 封面正是从这个桶按路径取 —— 没有标记就无从分辨。
+
+    **为什么是同目录一个点文件**(三种做法里实体最少的那个):目录名前缀要给
+    ``save_images`` 加参数,那是 uploads_rest 也在用的公共签名;落库要加列 + 一次迁移。
+    点文件零新实体、不进 ``urls`` 因而不影响任何按路径取图的调用方,且跟着批次目录被
+    ``upload_service.sweep_expired`` 的 rmtree 一起清掉,不会变成孤儿。
+    """
+    path = Path(settings.DATA_DIR) / "uploads" / batch_id / ".source.json"
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "kind": "third_party_note_extract",
+                    "note_id": payload.get("note_id"),
+                    "note_url": (payload.get("source") or {}).get("final_url"),
+                    "author_user_id": (payload.get("author") or {}).get("user_id"),
+                    "fetched_at": (payload.get("source") or {}).get("fetched_at"),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:  # 标记写不上不该让提取本身失败
+        logger.warning(f"[note_extract] 图床来源标记写入失败 batch_id={batch_id}: {exc}")

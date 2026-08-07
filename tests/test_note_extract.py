@@ -357,6 +357,136 @@ def test_cache_not_served_when_request_needs_more(tmp_path, monkeypatch):
     assert ne.cache_covers(cached, with_images=True, with_comments=20) is True
 
 
+def test_expired_cache_files_are_swept_off_disk(tmp_path, monkeypatch):
+    """过期 = 从盘上删掉,不是"读的时候当没有"。
+
+    缓存件里是**他人**的正文、评论原话与评论者 user_id;TTL 到了这些字节就该消失,
+    而不是永久堆在我方磁盘上只是不再被读到。损坏件同理(读不出来更没有留着的理由)。
+    """
+    _cache_settings(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    fresh, stale = "a" * 24, "b" * 24
+    ne.cache_store(fresh, {"note_id": fresh, "source": {"fetched_at": now.isoformat()}})
+    ne.cache_store(stale, {
+        "note_id": stale,
+        "source": {"fetched_at": (now - timedelta(hours=25)).isoformat()},
+    })
+    broken = ne.cache_path("c" * 24)
+    broken.write_text("{ 半截件", encoding="utf-8")
+
+    assert ne.cache_sweep_expired() == 2
+    assert ne.cache_path(fresh).is_file(), "没过期的不许动"
+    assert not ne.cache_path(stale).exists(), "过期件必须真删,不能只是读不到"
+    assert not broken.exists()
+
+
+# ---------------- 图床代下 ----------------
+
+
+class _StubResponse:
+    def __init__(self, content: bytes):
+        self.status_code = 200
+        self.content = content
+
+
+class _StubCdn:
+    """假 CDN:最后一张给超大字节(复刻"签名链失效退到永久原图链"那一幕),其余给小图。"""
+
+    def __init__(self, big: bytes):
+        self.big = big
+
+    async def get(self, url, **kw):
+        return _StubResponse(self.big if url.endswith("#6") else b"small-bytes")
+
+
+def _image_payload(count: int = 6) -> dict:
+    return {
+        "note_id": _NOTE_ID,
+        "images": [
+            {
+                "ordinal": i + 1, "url": None, "signed_url": f"https://sns-webpic-qc.xhscdn.com/x#{i + 1}",
+                "permanent_url": f"https://sns-img-qc.xhscdn.com/y#{i + 1}", "bytes": None,
+            }
+            for i in range(count)
+        ],
+        "unavailable": {},
+        "author": {"user_id": "5e08bd510000000001006a28"},
+        "source": {"final_url": _FULL_URL, "fetched_at": datetime.now(timezone.utc).isoformat()},
+    }
+
+
+def _install_fake_bed(monkeypatch, tmp_path, recorded: dict):
+    """假 save_images:**照抄真实现的两条契约** —— 单张超限抛 ValueError、且整批一起黄。
+
+    照抄这两条是这个用例的牙:去掉被测的逐张过滤,超限那张就会被送进来,这里就抛,
+    六张全变 None —— 断言必红。
+    """
+    from app.core.config import settings
+    from app.services import upload_service
+
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    max_bytes = settings.UPLOAD_MAX_MB * 1024 * 1024
+
+    async def _fake_save_images(session, operator, files, now):
+        for _name, data in files:
+            if len(data) > max_bytes:
+                raise ValueError(f"单张图片超过 {settings.UPLOAD_MAX_MB}MB 上限")
+        recorded["files"] = files
+        batch_dir = Path(settings.DATA_DIR) / "uploads" / "BATCH1"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "batch_id": "BATCH1",
+            "urls": [f"https://mcp.nbdpsy.com/uploads/BATCH1/{i:02d}.png" for i in range(1, len(files) + 1)],
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+        }
+
+    monkeypatch.setattr(upload_service, "save_images", _fake_save_images)
+    return max_bytes
+
+
+async def test_oversize_image_filtered_instead_of_sinking_whole_batch(tmp_path, monkeypatch):
+    """一张超限图**不许**拖垮整批:五张正常的照进图床,第六张给 None + 说明。
+
+    根因是两条实现叠在一起:``download_image`` 签名链失败会退到永久链,而永久链是
+    **原图**(审查实测同一篇第一张:签名件 112KB vs 原图 15.0MB,差 139 倍);
+    ``save_images`` 又是"全部通过才落盘",单张超限直接 ValueError。不逐张过滤的话,
+    一张退到原图就足以让六张 url 全 None。
+    """
+    recorded: dict = {}
+    max_bytes = _install_fake_bed(monkeypatch, tmp_path, recorded)
+    payload = _image_payload()
+    await ne._fill_image_bed(payload, _StubCdn(b"\0" * (max_bytes + 1)), object(), object())
+
+    assert len(recorded["files"]) == 5, "超限那张不该被送进 save_images(送了整批一起黄)"
+    assert all(img["url"] for img in payload["images"][:5]), "其余五张必须照常进图床"
+    assert payload["images"][5]["url"] is None
+    # 序号绝不重排:第 6 张仍是第 6 张
+    assert [img["ordinal"] for img in payload["images"]] == [1, 2, 3, 4, 5, 6]
+    reason = payload["unavailable"]["images"]
+    assert "[6]" in reason and "MB 上限" in reason
+    # 拿不到图床链的那张,原始链接照给,运营仍能自己去取
+    assert payload["images"][5]["signed_url"] and payload["images"][5]["permanent_url"]
+    assert payload["images"][5]["bytes"] == max_bytes + 1
+
+
+async def test_image_bed_batch_carries_third_party_source_marker(tmp_path, monkeypatch):
+    """代下的他人图与运营自有素材同桶同表,盘上必须留得下"这批是代下的"这条信息。"""
+    from app.core.config import settings
+
+    recorded: dict = {}
+    _install_fake_bed(monkeypatch, tmp_path, recorded)
+    payload = _image_payload(count=2)
+    await ne._fill_image_bed(payload, _StubCdn(b"never-used"), object(), object())
+
+    marker = Path(settings.DATA_DIR) / "uploads" / payload["image_batch"]["batch_id"] / ".source.json"
+    assert marker.is_file(), "批次目录里没有来源标记,盘上分不出他人素材与我方素材"
+    info = json.loads(marker.read_text(encoding="utf-8"))
+    assert info["kind"] == "third_party_note_extract"
+    assert info["note_id"] == _NOTE_ID
+    assert info["note_url"] == _FULL_URL
+    assert info["author_user_id"] == "5e08bd510000000001006a28"
+
+
 def test_cache_no_images_at_all_counts_as_covered(tmp_path, monkeypatch):
     """纯图 0 张的笔记(理论上不存在,但视频笔记就是 0 张):别把空列表判成没缓存。"""
     _cache_settings(tmp_path, monkeypatch)

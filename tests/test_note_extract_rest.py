@@ -385,6 +385,65 @@ async def test_poll_unknown_job_is_404(tmp_path, monkeypatch, fake_http):
         assert r.status_code == 404
 
 
+# ---------------- 缓存清道夫 ----------------
+
+
+async def test_extract_sweeps_expired_cache_files(tmp_path, monkeypatch, fake_http):
+    """落新缓存时顺手把过期的他人内容从盘上清掉(懒清理,零后台循环)。"""
+    from datetime import datetime, timedelta, timezone
+
+    fake_http(_FakeClient())
+    async with rest_client(tmp_path, monkeypatch) as client:
+        stale = note_extract.cache_path("f" * 24)
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text(json.dumps({
+            "note_id": "f" * 24,
+            "source": {
+                "fetched_at": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+            },
+        }), encoding="utf-8")
+
+        r = await client.post(
+            "/api/notes/extract", json={"url": _SHORT}, headers=bearer(ADMIN_KEY)
+        )
+        assert r.status_code == 200, r.text
+        assert not stale.exists(), "过期缓存件该在这次落盘时被顺手清掉"
+        assert note_extract.cache_path(_NOTE_ID).is_file(), "刚落的新件不许被误删"
+
+
+# ---------------- manifest(skill 照它写代码,措辞即接口) ----------------
+
+
+def _entry(path: str) -> dict:
+    from app.http import note_extract_rest
+
+    return next(e for e in note_extract_rest.MANIFEST_ENTRIES if e["path"] == path)
+
+
+def test_manifest_forbids_resending_after_a_wall():
+    """撞墙后重发正是把号往风控深处推的打法,manifest 不能教出这个循环。
+
+    ``notes`` 是 skill 生成代码时唯一的依据:同一段里既说 wall_scan_qr 是常见 error,
+    又说"失败可直接重发",skill 就会写出撞墙即重试的循环。
+    """
+    notes = _entry("/api/note-extracts/{job_id}")["notes"]
+    assert "失败可直接重发" not in notes, "这句会直接造出撞墙重试循环"
+    assert "禁止重发" in notes and "wall_" in notes
+    assert "其余 error 可直接重发" in notes, "别矫枉过正到连普通失败都不敢重发"
+
+
+def test_manifest_declares_empty_but_expected_state():
+    notes = _entry("/api/note-extracts/{job_id}")["notes"]
+    assert "empty_but_expected" in notes, "新增的 stop_reason 必须同步进 manifest"
+
+
+def test_manifest_asks_caller_to_self_rate_limit():
+    """纯 HTTP 路径没有会话额度天然限速,manifest 不能鼓励"随便打"。"""
+    notes = _entry("/api/notes/extract")["notes"]
+    assert "爱调多少次调多少次" not in notes
+    assert "控制频率" in notes
+
+
 async def test_extract_requires_apikey(tmp_path, monkeypatch, fake_http):
     fake_http(_FakeClient())
     async with rest_client(tmp_path, monkeypatch) as client:

@@ -28,7 +28,9 @@ JS 现算的 ``x-s``/``x-t`` 签名头一律 406(带不带 cookie 都一样)。*
 仍未验证:``.show-more``(展开更多回复)本模块**不点**,故子回复只取默认展开的那些;
 到底判据在这条 17 评论的笔记上没能触发 ``reached_expected_total``(见上第 3 条修法),
 真到底靠 ``no_new_after_scroll``。抓不到评论时返回 ``comments: []`` + ``stop_reason``,
-调用方能一眼看出"没抓到"而不是"这篇没人评论"—— 平台给的 ``interact.comment`` 是第二只眼。
+且**"没抓到"与"这篇没人评论"由本模块自己分开**:平台给的 ``interact.comment`` 已经作为
+``expected_total`` 传进来了,标称 >0 却一条都没读到就报 ``empty_but_expected`` +
+``complete=False``,不把选择器失配说成"没人评论"(这层交叉验证不该甩给调用方)。
 
 三条纪律与本仓其它只读模块一致:
 
@@ -121,7 +123,18 @@ def read_note_comments(
             return _result(collected, False, "round_cap", rounds)
 
         if not collected and not _has_any_comment(page):
-            # 一条都没有:这篇可能真没人评论(也可能选择器失配,靠 expected_total 交叉验证)
+            # 一条都没有。平台标称的评论数是**第二只眼**,而且它就在入参里 —— 标称 >0 却
+            # 一条都读不到,那是选择器整体失配(或页面根本没渲染出来),这时候报
+            # complete=True + empty,机器读起来就是"这篇没人评论",正是本模块要防的误报。
+            if expected_total is not None and expected_total > 0:
+                logger.warning(
+                    f"[note_comments] 平台标称 {expected_total} 条评论却一条都没读到,"
+                    f"选择器多半失配,不声称抓完"
+                )
+                return {
+                    **_result([], False, "empty_but_expected", rounds),
+                    "expected_total": expected_total,
+                }
             return _result([], True, "empty", rounds)
 
         if not hovered:
