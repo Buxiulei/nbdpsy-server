@@ -1739,36 +1739,85 @@ def test_panel_tried_evidence_survives_the_panel_covering_the_entry(monkeypatch)
 
 
 # ---------------- 视频封面:内联结构(真号截图证实非弹窗) ----------------
+#
+# 2026-08-07 真号 e2e(账号11,视频)实测 observed:封面区在、区里 3 张推荐图在、
+# **file input 数 = 0**,而两个上传位候选(.cover-upload / [class*='upload'])全未命中
+# → cover_upload_entry_not_found。所以这一轮:上传位候选扩成三层(class → 文案 → 尺寸
+# tile)、**悬停优先于点击**(点上传位有弹原生 GTK 文件框卡死的历史前科)、失败时把封面区
+# outerHTML 一起交出去。下面的替身按那次 observed 的形状搭。
+
+
+class _Tile:
+    """封面区里的一个后代元素(文案 / 尺寸 / 是否含推荐图)。"""
+
+    def __init__(self, text, *, w=112, h=150, has_img=False):
+        self.text = text
+        self._box = {"x": 10.0, "y": 20.0, "width": float(w), "height": float(h)}
+        self._has_img = has_img
+
+    def inner_text(self):
+        return self.text
+
+    def bounding_box(self):
+        return dict(self._box)
+
+    def query_selector(self, sel):
+        return "IMG" if (sel == "img" and self._has_img) else None
+
+
+# 区标题那一坨:文案里带「优质封面示例」,是红线词之一(拿它当上传位就点歪了)
+_COVER_TITLE_TEXT = ("设置封面 默认截取第一帧作为封面,优质的封面会吸引更多人浏览笔记 "
+                     "优质封面示例")
 
 
 class _CoverPage:
     """封面区的最小替身:内联、隐藏 file input、灌图后预览多一张 img。"""
 
-    def __init__(self, *, section=True, has_input=True, entry=True, preview_grows=True):
+    def __init__(self, *, section=True, has_input=True, entry=True, preview_grows=True,
+                 entry_by_class=True, input_mounts_on="click", page_image_inputs=0,
+                 upload_tile_text="设置封面 遇到问题?"):
         self._section = section
         self._has_input = has_input
-        self._entry = entry
         self._preview_grows = preview_grows
+        self._entry_by_class = entry_by_class and entry
+        self._mounts = input_mounts_on
+        self.page_image_inputs = page_image_inputs
         self.imgs = 3           # 截图实测:一开始就有 3 张「智能推荐封面」
         self.files = None
         self.entry_clicked = False
+        self.hovered = False
+        self.section_html = "<div class='publish-page-content-cover'>…</div>"
+        self.tiles = [_Tile(_COVER_TITLE_TEXT, w=600, h=40), _Tile("PK封面", w=60, h=24)]
+        if entry:
+            self.tiles.append(_Tile(upload_tile_text))
+        self.tiles += [_Tile("智能推荐封面", has_img=True) for _ in range(3)]
+
+    def _input_mounted(self):
+        if self._has_input:
+            return True
+        if self._mounts == "hover":
+            return self.hovered or self.entry_clicked
+        return self.entry_clicked
 
     def query_selector(self, sel):
         if sel == bnc._COVER_SECTION:
             return _FakeSection(self) if self._section else None
         if "input[type='file']" in sel:
-            if not self._has_input and not self.entry_clicked:
-                return None
-            return _FakeUpload(self)
+            if sel.startswith(bnc._COVER_SECTION):
+                return _FakeUpload(self) if self._input_mounted() else None
+            return _FakeUpload(self) if self.page_image_inputs else None
         if "upload" in sel:
-            return "ENTRY" if self._entry else None
+            return _Tile("设置封面 遇到问题?") if self._entry_by_class else None
         return None
 
     def query_selector_all(self, sel):
         if sel.endswith("img"):
             return ["img"] * self.imgs
         if "input[type='file']" in sel:
-            return [1] if (self._has_input or self.entry_clicked) else []
+            if sel.startswith(bnc._COVER_SECTION):
+                return [_FakeUpload(self)] if self._input_mounted() else []
+            n = self.page_image_inputs + (1 if self._input_mounted() else 0)
+            return [_FakeUpload(self) for _ in range(n)]
         return []
 
     def wait_for_timeout(self, _ms):
@@ -1780,7 +1829,13 @@ class _FakeSection:
         self._page = page
 
     def inner_text(self):
-        return "设置封面 默认截取第一帧作为封面 智能推荐封面"
+        return " ".join(t.text for t in self._page.tiles)
+
+    def evaluate(self, _js):
+        return self._page.section_html
+
+    def query_selector_all(self, _sel):
+        return list(self._page.tiles)
 
 
 class _FakeUpload:
@@ -1797,14 +1852,27 @@ class _CoverHuman:
     def __init__(self, page):
         self.page = page
         self.clicks = []
+        self.click_targets = []
+        self.hovers = []
 
     def click(self, target, reason="", **_k):
         self.clicks.append(reason)
-        if target == "ENTRY":
-            self.page.entry_clicked = True
+        self.click_targets.append(target)
+        self.page.entry_clicked = True
+
+    def hover(self, target, reason="", **_k):
+        self.hovers.append(reason)
+        self.page.hovered = True
 
     def wait(self, *_a, **_k):
         return None
+
+
+@pytest.fixture
+def fast_cover_polls(monkeypatch):
+    """替身的 wait_for_timeout 是空转,轮询窗口按真实秒走会白烧 CPU;测里压到毫秒级。"""
+    monkeypatch.setattr(bnc, "_COVER_HOVER_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(bnc, "_COVER_APPLY_TIMEOUT_S", 0.05)
 
 
 def test_cover_set_via_hidden_input_without_clicking_upload_button():
@@ -1816,9 +1884,10 @@ def test_cover_set_via_hidden_input_without_clicking_upload_button():
     assert out["status"] == "done", out
     assert page.files == ["/data/cover.jpg"]
     assert human.clicks == [], "file input 已在 DOM 里就不该点任何东西"
+    assert human.hovers == [], "input 现成就连悬停都不必"
 
 
-def test_cover_clicks_upload_slot_only_when_input_missing():
+def test_cover_clicks_upload_slot_only_when_input_missing(fast_cover_polls):
     """input 懒挂载时才点灰色上传位;**绝不点推荐图**(点了是换成平台的图)。"""
     page = _CoverPage(has_input=False)
     human = _CoverHuman(page)
@@ -1829,7 +1898,64 @@ def test_cover_clicks_upload_slot_only_when_input_missing():
     assert all(kw not in human.clicks[0] for kw in bnc._COVER_FORBIDDEN)
 
 
-def test_cover_reports_error_when_preview_never_changes():
+def test_cover_prefers_hover_over_click_for_lazy_input():
+    """悬停就能把 input 挂出来时,**一次都不点** —— 点上传位有原生文件框卡死前科。"""
+    page = _CoverPage(has_input=False, input_mounts_on="hover")
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert human.hovers, "懒挂载时必须先试零风险的悬停"
+    assert human.clicks == [], "悬停已经挂出 input,不该再点"
+
+
+def test_cover_finds_entry_by_text_when_class_candidates_all_miss(fast_cover_polls):
+    """class 候选全不命中(e2e 实测就是这样)时靠**文案**兜住上传位,而不是直接报错。"""
+    page = _CoverPage(has_input=False, entry_by_class=False)
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert len(human.clicks) == 1
+    assert human.click_targets[0].text == "设置封面 遇到问题?"
+
+
+def test_cover_finds_entry_by_tile_size_when_wording_unknown(fast_cover_polls):
+    """连文案都换了:退到尺寸 tile 启发式(≈112×150、区内、不含推荐图)。"""
+    page = _CoverPage(has_input=False, entry_by_class=False, upload_tile_text="")
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert human.click_targets[0].text == ""
+
+
+def test_cover_entry_never_targets_recommended_or_pk(fast_cover_polls):
+    """红线:推荐图 tile / PK封面 / 区标题 一律不得被选成上传位。"""
+    page = _CoverPage(has_input=False, entry_by_class=False)
+    human = _CoverHuman(page)
+    bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    touched = [t.text for t in human.click_targets] + list(human.hovers) + list(human.clicks)
+    for blob in touched:
+        assert all(kw not in blob for kw in bnc._COVER_FORBIDDEN), blob
+
+
+def test_cover_uses_lone_page_level_image_input_without_clicking():
+    """封面区内没有 input、但页面上**唯一**一个图片 input → 直接灌它,零点击。
+
+    上传控件挂 body 级 portal 是常见形状;能不点就不点(点 = 原生文件框风险)。
+    唯一性是安全边界:多于一个就宁可不猜。
+    """
+    page = _CoverPage(has_input=False, entry=False, page_image_inputs=1)
+    human = _CoverHuman(page)
+    out = bnc.apply_video_cover(page, human, "/data/cover.jpg")
+
+    assert out["status"] == "done", out
+    assert human.clicks == [] and human.hovers == []
+
+
+def test_cover_reports_error_when_preview_never_changes(fast_cover_polls):
     """灌了图但封面区预览没变 → error(不许"点了就当成功")。"""
     page = _CoverPage(preview_grows=False)
     out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
@@ -1847,11 +1973,28 @@ def test_cover_missing_section_is_loud():
 
 
 def test_cover_no_input_and_no_entry_is_loud():
-    """既没 input 也没上传位 → 报错说清"封面区后代 DOM 尚无探针取证"。"""
+    """既没 input 也没上传位 → 报错,别静默跳过。"""
     page = _CoverPage(has_input=False, entry=False)
     out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
     assert out["status"] == "error"
     assert out["reason"].startswith("cover_upload_entry_not_found:")
+
+
+def test_cover_failure_dumps_section_outer_html():
+    """失败取证必须带封面区 **outerHTML**(截断到上限)——只报"候选未命中"等于没说。
+
+    上一轮 e2e 就是只拿到一句"选择器全未命中",无从判断真实 class 叫什么;
+    有了这段 HTML,下一次真跑一眼就能定位上传位的真值。
+    """
+    page = _CoverPage(has_input=False, entry=False)
+    page.section_html = "<div class='publish-page-content-cover'>" + "x" * 9000
+    out = bnc.apply_video_cover(page, _CoverHuman(page), "/data/cover.jpg")
+
+    dump = out["observed"]["cover_section_html"]
+    assert dump.startswith("<div class='publish-page-content-cover'>")
+    assert len(dump) == bnc._COVER_HTML_DUMP_CHARS
+    assert out["observed"]["file_inputs_in_page"] == 0
+    assert out["observed"]["file_inputs_in_cover"] == 0
 # ================= 移出合集(P0,2026-08-07 运营需求)=================
 #
 # 幂等矩阵四格 + 三条 fail-loud 闸(× 找不到 / chip 不消失 / 冒出没验证过的弹窗)。

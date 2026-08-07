@@ -2757,9 +2757,18 @@ def read_catalog(page, account_id: int, note_id: str) -> Dict[str, Any]:
 #   - 第一轮的启发式定位还误点过页面**底部无关的 activity-cover 横幅**(同名 cover 咬人,
 #     与活动区/话题区那个「更多」同型),所以任何封面定位都必须收口在
 #     `.publish-page-content-cover` 容器内,绝不全页找 `[class*='cover']`。
-# 「灰色方块的 class」与「file input 是否一开始就在 DOM 里」仍无直接证据(封面区后代 DOM
-# 尚未被 dump),故 input 与入口各给候选并 fail-loud:定位不到就带当场取证报 error,
-# 绝不假装设上了。
+#
+# 2026-08-07 真号 e2e(账号11)实测把上面的"疑似"钉成了事实:
+#   observed = {cover_section_present: true, imgs_in_cover: 3, file_inputs_in_cover: 0}
+# 即**候选帧已生成**的那个时刻,封面区里既没有 file input,`.cover-upload` /
+# `[class*='upload']` 也都不在了 → 上传位确实改了名或换了形。据此这一轮做三件事:
+#   1. 上传位候选扩成三层:class → 文案(「本地上传」「上传封面」「遇到问题」)→
+#      尺寸 tile 启发式(区内、≈112×150、不含推荐图),每一层都过红线过滤;
+#   2. **悬停优先于点击**:懒挂载常挂在 hover 上,而点上传位有弹**原生 GTK 文件框**
+#      卡死整条流程的历史前科(Playwright 拦不住,见 atomic_tasks §2.4),所以顺序是
+#      悬停 → 页面级唯一图片 input → 最后才点(且**只点一次**);
+#   3. 失败时把封面区 **outerHTML** 一起交出去 —— 只报"选择器全未命中"等于什么都没说,
+#      上一轮就卡在这里,拿不到真实 class 名。
 _COVER_SECTION = ".publish-page-content-cover"
 # 封面区内的隐藏 file input(候选;首选按 accept 收口避开视频那个)
 _COVER_INPUT_CANDIDATES = (
@@ -2768,19 +2777,35 @@ _COVER_INPUT_CANDIDATES = (
 )
 # 灰色上传位(候选;截图确认它在推荐图**左侧**、是封面区里第一个方块)
 _COVER_ENTRY_CANDIDATES = (
+    ".publish-page-content-cover .upload-cover",
     ".publish-page-content-cover .cover-upload",
     ".publish-page-content-cover [class*='upload']",
 )
+# 上传位的文案特征(截图实拍 tile 文案是「设置封面 遇到问题?」;「设置封面」单独出现是
+# **区标题**不是按钮,所以只认「遇到问题」这类区分度够的词)
+_COVER_ENTRY_TEXTS = ("本地上传", "上传封面", "遇到问题")
+# 尺寸 tile 启发式的边界(截图实测灰色方块 ≈112×150)
+_COVER_TILE_W = (60.0, 240.0)
+_COVER_TILE_H = (80.0, 300.0)
 # 平台推荐封面/PK 封面:**绝不碰**。点推荐图 = 选了平台的图而不是运营给的封面,
 # 是"看起来成功了其实换错图"的静默错误,比失败更难发现。
 _COVER_FORBIDDEN = ("智能推荐封面", "PK封面", "优质封面示例")
 # 灌图后等封面预览渲染的窗口(秒)
 _COVER_APPLY_TIMEOUT_S = 30.0
+# 悬停后等 input 挂载的窗口(秒);悬停零风险但也别干等太久
+_COVER_HOVER_TIMEOUT_S = 4.0
+# 失败取证里封面区 outerHTML 的截断长度
+_COVER_HTML_DUMP_CHARS = 2000
 
 
-def _cover_probe(page) -> Dict[str, Any]:
-    """回读封面区的当场证据(定位失败时随 error 一起交出去,别只丢一句"没找到")。"""
+def _cover_probe(page, *, with_html: bool = False) -> Dict[str, Any]:
+    """回读封面区的当场证据(定位失败时随 error 一起交出去,别只丢一句"没找到")。
+
+    ``with_html`` 只在**失败**路径开:那段 HTML 有 2000 字,成功回执里带上它等于往 job
+    台账里灌垃圾,而回读轮询每 0.5s 调一次本函数,顺手 dump 也是白烧协议往返。
+    """
     evidence: Dict[str, Any] = {}
+    section = None
     try:
         section = page.query_selector(_COVER_SECTION)
         evidence["cover_section_present"] = section is not None
@@ -2788,13 +2813,108 @@ def _cover_probe(page) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001 — 取证本身绝不制造新异常
         evidence["cover_section_present"] = False
         evidence["cover_section_text"] = ""
+    if with_html:
+        # 封面区 outerHTML:上传位的真实 class 只能从这里读出来,是下一次真跑一击定位的凭据
+        try:
+            html = section.evaluate("el => el.outerHTML") if section is not None else ""
+        except Exception:  # noqa: BLE001
+            html = ""
+        evidence["cover_section_html"] = (html or "")[:_COVER_HTML_DUMP_CHARS]
     for key, selector in (("file_inputs_in_cover", _COVER_INPUT_CANDIDATES[1]),
-                          ("imgs_in_cover", ".publish-page-content-cover img")):
+                          ("imgs_in_cover", ".publish-page-content-cover img"),
+                          # 区内 0 而页面级 >0 = 上传控件挂在 body 级 portal 里
+                          ("file_inputs_in_page", "input[type='file']"),
+                          ("image_inputs_in_page", "input[type='file'][accept*='image']")):
         try:
             evidence[key] = len(page.query_selector_all(selector))
         except Exception:  # noqa: BLE001
             evidence[key] = 0
     return evidence
+
+
+def _cover_entry_is_safe(element) -> bool:
+    """上传位候选的红线过滤:文案沾到推荐封面/PK封面/区标题的一律否掉。
+
+    这条同时兼作**范围闸** —— 命中整个封面区的宽泛选择器(拿到的元素文案会把红线词
+    一起带上)会在这里被否掉,不至于点到区标题上。
+    """
+    try:
+        text = _norm(element.inner_text())
+    except Exception:  # noqa: BLE001 — 读不到文案就不敢用
+        return False
+    return all(kw not in text for kw in _COVER_FORBIDDEN)
+
+
+def _find_cover_entry(page):
+    """在封面区**内**找本地上传位 → ``(element, 说明)``;找不到返回 ``(None, "")``。
+
+    三层递进,每层都过 :func:`_cover_entry_is_safe`:class 选择器 → 文案 → 尺寸 tile。
+    绝不全页找 ``[class*='cover']``(会咬到页面底部的 activity-cover 横幅)。
+    """
+    element, selector = _first_match(page, _COVER_ENTRY_CANDIDATES)
+    if element is not None and _cover_entry_is_safe(element):
+        return element, f"class 候选 {selector}"
+
+    try:
+        section = page.query_selector(_COVER_SECTION)
+        tiles = section.query_selector_all("div, button, a, label") if section else []
+    except Exception:  # noqa: BLE001
+        tiles = []
+
+    for tile in tiles:
+        try:
+            text = _norm(tile.inner_text())
+        except Exception:  # noqa: BLE001
+            continue
+        # 红线过滤在这里同时兼作范围闸:包住整个封面区的外层容器会把红线词一起带上,
+        # 于是自动出局,不至于把上传位定位到区标题/推荐图的公共祖先上。
+        if (any(kw in text for kw in _COVER_ENTRY_TEXTS)
+                and all(kw not in text for kw in _COVER_FORBIDDEN)):
+            return tile, f"文案候选「{text[:20]}」"
+
+    # 最后一层:区内尺寸对得上的方块,且**不含 img**(含 img 的是那 3 张推荐帧)
+    for tile in tiles:
+        if not _cover_entry_is_safe(tile):
+            continue
+        try:
+            if tile.query_selector("img") is not None:
+                continue
+            box = tile.bounding_box() or {}
+        except Exception:  # noqa: BLE001
+            continue
+        w, h = box.get("width", 0), box.get("height", 0)
+        if _COVER_TILE_W[0] <= w <= _COVER_TILE_W[1] and _COVER_TILE_H[0] <= h <= _COVER_TILE_H[1]:
+            return tile, f"尺寸 tile 候选({w:.0f}×{h:.0f})"
+    return None, ""
+
+
+def _poll_cover_input(page, timeout_s: float):
+    """在窗口内轮询封面区的 file input(懒挂载:触发之后才出现)。"""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        upload, used = _first_match(page, _COVER_INPUT_CANDIDATES)
+        if upload is not None:
+            return upload, used
+        if time.monotonic() >= deadline:
+            return None, None
+        page.wait_for_timeout(400)
+
+
+def _lone_page_image_input(page):
+    """页面级**唯一**一个图片 file input → 拿它;不唯一就宁可不猜。
+
+    上传控件挂 body 级 portal(不在封面区 DOM 里)是常见形状,能这样拿到就不用点 ——
+    点上传位有原生文件框卡死的风险。"唯一"是安全边界;即便拿错了,后面"封面区图片数
+    必须变多"的回读闸也会把它判成 error,不会静默换错图。
+    """
+    selector = "input[type='file'][accept*='image']"
+    try:
+        found = page.query_selector_all(selector)
+    except Exception:  # noqa: BLE001
+        return None, None
+    if len(found) != 1:
+        return None, None
+    return found[0], f"页面级唯一 {selector}"
 
 
 def _first_match(page, selectors):
@@ -2814,8 +2934,8 @@ def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[st
 
     形状已由真号截图证实是**内联**(不是弹窗,见本段顶部)。做法与视频/图片上传同源:
     找封面区里的隐藏 ``input[type=file]`` 直接 ``set_input_files``,**绝不点上传按钮**
-    (真桌面上会弹原生 GTK 文件框卡死流程)。input 不在 DOM 里时才点一下灰色上传位
-    把它挂出来,再灌。
+    (真桌面上会弹原生 GTK 文件框卡死流程)。input 懒挂载时按"悬停 → 页面级唯一图片
+    input → 最后才点一次上传位"的顺序把它逼出来,能不点就不点。
 
     **绝不碰**「智能推荐封面」的 3 张图与「PK封面」开关:点推荐图 = 换成平台的图而不是
     运营给的封面,那是"看着成功其实换错图"的静默错误,比失败更难发现。
@@ -2825,29 +2945,42 @@ def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[st
     if page.query_selector(_COVER_SECTION) is None:
         return {"status": "error",
                 "reason": f"cover_section_not_found: 页面上没有封面区 {_COVER_SECTION}",
-                "observed": _cover_probe(page)}
+                "observed": _cover_probe(page, with_html=True)}
 
     upload, used = _first_match(page, _COVER_INPUT_CANDIDATES)
+    entry, entry_desc = (None, "")
     if upload is None:
-        # file input 可能懒挂载:点一下灰色上传位再找(点的是上传位,不是推荐图)
-        entry, entry_sel = _first_match(page, _COVER_ENTRY_CANDIDATES)
+        entry, entry_desc = _find_cover_entry(page)
+        if entry is not None:
+            # 先悬停:懒挂载常挂在 hover 上,而悬停不会触发任何文件框
+            try:
+                human.hover(entry, reason=f"悬停封面区的本地上传位({entry_desc})")
+            except Exception as exc:  # noqa: BLE001 — 悬停失败不致命,继续往下试
+                logger.info(f"[note_components] 悬停封面上传位失败({exc}),继续")
+            upload, used = _poll_cover_input(page, _COVER_HOVER_TIMEOUT_S)
+    if upload is None:
+        # 上传控件可能挂在 body 级 portal 里(不在封面区 DOM 内);拿得到就不用点
+        upload, used = _lone_page_image_input(page)
+    if upload is None:
         if entry is None:
             return {"status": "error",
                     "reason": "cover_upload_entry_not_found: 封面区里既没有 file input,"
-                              "也没找到本地上传位(选择器候选全未命中;封面区后代 DOM 尚无探针取证)",
-                    "observed": _cover_probe(page)}
-        human.click(entry, reason=f"点封面区的本地上传位({entry_sel})")
+                              "也没找到本地上传位(class/文案/尺寸三层候选全未命中,"
+                              "真实结构见 observed.cover_section_html)",
+                    "observed": _cover_probe(page, with_html=True)}
+        # 走到这里才点,且**只点一次**:点上传位有弹原生 GTK 文件框卡死整条流程的前科
+        # (Playwright 拦不住,见 atomic_tasks §2.4)。日志停在这句 = 就是那个卡死。
+        logger.warning(
+            f"[note_components] 悬停没挂出 input,即将点击封面上传位({entry_desc});"
+            "若日志到此为止,即原生文件框卡死"
+        )
+        human.click(entry, reason=f"点封面区的本地上传位({entry_desc})")
         human.wait(0.6, 1.2, context="等封面上传入口挂载")
-        deadline = time.monotonic() + _COVER_APPLY_TIMEOUT_S
-        while time.monotonic() < deadline:
-            upload, used = _first_match(page, _COVER_INPUT_CANDIDATES)
-            if upload is not None:
-                break
-            page.wait_for_timeout(400)
+        upload, used = _poll_cover_input(page, _COVER_APPLY_TIMEOUT_S)
     if upload is None:
         return {"status": "error",
-                "reason": "cover_file_input_not_found: 点了上传位仍没等到 file input",
-                "observed": _cover_probe(page)}
+                "reason": f"cover_file_input_not_found: 点了上传位({entry_desc})仍没等到 file input",
+                "observed": _cover_probe(page, with_html=True)}
 
     before = _cover_probe(page)
     try:
@@ -2855,7 +2988,7 @@ def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[st
     except Exception as exc:  # noqa: BLE001 — 灌文件失败如实报,不静默
         return {"status": "error",
                 "reason": f"cover_set_input_failed: {exc}",
-                "observed": before}
+                "observed": _cover_probe(page, with_html=True)}
     human.wait(1.0, 2.0, context="等封面预览渲染")
 
     # 回读:封面区里的图片数变多了才算真换上(与"点了就当成功"划清界限)。
@@ -2870,7 +3003,7 @@ def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[st
     return {"status": "error",
             "reason": "cover_preview_unchanged: 灌了封面图但封面区预览没变化"
                       f"(图片数 {before.get('imgs_in_cover')} → {after.get('imgs_in_cover')})",
-            "observed": {"input_selector": used, **after}}
+            "observed": {"input_selector": used, **_cover_probe(page, with_html=True)}}
 
 
 def _find_text_in_section(page, section_selector: str, text: str):

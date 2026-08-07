@@ -6,6 +6,7 @@
 - truncate_body:正文安全截断 900
 - dedupe_topics:话题去重 + 截断 ≤10
 - normalize_cookies_for_injection:cookie 双域注入 + domain/sameSite 规整
+- step6 话题失败取证:浮层候选文案 / 条数 / 容器 class / 正文框回读(替身驱动,不起浏览器)
 """
 from app.browser.atomic_tasks import (
     XHS_MAX_BODY_LENGTH,
@@ -333,3 +334,158 @@ def test_publish_failure_has_no_applied(monkeypatch):
     r = sc.publish_once(1, [], "标题", "正文", [], ["恋爱脑"])
 
     assert r.success is False and r.applied is None
+
+
+# ── 话题失败取证(2026-08-07 视频 e2e 6/6 全 no_exact_match 后补) ──
+#
+# 同期图文近 30 条累计 applied=171 / failed=10,机制本身健康;视频那条却一个都没中,
+# 连「心理科普」这种常见词都失败。旧回执里只有一个 reason 字符串,判不出是
+# 「浮层里显示的是默认推荐话题(= 搜索压根没触发)」还是「这些词平台真没有」。
+# 本轮不猜着改逻辑,只把当场证据(浮层候选文案 / 条数 / 容器 class / 正文框回读)带出来。
+
+
+class _TopicEl:
+    """正文框替身:inner_text 回读当前内容,bounding_box 给个正常视口内的框。"""
+
+    def __init__(self, page):
+        self._page = page
+
+    def inner_text(self):
+        return self._page.body
+
+    def bounding_box(self):
+        return {"x": 100.0, "y": 700.0, "width": 600.0, "height": 200.0}
+
+
+class _TopicPage:
+    def __init__(self, locate):
+        self._locate = locate
+        self.body = "正文内容"
+        self.keys = []
+        self.content_el = _TopicEl(self)
+        self.keyboard = self
+
+    def query_selector(self, sel):
+        return self.content_el if "contenteditable" in sel or "正文" in sel else None
+
+    def evaluate(self, js, arg=None):
+        if "activeElement" in js:
+            return True          # 焦点验证:替身里一律认为聚焦成功
+        return self._locate(arg)
+
+    def press(self, key):        # page.keyboard.press
+        self.keys.append(key)
+
+
+class _TopicHuman:
+    def __init__(self, page):
+        self.page = page
+
+    def scroll_to_element(self, _el):
+        return None
+
+    def click(self, _target, reason="", **_k):
+        return None
+
+    def press_key(self, _key, **_k):
+        return None
+
+    def type_text(self, _el, text, **_k):
+        self.page.body += text   # 打进去的字要能被正文框回读看到
+
+    def wait(self, *_a, **_k):
+        return None
+
+
+def _run_step6(locate, tags):
+    from app.browser.atomic_tasks import XHSPublishAtomicTasks
+
+    page = _TopicPage(locate)
+    tasks = XHSPublishAtomicTasks.__new__(XHSPublishAtomicTasks)
+    tasks.page = page
+    tasks.human = _TopicHuman(page)
+    tasks.current_step = 0
+    tasks.enable_debug = False
+    tasks.job_tag = ""
+    tasks.screenshot_dir = "/tmp"
+    return tasks.step6_set_publish_options(tags=tags), page
+
+
+def test_topic_failure_carries_dropdown_candidates_and_editor_readback():
+    """no_exact_match 必须带出浮层**实际**枚举到的候选 + 正文框回读,不能只丢一句 reason。"""
+    seen = ["生活美学", "日常文案", "人生的意义", "每天有值得记录的瞬间"]
+
+    def _locate(_tag):
+        return {"success": False, "reason": "no_exact_match", "candidates": seen,
+                "item_count": 12, "layer_class": "topic-panel"}
+
+    out, _page = _run_step6(_locate, ["心理科普"])
+
+    assert out["success"] is True and out["topics_applied"] == []
+    detail = out["topics_failed"][0]
+    assert detail["tag"] == "心理科普"
+    assert detail["reason"] == "no_exact_match"
+    # 有了这四条,下一次真跑一眼判定:候选是「默认推荐」→ 输入没进去;是搜索结果 → 词不存在
+    assert detail["candidates"] == seen
+    assert detail["item_count"] == 12
+    assert detail["layer_class"] == "topic-panel"
+    assert detail["editor_tail"].endswith("#心理科普"), detail["editor_tail"]
+
+
+def test_topic_evidence_is_read_before_the_backspace_cleanup():
+    """取证必须发生在**回删之前** —— 回删完正文框就看不出打进去过什么了。"""
+    def _locate(_tag):
+        return {"success": False, "reason": "no_exact_match", "candidates": ["生活美学"],
+                "item_count": 3, "layer_class": "x"}
+
+    out, page = _run_step6(_locate, ["睡不着"])
+
+    assert "#睡不着" in out["topics_failed"][0]["editor_tail"]
+    assert page.keys and page.keys[0] == "Escape", "回删链路本身不能被取证改掉"
+
+
+def test_topic_success_path_still_applies_without_evidence_noise():
+    """匹配上的话题照旧进 topics_applied,不因取证改动跑偏。"""
+    def _locate(tag):
+        return {"success": True, "x": 10.0, "y": 20.0, "matched": f"#{tag} 1.2万浏览"}
+
+    out, _page = _run_step6(_locate, ["心理科普", "情绪内耗"])
+
+    assert out["topics_applied"] == ["心理科普", "情绪内耗"]
+    assert out["topics_failed"] == []
+
+
+def test_topic_failure_detail_caps_candidates_at_ten():
+    """候选只留前 10 条:回执要塞进 job 台账,别让它无界膨胀。"""
+    from app.browser.atomic_tasks import topic_failure_detail
+
+    detail = topic_failure_detail(
+        "睡不着",
+        {"reason": "no_exact_match", "candidates": [f"词{i}" for i in range(30)],
+         "item_count": 30, "layer_class": "c" * 200},
+        "…#睡不着",
+    )
+    assert len(detail["candidates"]) == 10
+    assert len(detail["layer_class"]) == 80
+
+
+def test_editor_tail_is_silent_when_readback_blows_up():
+    """回读正文框是取证,取证本身绝不制造新异常(读不到就交空串)。"""
+    from app.browser.atomic_tasks import read_editor_tail
+
+    class _Boom:
+        def inner_text(self):
+            raise RuntimeError("detached")
+
+    assert read_editor_tail(_Boom()) == ""
+
+
+def test_locate_js_reports_candidates_on_both_failure_paths():
+    """浮层定位 JS 的**两条**失败出口都必须带证据字段(JS 没法单测,守住这条契约)。"""
+    import inspect
+    from app.browser.atomic_tasks import XHSPublishAtomicTasks
+
+    src = inspect.getsource(XHSPublishAtomicTasks.step6_set_publish_options)
+    for marker in ("'no_floating_layer'", "'no_exact_match'"):
+        idx = src.index(marker)
+        assert "candidates" in src[idx:idx + 400], marker

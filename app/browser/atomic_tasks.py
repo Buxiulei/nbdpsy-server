@@ -93,6 +93,44 @@ def dedupe_topics(tags: Optional[List[str]]) -> List[str]:
     return dedup[:XHS_MAX_TOPICS]
 
 
+# 话题失败取证:回读正文框末尾多少字(够看清刚打进去的 #tag 就行)
+TOPIC_EDITOR_TAIL_CHARS = 40
+
+
+def read_editor_tail(content_el, limit: int = TOPIC_EDITOR_TAIL_CHARS) -> str:
+    """回读正文框当前内容的**末尾**几个字;读不到返回空串(取证绝不制造新异常)。
+
+    话题失败时它是关键分水岭:末尾是 ``#心理科普`` 说明字真打进去了(那就是词本身
+    不存在或下拉没刷新),末尾还是正文说明**输入压根没落到编辑器里**。
+    """
+    try:
+        text = " ".join((content_el.inner_text() or "").split())
+    except Exception:  # noqa: BLE001
+        return ""
+    return text[-limit:]
+
+
+def topic_failure_detail(tag_name: str, option_pos: Optional[Dict[str, Any]],
+                         editor_tail: str) -> Dict[str, Any]:
+    """把话题失败的**当场证据**打包成 topics_failed 的一条。
+
+    2026-08-07 视频 e2e 6/6 全 ``no_exact_match``,而同期图文 171/181 成功 —— 回执里只有
+    一个 reason 字符串,判不出到底是"浮层里是默认推荐话题(说明搜索没触发)"还是"这些词
+    平台真的没有"。所以把浮层实际枚举到的候选文案、候选条数、浮层容器 class 和正文框
+    回读一并交出去,下一次真跑一眼即可定性。
+    """
+    detail: Dict[str, Any] = {
+        "tag": tag_name,
+        "reason": (option_pos or {}).get("reason", "error") if option_pos else "error",
+        "editor_tail": editor_tail,
+    }
+    if option_pos:
+        detail["candidates"] = list(option_pos.get("candidates") or [])[:10]
+        detail["item_count"] = option_pos.get("item_count", 0)
+        detail["layer_class"] = str(option_pos.get("layer_class") or "")[:80]
+    return detail
+
+
 # ── 视频笔记:上传/转码判据的文本标志 ──
 # 进度类(在 = 这一刻绝对没传完)。**只放真号夹具里逐字见过的两个**:cover 区上传中显示
 # 「视频文件.mp4 上传中 N% 当前速度 …」。故意不猜「转码中/处理中」之类没见过的文案 ——
@@ -1920,7 +1958,8 @@ class XHSPublishAtomicTasks:
             # 逐话题记账:调用方要拿它回显给运营(参数被静默丢弃时当场可见,不用等
             # 笔记发出去人工读正文才发现 —— 2026-08-03 运营为此白删了一篇笔记)
             topics_applied: List[str] = []
-            topics_failed: List[Dict[str, str]] = []
+            # 失败条目带当场证据(候选文案 / 条数 / 浮层 class / 正文框回读),故值不止 str
+            topics_failed: List[Dict[str, Any]] = []
 
             if tags and len(tags) > 0:
                 # 去重 + 截断 ≤10(纯函数)
@@ -2016,10 +2055,23 @@ class XHSPublishAtomicTasks:
                                             candidates.push({ el, area: rect.width * rect.height });
                                         }
                                     }
-                                    if (candidates.length === 0) return {success: false, reason: 'no_floating_layer'};
+                                    if (candidates.length === 0) return {
+                                        success: false, reason: 'no_floating_layer',
+                                        candidates: [], item_count: 0, layer_class: ''};
                                     candidates.sort((a, b) => a.area - b.area);
                                     const target = candidates[0];
                                     const items = target.el.querySelectorAll('div, li, a, span, p');
+                                    // 取证:浮层里**实际**枚举到的候选文案(去重取前 10)。
+                                    // 判"浮层里是默认推荐话题还是搜索结果"全靠它。
+                                    const seenTexts = [];
+                                    for (const item of items) {
+                                        const t = (item.innerText || '').trim().replace(/\s+/g, ' ');
+                                        if (!t || t.length > 50) continue;
+                                        const c = t.replace(/^#/, '').trim();
+                                        if (c && seenTexts.indexOf(c) === -1) seenTexts.push(c);
+                                        if (seenTexts.length >= 10) break;
+                                    }
+                                    const layerClass = String(target.el.className || '').slice(0, 80);
                                     const okRect = (it) => { const r = it.getBoundingClientRect();
                                         return (r.width > 5 && r.height > 5 && r.height < 80)
                                             ? {x: r.x + r.width/2, y: r.y + r.height/2} : null; };
@@ -2045,7 +2097,10 @@ class XHSPublishAtomicTasks:
                                             if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
                                         }
                                     }
-                                    return {success: false, reason: 'no_exact_match'};
+                                    return {success: false, reason: 'no_exact_match',
+                                            candidates: seenTexts,
+                                            item_count: items.length,
+                                            layer_class: layerClass};
                                 }
                             """, tag_name)
 
@@ -2057,10 +2112,17 @@ class XHSPublishAtomicTasks:
                                 added += 1
                                 topics_applied.append(tag_name)
                             else:
-                                # 无精确匹配:回删刚输入的 #tag,绝不留残缺文本
-                                reason = option_pos.get("reason", "unknown") if option_pos else "error"
-                                logger.info(f"   下拉无精确匹配({reason}),回删该话题不插入")
-                                topics_failed.append({"tag": tag_name, "reason": reason})
+                                # 无精确匹配:回删刚输入的 #tag,绝不留残缺文本。
+                                # 回删**之前**先取证(回删后正文框就看不出打进去过什么了)。
+                                detail = topic_failure_detail(
+                                    tag_name, option_pos, read_editor_tail(content_el)
+                                )
+                                logger.info(
+                                    f"   下拉无精确匹配({detail['reason']}),回删该话题不插入"
+                                    f" | 浮层候选 {detail.get('candidates')}"
+                                    f" | 正文框末尾「{detail['editor_tail']}」"
+                                )
+                                topics_failed.append(detail)
                                 try:
                                     self.page.keyboard.press("Escape")
                                     for _ in range(len(tag_text)):
