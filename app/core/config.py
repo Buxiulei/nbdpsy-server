@@ -242,9 +242,13 @@ class Settings(BaseSettings):
     # 账号子进程硬超时(秒):超时视作僵死强杀,其任务由僵死恢复按 kind 语义处置
     ACCOUNT_PROC_TIMEOUT: int = 1800
     # 同号一小时浏览器会话总闸(0 = 关闸):supervisor 派发层按滚动小时窗数该号全部
-    # 会话(browser_jobs + publish_jobs,不分触发方),达帽后**系统自发任务**延后派发,
-    # 运营触发的不拦。风控红线实测:同号一小时 5 次就把号弹上验证墙。
+    # 会话(browser_jobs + publish_jobs,不分触发方),达帽后**系统自发任务**延后派发。
+    # 风控红线实测:同号一小时 5 次就把号弹上验证墙。
     ACCOUNT_HOURLY_SESSION_CAP: int = 4
+    # 同号一小时**运营触发**会话帽(0 = 只关这层):运营任务放得比系统宽(人工意图优先),
+    # 但不再无限直通——2026-08-07 实证 skill 用运营 apikey 批量回读组件,单号跑到
+    # 51 次/时(红线 10 倍)。运营配额闸限的是并发未终态数,限不住速率,故加此帽。
+    ACCOUNT_HOURLY_OPERATOR_SESSION_CAP: int = 12
 
     @property
     def retry_delays(self) -> list[int]:

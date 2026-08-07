@@ -79,7 +79,9 @@ class Supervisor:
     - ``scan_interval`` / ``batch_per_account`` / ``proc_timeout`` / ``child_grace`` /
       ``max_procs``:分别兜底 ``WORKER_SCAN_INTERVAL``(5s)/ ``WORKER_BATCH_PER_ACCOUNT``
       (3)/ ``ACCOUNT_PROC_TIMEOUT``(1800s)/ 停机宽限(10s)/ ``BROWSER_CONCURRENCY``;
-    - ``session_cap``:同号一小时浏览器会话总闸,兜底 ``ACCOUNT_HOURLY_SESSION_CAP``(4)。
+    - ``session_cap``:同号一小时浏览器会话总闸,兜底 ``ACCOUNT_HOURLY_SESSION_CAP``(4);
+    - ``operator_session_cap``:同号一小时运营触发会话帽(比系统那层宽),兜底
+      ``ACCOUNT_HOURLY_OPERATOR_SESSION_CAP``(12)。
     """
 
     def __init__(
@@ -95,6 +97,7 @@ class Supervisor:
         child_grace: float | None = None,
         max_procs: int | None = None,
         session_cap: int | None = None,
+        operator_session_cap: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._repo = repo if repo is not None else _default_browser_jobs_repo
@@ -122,6 +125,11 @@ class Supervisor:
             if session_cap is not None
             else getattr(settings, "ACCOUNT_HOURLY_SESSION_CAP", 4)
         )
+        self._operator_session_cap = (
+            operator_session_cap
+            if operator_session_cap is not None
+            else getattr(settings, "ACCOUNT_HOURLY_OPERATOR_SESSION_CAP", 12)
+        )
         self._worker_tag = f"supervisor-{os.getpid()}"
         # account_id → 存活子进程(派生登记,子进程退出即回收移除)
         self._procs: dict[int, asyncio.subprocess.Process] = {}
@@ -131,6 +139,8 @@ class Supervisor:
         self._op_inflight: set[str] = set()
         # 已因会话总闸被拦过的账号(日志去重:5s 一轮,每轮都吵就没人看了)
         self._governed_accounts: set[int] = set()
+        # 同上,运营那层单独一份:两层文案不同、超帽时机也不同,合用一份会互相吞日志
+        self._operator_governed_accounts: set[int] = set()
         # 内部后台 task 登记(子进程回收 / op_images 执行),停机时统一收尾
         self._tasks: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
@@ -457,7 +467,7 @@ class Supervisor:
 
         - 同账号已有存活子进程 → 跳过(同账号严格串行);
         - 全局子进程数达 ``max_procs`` → 本轮停派(排队等下轮);
-        - 同号一小时会话总闸(``_apply_session_cap``)可能滤掉本批的系统自发任务;
+        - 同号一小时会话总闸(``_apply_session_cap``)可能滤掉本批任务(系统层严、运营层宽);
         - 派过的账号移到轮转表尾:单账号灌大批量不饿死其他账号。
         """
         work: dict[int, list[tuple[datetime, str, object, int]]] = {}
@@ -569,29 +579,42 @@ class Supervisor:
         风控红线:同号一小时 ≤4-5 次浏览器会话(2026-08-07 实测 5 次就把号弹上验证墙)。
         各业务模块只守自己的闸,谁也看不见别人——只有派发层看得见全部 kind,闸开在这。
 
-        - **系统自发任务**(operator_id 非正)按剩余额度放行,超了就留在队列里,下轮扫描
-          按滚动窗口重新估(不改状态、不失败、不排期,一小时后自然轮到);
-        - **运营触发任务**(operator_id>0)一律放行 —— 人工意图优先,运营侧另有配额闸;
-          但它照样吃掉一格额度,后面的系统任务据此收紧;
-        - 帽值 ≤0 = 关闸(运维逃生口,与本仓其它 "0=关闭" 的开关同款语义)。
+        闸分**双层**,两层各有自己的帽值,共用同一份会话计数(计数不分触发方):
+
+        - **系统自发任务**(operator_id 非正)按 ``session_cap`` 的剩余额度放行,超了就
+          留在队列里,下轮扫描按滚动窗口重新估(不改状态、不失败、不排期,一小时后自然
+          轮到);
+        - **运营触发任务**(operator_id>0)按更宽的 ``operator_session_cap`` 放行——人工
+          意图仍然优先,但不再无限直通;它照样吃掉一格系统额度,后面的系统任务据此收紧。
+        - 帽值 ≤0 = 关掉对应那一层(运维逃生口,与本仓其它 "0=关闭" 的开关同款语义)。
+
+        运营那层是补的漏:原先运营任务一律放行,假设"运营侧已有配额闸"。2026-08-07 被
+        证伪——skill 拿运营 apikey 跑批量逐篇组件回读,一小时 192 条 note_components_read
+        全豁免直通,单号最高 51 次会话/时,是红线的 10 倍。运营配额闸
+        (``OPERATOR_PENDING_QUOTA``)限的是**并发未终态数**,不限速率,拦不住这种打法。
         """
-        if self._session_cap <= 0:
-            return items
-        budget = self._session_cap - recent
         kept: list[tuple] = []
+        budget = self._session_cap - recent  # 系统层剩余额度
+        op_budget = self._operator_session_cap - recent  # 运营层剩余额度
         blocked = 0
+        op_blocked = 0
         for item in items:
             operator_id = item[3]
             if operator_id and operator_id > 0:
+                if self._operator_session_cap <= 0 or op_budget > 0:
+                    kept.append(item)
+                    budget -= 1
+                    op_budget -= 1
+                else:
+                    op_blocked += 1
+            elif self._session_cap <= 0 or budget > 0:
                 kept.append(item)
                 budget -= 1
-            elif budget > 0:
-                kept.append(item)
-                budget -= 1
+                op_budget -= 1
             else:
                 blocked += 1
+        # 去重:同号连续被闸只吵一次,恢复派发后再超线才会再吵。两层各记各的
         if blocked:
-            # 去重:同号连续被闸只吵一次,恢复派发后再超线才会再吵
             if account_id not in self._governed_accounts:
                 self._governed_accounts.add(account_id)
                 logger.warning(
@@ -600,6 +623,16 @@ class Supervisor:
                 )
         else:
             self._governed_accounts.discard(account_id)
+        if op_blocked:
+            if account_id not in self._operator_governed_accounts:
+                self._operator_governed_accounts.add(account_id)
+                logger.warning(
+                    f"[supervisor] 会话总闸:运营任务也已延后:账号 {account_id} 近一小时 "
+                    f"{recent} 次会话,超运营帽值 {self._operator_session_cap}"
+                    f"——批量操作请改用批量端点或自行限速(本轮 {op_blocked} 个)"
+                )
+        else:
+            self._operator_governed_accounts.discard(account_id)
         return kept
 
     async def _spawn_account_worker(
