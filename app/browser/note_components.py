@@ -113,6 +113,14 @@ _ACTIVITY_NAME = ".activity-name"
 _ACTIVITY_ACTION = ".activity-action"
 _ACTIVITY_LINKED_TEXT = "取消关联"
 _ACTIVITY_UNLINKED_TEXT = "关联"
+# 活动区自己的「更多」入口(设计 2.8 记载的真实选择器)。**必须收口在活动区内** ——
+# 页面上推荐话题区也有个「更多」,纯文本匹配会点错、展开的是话题面板(设计 2.8 同名陷阱)。
+_ACTIVITY_MORE_ENTRY = ".activity-plugin-label .more"
+# 活动区容器候选:用来判「这个页型到底有没有活动区」(与区标题文案一起构成双判据)
+_ACTIVITY_SECTION_CONTAINERS = (".activity-plugin-label", "[class*='activity-plugin']")
+_ACTIVITY_SECTION_TEXT = "关联活动"
+# 「更多活动」面板是懒加载列表:开面板后最多滚这么多轮找目标卡
+_ACTIVITY_PANEL_SCROLLS = 8
 _PERMISSION_DESC = ".permission-card-wrapper .d-select-description"
 _PUBLISH_HOST = "xhs-publish-btn"
 _TITLE_INPUT = "input[placeholder*='标题']"
@@ -599,47 +607,196 @@ def read_activity_action_text(page, activity_name: str) -> Optional[str]:
     return _norm(action.inner_text()) if action is not None else None
 
 
-def count_activity_cards(page) -> int:
-    """页面上「关联活动」区里渲染了几张活动卡(读不到算 0)。
+def classify_activity_action(action_text: Optional[str]) -> str:
+    """活动按钮文案 → ``linked`` / ``unlinked`` / ``unknown``(纯函数)。
 
-    只用来给"目标活动卡找不到"这件事**归因**:0 张 = 整个活动区都不在,
-    >0 张 = 区在、只是没有目标那张。用已在生产验证的 ``.activity-card``
-    选择器,不去猜活动区容器的 class。
+    **两种上下文文案不同**:内联活动区是「关联」/「取消关联」,「更多活动」面板里是
+    「关联活动」/「取消关联活动」。上线前是裸相等判断 ``!= "关联"``,面板里那颗按钮
+    会被判成"文案异常,拒绝点击"—— 永远关联不上。
+
+    判定顺序是硬要求:**先判「取消」**。「取消关联活动」里含有「关联活动」,反过来判
+    会把已关联误读成未关联,后果不是白跑一趟,是**点掉「取消关联」**(本模块最硬的红线)。
+    读不出 / 陌生文案一律 ``unknown``,调用方据此一次都不点。
     """
+    text = _norm(action_text or "")
+    if not text:
+        return "unknown"
+    if text.startswith("取消") and _ACTIVITY_UNLINKED_TEXT in text:
+        return "linked"
+    if text in (_ACTIVITY_UNLINKED_TEXT, f"{_ACTIVITY_UNLINKED_TEXT}活动"):
+        return "unlinked"
+    return "unknown"
+
+
+def probe_activity_section(page) -> Dict[str, Any]:
+    """回读「关联活动」区的存在性证据:卡片数 + 容器选择器 + 区标题文案。
+
+    **三样一起读、双判据判存在**(容器选择器 or 区标题文案),只认其中一样都会误判:
+    - 只认文案:图文页与视频页的标题文案若不同、或平台改文案,存在的区会被判成"不存在",
+      运营据此以为平台没这功能;
+    - 只认卡片数:推荐位为空(0 张卡)时同样会把存在的区判成不存在。
+    """
+    cards = 0
+    container = False
     try:
-        return len(page.query_selector_all(_ACTIVITY_CARD))
-    except Exception:  # noqa: BLE001 — 归因辅助,读不到就当 0,绝不制造新异常
-        return 0
+        cards = len(page.query_selector_all(_ACTIVITY_CARD))
+    except Exception:  # noqa: BLE001 — 归因辅助,读不到就当没有,绝不制造新异常
+        pass
+    for selector in _ACTIVITY_SECTION_CONTAINERS:
+        try:
+            if page.query_selector(selector) is not None:
+                container = True
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        section_text = _ACTIVITY_SECTION_TEXT in (page.inner_text("body") or "")
+    except Exception:  # noqa: BLE001
+        section_text = False
+    return {"cards": cards, "container": container, "section_text": section_text}
 
 
-def explain_activity_card_missing(
-    activity_name: str, card_count: int, scrolls: int
-) -> str:
+def explain_activity_card_missing(activity_name: str, observed: Dict[str, Any]) -> str:
     """目标活动卡找不到时的失败原因文案(纯函数,两种成因分开说)。
 
-    为什么必须分开:**视频笔记页的真号 fixtures 里没有出现活动卡**(图文页有),
-    而平台 2026-08-03 还把编辑页的活动区整个收走过。两种情形都走"告警不阻断发布",
-    但运营的下一步动作完全相反 —— 一个是"这个页型可能压根没有活动区,带 job_id
-    上报给我们确认",一个是"活动下线了,重新拉一次活动列表"。混成一句话等于让运营猜。
+    为什么必须分开:平台 2026-08-03 把编辑页的活动区整个收走过,而视频笔记页的活动区
+    是 2026-08-07 用户实拍才确认存在的(此前的探针 fixtures 没采到)。两种情形都走
+    "告警不阻断发布",但运营的下一步动作完全相反 —— 一个是"这个页型可能压根没有活动区,
+    带 job_id 上报",一个是"活动下线了,重新拉活动列表"。混成一句话等于让运营猜。
 
-    两种文案都带上活动名与已下滚轮数(取证:证明结论不是"没滚够"滚出来的)。
+    判 ``activity_section_absent`` 要求**卡片、容器、区标题文案三样全空**(双判据,
+    见 ``probe_activity_section``);任一命中即认为区在,报 ``activity_card_not_found``
+    并说清「更多」面板试过没有 —— 目标活动不在推荐位时正是要靠面板才找得到。
     """
-    if card_count <= 0:
+    cards = int(observed.get("cards") or 0)
+    scrolls = observed.get("scrolls", _ACTIVITY_REVEAL_SCROLLS)
+    section_present = bool(
+        cards > 0 or observed.get("container") or observed.get("section_text")
+    )
+    if not section_present:
         return (
-            f"activity_section_absent: 页面上一张活动卡都没有(已下滚 {scrolls} 轮触发"
-            f"懒渲染),疑该页型没有「关联活动」这个设置区 —— 视频笔记页真号采集里就没采到"
-            f"活动卡。活动没设上,但笔记照发;要「{activity_name}」真挂上请带 job_id 上报"
+            f"activity_section_absent: 活动卡、活动区容器、区标题文案三样都读不到"
+            f"(已下滚 {scrolls} 轮触发懒渲染),疑该页型没有「关联活动」这个设置区。"
+            f"活动没设上,但笔记照发;要「{activity_name}」真挂上请带 job_id 上报"
         )
+    if observed.get("panel_opened"):
+        panel_note = "「更多活动」面板已打开并滚动查找过,里面也没有它"
+    elif observed.get("more_entry"):
+        panel_note = "找到了「更多」入口但没能打开面板"
+    else:
+        panel_note = "活动区里没有「更多」入口可点,只查了内联推荐位"
     return (
-        f"activity_card_not_found: 活动区里有 {card_count} 张活动卡,但没有名为"
-        f"「{activity_name}」的那张(已下滚 {scrolls} 轮触发懒渲染)。活动频繁上下线,"
-        f"请重新拉取活动列表确认它还在"
+        f"activity_card_not_found: 活动区在(内联 {cards} 张卡)但没有名为"
+        f"「{activity_name}」的那张;{panel_note}(已下滚 {scrolls} 轮触发懒渲染)。"
+        f"活动频繁上下线,请重新拉取活动列表确认它还在"
     )
 
 
+def _find_activity_more_entry(page):
+    """定位活动区自己的「更多」入口;找不到返回 None。
+
+    **只在活动区内找**:先试设计 2.8 记载的 ``.activity-plugin-label .more``,
+    再退到活动卡最近祖先子树内文案为「更多」的元素(用 JS **只读**求坐标,点击仍走
+    拟人层)。两条路都锚在活动区上 —— 页面上推荐话题区也有个「更多」,一次全页
+    ``text=更多`` 匹配会点错、展开的是话题面板。
+    """
+    try:
+        entry = page.query_selector(_ACTIVITY_MORE_ENTRY)
+    except Exception:  # noqa: BLE001
+        entry = None
+    if entry is not None:
+        return entry
+    # 兜底:从活动卡往上找 ≤4 层祖先,在**仍包含该活动卡**的子树里找「更多」。
+    # 起点是活动卡本身,所以话题区天然不在搜索范围内(同名陷阱的结构性规避)。
+    try:
+        box = page.evaluate(r"""() => {
+            const card = document.querySelector('.activity-card');
+            if (!card) return null;
+            let node = card;
+            for (let i = 0; i < 4 && node.parentElement; i++) {
+                node = node.parentElement;
+                if (!node.contains(card)) break;
+                for (const el of node.querySelectorAll('*')) {
+                    if (el.contains(card)) continue;
+                    if (!/^更多\s*[>》›]?$/.test((el.textContent || '').trim())) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+                    }
+                }
+            }
+            return null;
+        }""")
+    except Exception:  # noqa: BLE001
+        box = None
+    if isinstance(box, dict):
+        return (box["x"], box["y"])
+    return None
+
+
 def _activity_linked(page, activity_name: str) -> bool:
-    """该活动是否已关联 —— 判据是按钮文案翻转成「取消关联」(实测唯一可靠信号)。"""
-    return read_activity_action_text(page, activity_name) == _ACTIVITY_LINKED_TEXT
+    """该活动是否已关联 —— 判据是按钮文案翻转成「取消关联」(实测唯一可靠信号)。
+
+    走 ``classify_activity_action`` 而非裸相等:面板里的文案是「取消关联活动」。
+    """
+    return classify_activity_action(
+        read_activity_action_text(page, activity_name)) == "linked"
+
+
+def _reveal_in_more_panel(page, human, activity_name: str) -> tuple:
+    """点开「更多活动」面板,在里面(滚动懒加载)找目标活动卡。
+
+    返回 ``(按钮文案 或 None, 过程证据 dict)``。证据里的 ``more_entry`` / ``panel_opened``
+    供失败归因用 —— **必须在这里记**:面板一打开就可能盖住「更多」入口,事后再探一次会
+    读到 None,把"面板试过了"错报成"压根没入口可点"。
+
+    为什么必须有(2026-08-07 用户实拍推翻旧假设):内联活动区只渲染约 2 张**推荐**卡,
+    目标活动不在推荐位就永远 ``activity_card_not_found`` —— 这大概率就是此前
+    「活动挂不上」的真根因(当时归因成平台侧问题,是错的)。
+
+    面板里滚动前**先把鼠标悬到面板上**:``human.scroll`` 走 ``mouse.wheel``,滚轮事件
+    落在光标当前位置,光标还停在「更多」入口上就滚不动这个独立滚动容器。
+
+    找不到入口直接返回 None(不点任何东西);面板开了但滚完仍没有,同样返回 None,
+    由调用方统一归因 —— 这里绝不猜。
+    """
+    meta = {"more_entry": False, "panel_opened": False}
+    entry = _find_activity_more_entry(page)
+    if entry is None:
+        logger.info(f"[note_components] 活动区里没有「更多」入口,不再深找「{activity_name}」")
+        return None, meta
+    meta["more_entry"] = True
+    meta["panel_opened"] = True
+    human.click(entry, reason=f"打开「更多活动」面板(找「{activity_name}」)")
+    human.wait(0.8, 1.5, context="等更多活动面板渲染")
+    for turn in range(_ACTIVITY_PANEL_SCROLLS + 1):
+        action_text = read_activity_action_text(page, activity_name)
+        if action_text is not None:
+            logger.info(
+                f"[note_components] ✓ 在「更多活动」面板里找到「{activity_name}」"
+                f"(滚了 {turn} 轮),按钮文案={action_text!r}"
+            )
+            return action_text, meta
+        if turn >= _ACTIVITY_PANEL_SCROLLS:
+            break
+        # 滚轮打在**光标当前位置**,不先把鼠标移进面板就是在滚主页面(旧仓踩过:
+        # 初始光标在 (0,0) 的顶栏上,滚了等于没滚,表现成"翻两页就停")。
+        # 面板容器的选择器没有实测证据,故不猜:取 DOM 里**最后一张**活动卡当悬停锚点
+        # —— 面板是后挂上去的,它的卡排在内联区那几张之后。这是本次改动里证据最薄的一处,
+        # e2e 若发现面板滚不动,先怀疑这个锚点。
+        try:
+            cards = page.query_selector_all(_ACTIVITY_CARD) or []
+            if cards:
+                human.hover(cards[-1])
+        except Exception:  # noqa: BLE001 — 悬停失败就照常滚,最坏是这轮白滚
+            pass
+        human.scroll("down")
+        human.wait(0.4, 0.9, context="等面板列表懒加载")
+    logger.info(
+        f"[note_components] 「更多活动」面板滚了 {_ACTIVITY_PANEL_SCROLLS} 轮仍没有"
+        f"「{activity_name}」"
+    )
+    return None, meta
 
 
 # ---------------- 单个组件的设置动作 ----------------
@@ -1224,24 +1381,36 @@ def _set_activity(
             action_text = read_activity_action_text(page, name)
             if action_text is not None:
                 break
+    # 内联区没有 → 点开「更多活动」面板再找:内联只渲染约 2 张**推荐**卡,
+    # 目标活动不在推荐位时只有面板里才有(2026-08-07 用户实拍确认的结构)。
+    via = "inline"
+    panel_meta = {"more_entry": False, "panel_opened": False}
     if action_text is None:
-        # 找不到目标卡,先分清是「整个活动区不在」还是「区在但没这张卡」再报 ——
+        action_text, panel_meta = _reveal_in_more_panel(page, human, name)
+        if action_text is not None:
+            via = "more_panel"
+    if action_text is None:
+        # 内联与面板都没有:先分清是「整个活动区不在」还是「区在但没这张卡」再报 ——
         # 两者运营动作相反,见 explain_activity_card_missing。
+        observed = dict(probe_activity_section(page))
+        observed["scrolls"] = _ACTIVITY_REVEAL_SCROLLS
+        observed.update(panel_meta)
         return {
             "status": "error",
-            "reason": explain_activity_card_missing(
-                name, count_activity_cards(page), _ACTIVITY_REVEAL_SCROLLS
-            ),
+            "reason": explain_activity_card_missing(name, observed),
+            "observed": observed,
         }
-    if action_text == _ACTIVITY_LINKED_TEXT:
+    state = classify_activity_action(action_text)
+    if state == "linked":
         # 本来就关联着 —— 绝不点「取消关联」
         return {"status": "skipped", "activity_id": str(activity_id), "name": name,
-                "reason": "该活动本就已关联"}
-    if action_text != _ACTIVITY_UNLINKED_TEXT:
+                "via": via, "reason": "该活动本就已关联"}
+    if state != "unlinked":
         return {
             "status": "error",
             "reason": f"activity_action_unexpected: 按钮文案是 {action_text!r},"
-                      f"既不是「{_ACTIVITY_UNLINKED_TEXT}」也不是「{_ACTIVITY_LINKED_TEXT}」,拒绝点击",
+                      f"既不是「{_ACTIVITY_UNLINKED_TEXT}(活动)」也不是"
+                      f"「{_ACTIVITY_LINKED_TEXT}(活动)」,拒绝点击",
         }
 
     for attempt in range(1, _ACTIVITY_CLICK_ATTEMPTS + 1):
@@ -1252,24 +1421,25 @@ def _set_activity(
                 "status": "error",
                 "reason": f"activity_action_detached: 第 {attempt} 次尝试时「{name}」的按钮不见了",
             }
-        if _norm(action.inner_text()) != _ACTIVITY_UNLINKED_TEXT:
+        if classify_activity_action(action.inner_text()) != "unlinked":
             break  # 已经翻转(或状态变了),交下面统一复核
         human.click(action, reason=f"关联活动「{name}」(第 {attempt} 次)")
         if _wait_activity_flip(page, name):
             logger.info(f"[note_components] ✓ 活动「{name}」已关联(第 {attempt} 次点击生效)")
             return {"status": "done", "activity_id": str(activity_id), "name": name,
-                    "clicks": attempt}
+                    "via": via, "clicks": attempt}
         logger.warning(
             f"[note_components] 活动「{name}」第 {attempt} 次点击静默失效"
             f"(文案未翻转、无 toast),重试同一个活动"
         )
 
     if _activity_linked(page, name):
-        return {"status": "done", "activity_id": str(activity_id), "name": name}
+        return {"status": "done", "activity_id": str(activity_id), "name": name,
+                "via": via}
     return {
         "status": "error",
-        "reason": f"activity_not_linked: 点了 {_ACTIVITY_CLICK_ATTEMPTS} 次「{name}」,"
-                  f"按钮始终没翻转成「{_ACTIVITY_LINKED_TEXT}」(静默失效)",
+        "reason": f"activity_not_linked: 点了 {_ACTIVITY_CLICK_ATTEMPTS} 次「{name}」"
+                  f"({via}),按钮始终没翻转成「{_ACTIVITY_LINKED_TEXT}」(静默失效)",
         "observed": read_activity_action_text(page, name),
     }
 

@@ -226,12 +226,12 @@ MANIFEST_ENTRIES = [
                  "阶段比图文长(取决于文件大小,等待上限由服务端 PUBLISH_VIDEO_UPLOAD_TIMEOUT "
                  "控制,默认 10 分钟)。封面用平台自动截取的第一帧(本接口不支持自定义封面);"
                  "视频页独有的「添加章节 / 关联直播预告」不设置。"
-                 "⚠️ **视频页的「关联活动」区尚未在真号上确认存在**(图文页确认有):activity_id "
-                 "照常接收、链路照常执行,若平台侧确实没有这个区,结果会是 "
-                 "applied.components.activity.status='error' 且 reason 以 "
-                 "`activity_section_absent` 开头(页面上一张活动卡都没有)—— 与 "
-                 "`activity_card_not_found`(区在、只是这个活动下线了)明确区分开,"
-                 "遇到前者请带 job_id 上报。两种都**不阻断发布**,笔记照发。"
+                 "**关联活动**:视频页与图文页同源(内联区渲染约 2 张推荐活动卡 + 区标题右侧"
+                 "「更多」入口)。传的 activity_id 若不在推荐位,服务端会自动点开「更多活动」"
+                 "面板滚动查找 —— **不必挑推荐位里的活动**。设置失败**不阻断发布**,笔记照发,"
+                 "reason 前缀可自判:`activity_card_not_found`=活动区在但没有这个活动"
+                 "(多半已下线,重新拉活动列表);`activity_section_absent`=活动卡/容器/区标题"
+                 "三样全无,疑该页型没有活动区(不该出现,遇到请带 job_id 上报)。"
                  "三组件(collection_id / quoted_note_id / activity_id)在发布链路里于话题之后、"
                  "点发布之前设置,**失败只告警不阻断发布**(图都传完了不为辅助组件废掉整篇)。"
                  "组件逐项结果**发出去之后能查**:成功后 GET /api/publish-jobs/{job_id} 的 "
@@ -285,10 +285,12 @@ MANIFEST_ENTRIES = [
                  "组件回读都是**编辑器内**确认,逮不住服务端静默丢弃,要板上钉钉见 "
                  "POST /api/publish-jobs 的 notes。"
                  "视频笔记的 applied 结构与图文完全一致(话题回显 + 同一组 components 键)。"
-                 "activity 的 error 分两种,reason 前缀能区分:`activity_section_absent`="
-                 "页面上一张活动卡都没有,疑该页型没有活动区(视频页尚未在真号确认过有),"
-                 "带 job_id 上报;`activity_card_not_found`=活动区在但没有这个活动,"
-                 "多半已下线,重新拉活动列表即可。",
+                 "activity 成功时带 via 字段:`inline`=在内联推荐位直接点上的;"
+                 "`more_panel`=推荐位里没有,服务端点开「更多活动」面板找到并关联的。"
+                 "失败的 error 分两种,reason 前缀能区分:`activity_card_not_found`="
+                 "活动区在(内联卡数与面板是否试过都写在 reason 里)但没有这个活动,"
+                 "多半已下线,重新拉活动列表即可;`activity_section_absent`=活动卡/容器/"
+                 "区标题三样全无,疑该页型没有活动区,带 job_id 上报。",
     },
     {
         "method": "GET", "path": "/api/publish-jobs",

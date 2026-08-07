@@ -1340,38 +1340,283 @@ def test_collection_flow_probes_band_before_click(monkeypatch, wired):
     assert bnc._COLLECTION_BUTTON in editor.row_band_probes
 
 
-# ---------------- 活动卡缺失的归因分辨 ----------------
+# ---------------- 活动按钮文案分类(内联区 / 更多面板两种上下文) ----------------
 
 
-def test_activity_missing_reason_distinguishes_no_section_from_no_card():
-    """活动卡找不到时,「这个页型压根没有活动区」与「活动区在但没这张卡」必须分得开。
+def test_activity_action_text_classified_across_both_contexts():
+    """内联区文案是「关联」,更多面板里是「关联活动」—— 两种都得认成"未关联"。
 
-    为什么必须分:视频笔记页的真号 fixtures **没有采到活动卡**(图文页有),而平台
-    08-03 还有过把编辑页活动区整个收走的前科。两种情形都走"告警不阻断"这条路,但
-    运营的动作完全不同 —— 前者是"这个页型可能就没有,带 job_id 上报给我们确认",
-    后者是"活动下线了,重新拉一次活动列表"。混成一句话等于让运营去猜。
+    上线前是裸 ``!= "关联"`` 的相等判断,面板里那颗按钮会被判成"文案异常,拒绝点击",
+    于是永远关联不上。
     """
-    absent = bnc.explain_activity_card_missing("心理健康周", card_count=0, scrolls=6)
-    present_but_missing = bnc.explain_activity_card_missing(
-        "心理健康周", card_count=4, scrolls=6)
-
-    assert absent.startswith("activity_section_absent:")
-    assert "视频" in absent or "该页型" in absent
-    assert present_but_missing.startswith("activity_card_not_found:")
-    assert "4" in present_but_missing  # 有几张卡要说出来,才知道是"区空"还是"卡没了"
-    assert absent != present_but_missing
+    assert bnc.classify_activity_action("关联") == "unlinked"
+    assert bnc.classify_activity_action("关联活动") == "unlinked"
 
 
-def test_activity_missing_reason_carries_activity_name_and_scrolls():
-    """两种归因都要带上活动名与已滚轮数(取证:证明不是没滚够就下的结论)。"""
-    for count in (0, 3):
-        reason = bnc.explain_activity_card_missing("心理健康周", card_count=count, scrolls=6)
-        assert "心理健康周" in reason
-        assert "6" in reason
+def test_activity_action_cancel_wins_over_containment():
+    """「取消关联活动」含有「关联活动」——必须先判「取消」,否则会把已关联误读成未关联。
+
+    误读的后果不是白跑一趟,是**点掉「取消关联」**(本模块最硬的一条红线)。
+    """
+    assert bnc.classify_activity_action("取消关联") == "linked"
+    assert bnc.classify_activity_action("取消关联活动") == "linked"
+
+
+def test_activity_action_unknown_is_not_clickable():
+    """读不出 / 陌生文案 → unknown(调用方据此一次都不点)。"""
+    for text in (None, "", "   ", "查看详情", "已结束"):
+        assert bnc.classify_activity_action(text) == "unknown"
+
+
+# ---------------- 活动卡缺失的归因:容器 + 文本双判据 ----------------
+
+
+def _obs(cards=0, container=False, section_text=False, scrolls=6,
+         more_entry=False, panel_opened=False):
+    return {"cards": cards, "container": container, "section_text": section_text,
+            "scrolls": scrolls, "more_entry": more_entry, "panel_opened": panel_opened}
+
+
+def test_section_absent_only_when_container_and_text_both_missing():
+    """判「区不存在」必须容器选择器与区标题文案**都**读不到 —— 单靠文案会误报。
+
+    单判据的坑:图文页与视频页的区标题文案若不同(或平台改文案),纯文本判据会把
+    存在的活动区判成"不存在",运营据此以为平台没这功能。所以双判据都空才算 absent。
+    """
+    assert bnc.explain_activity_card_missing("身边的心理学", _obs()).startswith(
+        "activity_section_absent:")
+    # 容器在 → 区在,不是 absent
+    assert not bnc.explain_activity_card_missing(
+        "身边的心理学", _obs(container=True)).startswith("activity_section_absent:")
+    # 只有文案在 → 区也在,不是 absent
+    assert not bnc.explain_activity_card_missing(
+        "身边的心理学", _obs(section_text=True)).startswith("activity_section_absent:")
+    # 有卡 → 区显然在
+    assert not bnc.explain_activity_card_missing(
+        "身边的心理学", _obs(cards=2)).startswith("activity_section_absent:")
+
+
+def test_card_not_found_reason_says_whether_more_panel_was_tried():
+    """区在但没找到目标卡:必须说清「更多」面板试过没有 —— 决定运营下一步查什么。"""
+    tried = bnc.explain_activity_card_missing(
+        "身边的心理学", _obs(cards=2, container=True, more_entry=True, panel_opened=True))
+    not_tried = bnc.explain_activity_card_missing(
+        "身边的心理学", _obs(cards=2, container=True, more_entry=False))
+    assert tried.startswith("activity_card_not_found:")
+    assert not_tried.startswith("activity_card_not_found:")
+    assert "更多" in tried and "更多" in not_tried
+    assert tried != not_tried
+
+
+def test_missing_reason_always_carries_name_and_observations():
+    """两种归因都带活动名与观测量(取证:证明结论不是"没滚够"或"没试面板"滚出来的)。"""
+    for observed in (_obs(), _obs(cards=3, container=True, panel_opened=True)):
+        reason = bnc.explain_activity_card_missing("身边的心理学", observed)
+        assert "身边的心理学" in reason
+        assert "6" in reason  # scrolls
+
+
+# ---------------- 「更多」入口:必须收口在活动区内 ----------------
+
+
+def test_more_entry_probe_is_scoped_to_activity_section(monkeypatch):
+    """定位「更多」只在活动区容器内找 —— 页面上推荐话题区也有个「更多」。
+
+    这条锁的是同名陷阱本身:探测函数拿到的候选**必须**来自活动区选择器,
+    绝不能是一次全页 text=更多 的匹配(点错了会展开推荐话题面板)。
+    """
+    seen = []
+
+    class _P:
+        def query_selector(self, sel):
+            seen.append(sel)
+            return "MORE" if sel == bnc._ACTIVITY_MORE_ENTRY else None
+
+        def evaluate(self, *_a, **_k):
+            return None
+
+    got = bnc._find_activity_more_entry(_P())
+    assert got is not None
+    assert all("activity" in sel for sel in seen), \
+        f"「更多」的候选选择器必须全部收口在活动区内,实际尝试了: {seen}"
+
+
+# ---------------- 更多面板路径:内联未命中 → 点更多 → 面板命中 → 翻转 ----------------
+
+
+class _RecHuman:
+    """记录每一次拟人动作;点到活动按钮时把文案翻成已关联(模拟平台响应)。"""
+
+    def __init__(self, state):
+        self.state = state
+        self.clicks = []
+
+    def click(self, target, reason="", **_k):
+        self.clicks.append(reason)
+        if target == "MORE":
+            self.state["panel_open"] = True
+        elif target is self.state["action"]:
+            self.state["text"] = "取消关联活动"
+
+    def hover(self, *_a, **_k):
+        self.state["hovered"] = True
+
+    def scroll(self, *_a, **_k):
+        self.state["scrolls"] += 1
+
+    def wait(self, *_a, **_k):
+        return None
+
+
+class _FakeAction:
+    def __init__(self, state):
+        self.state = state
+
+    def inner_text(self):
+        return self.state["text"]
+
+
+class _FakeCard:
+    def __init__(self, action):
+        self._action = action
+
+    def query_selector(self, _sel):
+        return self._action
+
+
+class _PanelPage:
+    """最小 page 替身:只提供 _set_activity / _wait_activity_flip 会碰到的读方法。"""
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def query_selector(self, _sel):
+        return None
+
+    def query_selector_all(self, _sel):
+        # 面板开着时列表里当然有卡(只是不一定有目标那张)——滚动锚点要靠它
+        return ["PANEL_CARD"]
+
+    def inner_text(self, _sel):
+        return ""
+
+    def evaluate(self, *_a, **_k):
+        return None
+
+
+def _wire_more_panel(monkeypatch, *, more_entry_found=True):
+    """内联区永远没有目标卡,只有点开「更多」面板后才找得到。"""
+    state = {"panel_open": False, "text": "关联活动", "scrolls": 0, "hovered": False}
+    state["action"] = _FakeAction(state)
+    card = _FakeCard(state["action"])
+
+    monkeypatch.setattr(
+        bnc, "parse_activities",
+        lambda raw: [{"id": "43561", "name": "身边的心理学", "desc": "心理科普"}],
+    )
+    monkeypatch.setattr(
+        bnc, "read_activity_action_text",
+        lambda p, n: state["text"] if state["panel_open"] else None,
+    )
+    monkeypatch.setattr(
+        bnc, "_find_activity_card",
+        lambda p, n: card if state["panel_open"] else None,
+    )
+    monkeypatch.setattr(
+        bnc, "_find_activity_more_entry",
+        lambda p: "MORE" if more_entry_found else None,
+    )
+    monkeypatch.setattr(bnc, "probe_activity_section",
+                        lambda p: {"cards": 2, "container": True, "section_text": True})
+    monkeypatch.setattr(bnc, "_ACTIVITY_REVEAL_SCROLLS", 2)
+    monkeypatch.setattr(bnc, "_ACTIVITY_PANEL_SCROLLS", 3)
+    return state, _RecHuman(state)
+
+
+def test_more_panel_path_links_activity_not_in_recommended_slots(monkeypatch):
+    """内联区只有约 2 张推荐卡,目标活动不在推荐位 → 点「更多」进面板再关联。
+
+    真实调用序列断言(不是"没抛异常"):先点「更多」→ 面板打开 → 再点该活动的按钮 →
+    文案翻转 → done。上线前这条路根本不存在,目标不在推荐位就永远 card_not_found ——
+    大概率就是此前「活动挂不上」的真根因。
+    """
+    state, human = _wire_more_panel(monkeypatch)
+
+    out = bnc._set_activity(_PanelPage(), human, _StubResponses(), "43561")
+
+    assert out["status"] == "done", out
+    assert out["via"] == "more_panel"
+    assert out["name"] == "身边的心理学"
+    # 序列:先「更多」后活动按钮,顺序不许颠倒(面板没开时那颗按钮压根不在 DOM 里)
+    more_at = next(i for i, r in enumerate(human.clicks) if r.startswith("打开"))
+    act_at = next(i for i, r in enumerate(human.clicks) if r.startswith("关联活动「"))
+    assert more_at < act_at, human.clicks
+    assert state["panel_open"] is True
+
+
+def test_more_panel_scrolls_the_panel_before_giving_up(monkeypatch):
+    """面板列表是懒加载的:找不到卡要在面板内滚动再找,而不是开完就判没有。"""
+    state = {"panel_open": False, "text": "关联活动", "scrolls": 0, "hovered": False}
+    state["action"] = _FakeAction(state)
+    card = _FakeCard(state["action"])
+    monkeypatch.setattr(
+        bnc, "parse_activities",
+        lambda raw: [{"id": "43561", "name": "身边的心理学", "desc": ""}],
+    )
+    # 面板开了也要滚够 2 轮才渲染出目标卡
+    def _read(p, n):
+        return state["text"] if state["panel_open"] and state["scrolls"] >= 2 else None
+
+    monkeypatch.setattr(bnc, "read_activity_action_text", _read)
+    monkeypatch.setattr(
+        bnc, "_find_activity_card",
+        lambda p, n: card if state["panel_open"] and state["scrolls"] >= 2 else None,
+    )
+    monkeypatch.setattr(bnc, "_find_activity_more_entry", lambda p: "MORE")
+    monkeypatch.setattr(bnc, "probe_activity_section",
+                        lambda p: {"cards": 2, "container": True, "section_text": True})
+    monkeypatch.setattr(bnc, "_ACTIVITY_REVEAL_SCROLLS", 0)
+    monkeypatch.setattr(bnc, "_ACTIVITY_PANEL_SCROLLS", 5)
+    human = _RecHuman(state)
+
+    out = bnc._set_activity(_PanelPage(), human, _StubResponses(), "43561")
+
+    assert out["status"] == "done", out
+    assert state["scrolls"] >= 2
+    assert state["hovered"] is True, "滚面板前必须先把鼠标移进面板(wheel 打在光标位置)"
+
+
+def test_no_more_entry_falls_back_to_attribution_and_clicks_nothing(monkeypatch):
+    """连「更多」入口都没有 → 走归因报错,且**一次点击都不发生**(绝不乱点)。"""
+    state, human = _wire_more_panel(monkeypatch, more_entry_found=False)
+
+    out = bnc._set_activity(_PanelPage(), human, _StubResponses(), "43561")
+
+    assert out["status"] == "error"
+    assert out["reason"].startswith("activity_card_not_found:")
+    assert human.clicks == [], f"没找到入口就不该点任何东西,实际点了: {human.clicks}"
+
+
+def test_more_panel_never_clicks_cancel_when_already_linked(monkeypatch):
+    """面板里那张卡本来就是「取消关联活动」→ skipped 零点击(红线:绝不点取消)。"""
+    state, human = _wire_more_panel(monkeypatch)
+    state["text"] = "取消关联活动"
+
+    out = bnc._set_activity(_PanelPage(), human, _StubResponses(), "43561")
+
+    assert out["status"] == "skipped"
+    # 开面板是允许的(不开就看不到这张卡);红线是绝不点那颗「取消关联活动」按钮
+    assert all(not r.startswith("关联活动「") for r in human.clicks), human.clicks
 
 
 class _NoopHuman:
-    """只满足 _set_activity 会用到的两个动作(下滚触发懒渲染 + 停顿)。"""
+    """只满足 _set_activity 会用到的动作(下滚触发懒渲染 + 悬停 + 停顿)。"""
+
+    def click(self, *_a, **_k):
+        raise AssertionError("本用例不应发生任何点击")
+
+    def hover(self, *_a, **_k):
+        return None
 
     def scroll(self, *_a, **_k):
         return None
@@ -1387,26 +1632,65 @@ class _StubResponses:
         return {}
 
 
-def _set_activity_with(monkeypatch, card_count: int):
-    """跑 _set_activity,把"活动卡定位不到 + 页面上有几张卡"两件事打成桩。"""
+def _set_activity_missing(monkeypatch, **observed):
+    """跑 _set_activity,让目标卡在内联区与更多面板里都找不到。"""
     monkeypatch.setattr(bnc, "read_activity_action_text", lambda p, n: None)
-    monkeypatch.setattr(bnc, "count_activity_cards", lambda p: card_count)
+    monkeypatch.setattr(bnc, "_find_activity_more_entry", lambda p: None)
+    monkeypatch.setattr(bnc, "probe_activity_section", lambda p: observed)
     monkeypatch.setattr(
         bnc, "parse_activities",
         lambda raw: [{"id": "act-1", "name": "心理健康周", "desc": ""}],
     )
-    return bnc._set_activity(object(), _NoopHuman(), _StubResponses(), "act-1")
+    monkeypatch.setattr(bnc, "_ACTIVITY_REVEAL_SCROLLS", 1)
+    return bnc._set_activity(_PanelPage(), _NoopHuman(), _StubResponses(), "act-1")
 
 
-def test_set_activity_reports_section_absent_when_no_cards(monkeypatch):
-    """页面上一张活动卡都没有 → error 的 reason 走 activity_section_absent 那支。"""
-    out = _set_activity_with(monkeypatch, card_count=0)
+def test_set_activity_reports_section_absent_when_nothing_found(monkeypatch):
+    """卡 / 容器 / 区标题文案三样都没有 → activity_section_absent。"""
+    out = _set_activity_missing(
+        monkeypatch, cards=0, container=False, section_text=False)
     assert out["status"] == "error"
     assert out["reason"].startswith("activity_section_absent:")
 
 
-def test_set_activity_reports_card_not_found_when_section_has_cards(monkeypatch):
-    """活动区里有别的卡、只是没有目标那张 → activity_card_not_found。"""
-    out = _set_activity_with(monkeypatch, card_count=5)
+def test_set_activity_reports_card_not_found_when_section_present(monkeypatch):
+    """区在(容器或文案任一命中)、只是没有目标那张 → activity_card_not_found。"""
+    out = _set_activity_missing(
+        monkeypatch, cards=2, container=True, section_text=True)
     assert out["status"] == "error"
     assert out["reason"].startswith("activity_card_not_found:")
+
+
+def test_panel_tried_evidence_survives_the_panel_covering_the_entry(monkeypatch):
+    """面板开过但没找到:归因必须说「面板已打开并滚动查找过」。
+
+    证据要在**过程中**记,不能事后重探一次「更多」入口 —— 面板一打开就可能把入口盖住,
+    事后探到 None 会把"面板试过了"错报成"压根没入口可点",运营据此查错方向。
+    """
+    calls = {"n": 0}
+
+    def _entry_disappears_after_open(_page):
+        calls["n"] += 1
+        return "MORE" if calls["n"] == 1 else None  # 开面板后入口被盖住
+
+    monkeypatch.setattr(bnc, "read_activity_action_text", lambda p, n: None)
+    monkeypatch.setattr(bnc, "_find_activity_card", lambda p, n: None)
+    monkeypatch.setattr(bnc, "_find_activity_more_entry", _entry_disappears_after_open)
+    monkeypatch.setattr(bnc, "probe_activity_section",
+                        lambda p: {"cards": 2, "container": True, "section_text": True})
+    monkeypatch.setattr(
+        bnc, "parse_activities",
+        lambda raw: [{"id": "43561", "name": "身边的心理学", "desc": ""}],
+    )
+    monkeypatch.setattr(bnc, "_ACTIVITY_REVEAL_SCROLLS", 1)
+    monkeypatch.setattr(bnc, "_ACTIVITY_PANEL_SCROLLS", 1)
+    state = {"panel_open": False, "text": "", "scrolls": 0, "hovered": False,
+             "action": None}
+    human = _RecHuman(state)
+
+    out = bnc._set_activity(_PanelPage(), human, _StubResponses(), "43561")
+
+    assert out["status"] == "error"
+    assert out["reason"].startswith("activity_card_not_found:")
+    assert "面板已打开" in out["reason"], out["reason"]
+    assert out["observed"]["panel_opened"] is True
