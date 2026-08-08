@@ -29,6 +29,7 @@ from loguru import logger
 from app.core.config import settings
 from app.browser.text_formatter import get_display_length, truncate_by_display
 from app.browser.selector_registry import get_default_registry
+from app.browser.topic_dropdown import COLLECT_LAYERS_JS, select_topic_option
 from app.browser.self_heal import SelfHealLocator
 
 # ── 小红书发布硬约束常量 ──
@@ -117,7 +118,9 @@ def topic_failure_detail(tag_name: str, option_pos: Optional[Dict[str, Any]],
     2026-08-07 视频 e2e 6/6 全 ``no_exact_match``,而同期图文 171/181 成功 —— 回执里只有
     一个 reason 字符串,判不出到底是"浮层里是默认推荐话题(说明搜索没触发)"还是"这些词
     平台真的没有"。所以把浮层实际枚举到的候选文案、候选条数、浮层容器 class 和正文框
-    回读一并交出去,下一次真跑一眼即可定性。
+    回读一并交出去,下一次真跑一眼即可定性 —— 这四个字段当场就把真因指了出来
+    (抓到的是右侧预览面板的 ``base-info``),故一个不删,再补两个:浮层总层数、被判据
+    拒掉的层 class(定位失败时要看的正是"我们把什么当成了下拉、又拒了什么")。
     """
     detail: Dict[str, Any] = {
         "tag": tag_name,
@@ -128,6 +131,8 @@ def topic_failure_detail(tag_name: str, option_pos: Optional[Dict[str, Any]],
         detail["candidates"] = list(option_pos.get("candidates") or [])[:10]
         detail["item_count"] = option_pos.get("item_count", 0)
         detail["layer_class"] = str(option_pos.get("layer_class") or "")[:80]
+        detail["layers_seen"] = option_pos.get("layers_seen", 0)
+        detail["rejected_classes"] = list(option_pos.get("rejected_classes") or [])[:5]
     return detail
 
 
@@ -2034,75 +2039,14 @@ class XHSPublishAtomicTasks:
                             logger.info(f"   [{tag_idx+1}/{len(tags)}] 输入话题: {tag_text}")
                             self.human.wait(1.5, 2.5, context="等待话题下拉")
 
-                            # JS 只读定位下拉精确匹配项坐标(不 JS click,点击走拟人鼠标)。
-                            # 匹配规则(主仓 RCA 2026-05-18):精确相等优先;或以完整 tagName
-                            # 开头且剩余非汉字(浏览量统计文案);禁止残缺前缀误配。
-                            option_pos = self.page.evaluate(r"""
-                                (tagName) => {
-                                    const allElements = document.querySelectorAll('*');
-                                    const candidates = [];
-                                    for (const el of allElements) {
-                                        const style = window.getComputedStyle(el);
-                                        const pos = style.position;
-                                        if (pos !== 'absolute' && pos !== 'fixed') continue;
-                                        if (style.display === 'none' || style.visibility === 'hidden') continue;
-                                        if (el.closest('[contenteditable]')) continue;
-                                        const rect = el.getBoundingClientRect();
-                                        if (rect.width > 800 || rect.height > 600) continue;
-                                        if (rect.width < 10 || rect.height < 10) continue;
-                                        const text = el.innerText || '';
-                                        if (text.includes(tagName) || text.includes('#' + tagName)) {
-                                            candidates.push({ el, area: rect.width * rect.height });
-                                        }
-                                    }
-                                    if (candidates.length === 0) return {
-                                        success: false, reason: 'no_floating_layer',
-                                        candidates: [], item_count: 0, layer_class: ''};
-                                    candidates.sort((a, b) => a.area - b.area);
-                                    const target = candidates[0];
-                                    const items = target.el.querySelectorAll('div, li, a, span, p');
-                                    // 取证:浮层里**实际**枚举到的候选文案(去重取前 10)。
-                                    // 判"浮层里是默认推荐话题还是搜索结果"全靠它。
-                                    const seenTexts = [];
-                                    for (const item of items) {
-                                        const t = (item.innerText || '').trim().replace(/\s+/g, ' ');
-                                        if (!t || t.length > 50) continue;
-                                        const c = t.replace(/^#/, '').trim();
-                                        if (c && seenTexts.indexOf(c) === -1) seenTexts.push(c);
-                                        if (seenTexts.length >= 10) break;
-                                    }
-                                    const layerClass = String(target.el.className || '').slice(0, 80);
-                                    const okRect = (it) => { const r = it.getBoundingClientRect();
-                                        return (r.width > 5 && r.height > 5 && r.height < 80)
-                                            ? {x: r.x + r.width/2, y: r.y + r.height/2} : null; };
-                                    // 第一轮:精确相等优先
-                                    for (const item of items) {
-                                        const itemText = (item.innerText || '').trim();
-                                        if (!itemText || itemText.length > 50) continue;
-                                        const cleanText = itemText.replace(/^#/, '').trim();
-                                        if (cleanText === tagName) {
-                                            const c = okRect(item);
-                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
-                                        }
-                                    }
-                                    // 第二轮:以完整 tagName 开头(剩余应是统计文案,非汉字延展)
-                                    for (const item of items) {
-                                        const itemText = (item.innerText || '').trim();
-                                        if (!itemText || itemText.length > 50) continue;
-                                        const cleanText = itemText.replace(/^#/, '').trim();
-                                        if (cleanText.startsWith(tagName) && cleanText.length > tagName.length) {
-                                            const rest = cleanText.slice(tagName.length);
-                                            if (/^[一-龥]/.test(rest)) continue;
-                                            const c = okRect(item);
-                                            if (c) return {success: true, x: c.x, y: c.y, matched: itemText};
-                                        }
-                                    }
-                                    return {success: false, reason: 'no_exact_match',
-                                            candidates: seenTexts,
-                                            item_count: items.length,
-                                            layer_class: layerClass};
-                                }
-                            """, tag_name)
+                            # JS 只**枚举**浮层(不判断、不 click),判据全在 Python 里 ——
+                            # 见 topic_dropdown.py:旧版在 JS 里"取面积最小的浮层"没有正向
+                            # 判据,视频页稳定抓成右侧预览面板的作者信息区(RCA 2026-08-07)。
+                            option_pos = select_topic_option(
+                                self.page.evaluate(COLLECT_LAYERS_JS, tag_name),
+                                tag_name,
+                                editor_rect=content_el.bounding_box(),
+                            )
 
                             if option_pos and option_pos.get("success"):
                                 ox, oy = option_pos["x"], option_pos["y"]
@@ -2112,14 +2056,24 @@ class XHSPublishAtomicTasks:
                                 added += 1
                                 topics_applied.append(tag_name)
                             else:
-                                # 无精确匹配:回删刚输入的 #tag,绝不留残缺文本。
+                                # 没定位到选项:回删刚输入的 #tag,绝不留残缺文本。
                                 # 回删**之前**先取证(回删后正文框就看不出打进去过什么了)。
                                 detail = topic_failure_detail(
                                     tag_name, option_pos, read_editor_tail(content_el)
                                 )
-                                logger.info(
-                                    f"   下拉无精确匹配({detail['reason']}),回删该话题不插入"
+                                # 「没找到下拉」和「下拉里没这词」是两种处置,日志也别糊在一起:
+                                # 前者是我们的定位判据失灵(要改代码),后者是词本身不存在(换词)
+                                _fail_log = (
+                                    logger.warning
+                                    if detail["reason"] == "topic_dropdown_not_found"
+                                    else logger.info
+                                )
+                                _fail_log(
+                                    f"   话题未选中({detail['reason']}),回删该话题不插入"
                                     f" | 浮层候选 {detail.get('candidates')}"
+                                    f" | 浮层 {detail.get('layer_class')}"
+                                    f" 共 {detail.get('layers_seen')} 层"
+                                    f",被拒 {detail.get('rejected_classes')}"
                                     f" | 正文框末尾「{detail['editor_tail']}」"
                                 )
                                 topics_failed.append(detail)

@@ -341,7 +341,10 @@ def test_publish_failure_has_no_applied(monkeypatch):
 # 同期图文近 30 条累计 applied=171 / failed=10,机制本身健康;视频那条却一个都没中,
 # 连「心理科普」这种常见词都失败。旧回执里只有一个 reason 字符串,判不出是
 # 「浮层里显示的是默认推荐话题(= 搜索压根没触发)」还是「这些词平台真没有」。
-# 本轮不猜着改逻辑,只把当场证据(浮层候选文案 / 条数 / 容器 class / 正文框回读)带出来。
+# 那一轮不猜着改逻辑,只把当场证据(浮层候选文案 / 条数 / 容器 class / 正文框回读)带出来 ——
+# 隔天(08-08)这四个字段就把真因指了出来:抓到的是右侧预览面板的 base-info。
+# 判据本身的单测在 tests/test_topic_dropdown.py,这里守的是**接线**:采集 JS → 判据 →
+# 取证 → 回删 这条链路照旧走通。
 
 
 class _TopicEl:
@@ -358,8 +361,8 @@ class _TopicEl:
 
 
 class _TopicPage:
-    def __init__(self, locate):
-        self._locate = locate
+    def __init__(self, collect):
+        self._collect = collect
         self.body = "正文内容"
         self.keys = []
         self.content_el = _TopicEl(self)
@@ -371,7 +374,7 @@ class _TopicPage:
     def evaluate(self, js, arg=None):
         if "activeElement" in js:
             return True          # 焦点验证:替身里一律认为聚焦成功
-        return self._locate(arg)
+        return self._collect(arg)   # 采集 JS:返回浮层清单,判定由 select_topic_option 做
 
     def press(self, key):        # page.keyboard.press
         self.keys.append(key)
@@ -380,11 +383,13 @@ class _TopicPage:
 class _TopicHuman:
     def __init__(self, page):
         self.page = page
+        self.clicks = []
 
     def scroll_to_element(self, _el):
         return None
 
-    def click(self, _target, reason="", **_k):
+    def click(self, target, reason="", **_k):
+        self.clicks.append((target, reason))
         return None
 
     def press_key(self, _key, **_k):
@@ -397,10 +402,10 @@ class _TopicHuman:
         return None
 
 
-def _run_step6(locate, tags):
+def _run_step6(collect, tags):
     from app.browser.atomic_tasks import XHSPublishAtomicTasks
 
-    page = _TopicPage(locate)
+    page = _TopicPage(collect)
     tasks = XHSPublishAtomicTasks.__new__(XHSPublishAtomicTasks)
     tasks.page = page
     tasks.human = _TopicHuman(page)
@@ -408,51 +413,77 @@ def _run_step6(locate, tags):
     tasks.enable_debug = False
     tasks.job_tag = ""
     tasks.screenshot_dir = "/tmp"
-    return tasks.step6_set_publish_options(tags=tags), page
+    return tasks.step6_set_publish_options(tags=tags), page, tasks.human
+
+
+# 替身正文框 bounding_box 是 x=100 w=600(见 _TopicEl),下拉夹具就摆在这一列里
+def _dropdown_layer(texts, x=300.0, y=920.0):
+    return {"cls": "topic-container", "rect": {"x": x, "y": y, "width": 320.0, "height": 200.0},
+            "items": [{"text": t, "x": x + 100, "y": y + 20 + 40 * i}
+                      for i, t in enumerate(texts)]}
 
 
 def test_topic_failure_carries_dropdown_candidates_and_editor_readback():
     """no_exact_match 必须带出浮层**实际**枚举到的候选 + 正文框回读,不能只丢一句 reason。"""
-    seen = ["生活美学", "日常文案", "人生的意义", "每天有值得记录的瞬间"]
+    seen = ["#生活美学 1.2万次浏览", "#日常文案 8千次浏览", "#人生的意义 3万次浏览"]
 
-    def _locate(_tag):
-        return {"success": False, "reason": "no_exact_match", "candidates": seen,
-                "item_count": 12, "layer_class": "topic-panel"}
-
-    out, _page = _run_step6(_locate, ["心理科普"])
+    out, _page, _human = _run_step6(lambda _t: {"layers": [_dropdown_layer(seen)]}, ["心理科普"])
 
     assert out["success"] is True and out["topics_applied"] == []
     detail = out["topics_failed"][0]
     assert detail["tag"] == "心理科普"
+    # 下拉在、词不在 —— 这才是 no_exact_match
     assert detail["reason"] == "no_exact_match"
-    # 有了这四条,下一次真跑一眼判定:候选是「默认推荐」→ 输入没进去;是搜索结果 → 词不存在
+    # 有了这几条,下一次真跑一眼判定:候选是「默认推荐」→ 输入没进去;是搜索结果 → 词不存在
     assert detail["candidates"] == seen
-    assert detail["item_count"] == 12
-    assert detail["layer_class"] == "topic-panel"
+    assert detail["item_count"] == 3
+    assert detail["layer_class"] == "topic-container"
     assert detail["editor_tail"].endswith("#心理科普"), detail["editor_tail"]
 
 
 def test_topic_evidence_is_read_before_the_backspace_cleanup():
     """取证必须发生在**回删之前** —— 回删完正文框就看不出打进去过什么了。"""
-    def _locate(_tag):
-        return {"success": False, "reason": "no_exact_match", "candidates": ["生活美学"],
-                "item_count": 3, "layer_class": "x"}
+    def _collect(_tag):
+        return {"layers": [_dropdown_layer(["#生活美学 1.2万次浏览", "#日常 3千次浏览"])]}
 
-    out, page = _run_step6(_locate, ["睡不着"])
+    out, page, _human = _run_step6(_collect, ["睡不着"])
 
     assert "#睡不着" in out["topics_failed"][0]["editor_tail"]
     assert page.keys and page.keys[0] == "Escape", "回删链路本身不能被取证改掉"
 
 
 def test_topic_success_path_still_applies_without_evidence_noise():
-    """匹配上的话题照旧进 topics_applied,不因取证改动跑偏。"""
-    def _locate(tag):
-        return {"success": True, "x": 10.0, "y": 20.0, "matched": f"#{tag} 1.2万浏览"}
+    """匹配上的话题照旧进 topics_applied,坐标取自被点中的那一行。"""
+    def _collect(tag):
+        return {"layers": [_dropdown_layer([f"#{tag} 1.2万次浏览", "#别的话题 5千次浏览"])]}
 
-    out, _page = _run_step6(_locate, ["心理科普", "情绪内耗"])
+    out, _page, human = _run_step6(_collect, ["心理科普", "情绪内耗"])
 
     assert out["topics_applied"] == ["心理科普", "情绪内耗"]
     assert out["topics_failed"] == []
+    assert [c for c in human.clicks if "话题选项" in c[1]], "没走拟人点击"
+
+
+def test_video_preview_layer_does_not_get_clicked_end_to_end():
+    """视频页那种"只抓到右侧预览面板"的现场:整条链路要判 topic_dropdown_not_found,
+    并且**一次话题点击都不许发生**(点上去等于在预览面板上乱点)。"""
+    def _collect(tag):
+        return {"layers": [{
+            "cls": "base-info",
+            "rect": {"x": 1145.0, "y": 490.0, "width": 225.0, "height": 55.0},
+            "items": [{"text": "NBDpsy-亲密关系 关注", "x": 1250.0, "y": 500.0},
+                      {"text": "关注", "x": 1340.0, "y": 500.0},
+                      {"text": f"#{tag}", "x": 1250.0, "y": 530.0},
+                      {"text": "编辑于 刚刚·公开可见", "x": 1240.0, "y": 552.0}],
+        }]}
+
+    out, _page, human = _run_step6(_collect, ["投射性认同"])
+
+    detail = out["topics_failed"][0]
+    assert detail["reason"] == "topic_dropdown_not_found"
+    assert detail["layer_class"] == "base-info"
+    assert detail["layers_seen"] == 1 and detail["rejected_classes"] == ["base-info"]
+    assert [c for c in human.clicks if "话题选项" in c[1]] == [], "点到预览面板上去了"
 
 
 def test_topic_failure_detail_caps_candidates_at_ten():
@@ -480,12 +511,30 @@ def test_editor_tail_is_silent_when_readback_blows_up():
     assert read_editor_tail(_Boom()) == ""
 
 
-def test_locate_js_reports_candidates_on_both_failure_paths():
-    """浮层定位 JS 的**两条**失败出口都必须带证据字段(JS 没法单测,守住这条契约)。"""
-    import inspect
-    from app.browser.atomic_tasks import XHSPublishAtomicTasks
+def test_collect_js_only_enumerates_and_never_decides():
+    """采集 JS 只**枚举**浮层:判据留在 Python 才测得动(JS 本身没法单测)。
 
-    src = inspect.getsource(XHSPublishAtomicTasks.step6_set_publish_options)
-    for marker in ("'no_floating_layer'", "'no_exact_match'"):
-        idx = src.index(marker)
-        assert "candidates" in src[idx:idx + 400], marker
+    守两条:一、每层带回判据要用的 class / 几何 / 子项;二、别把"取面积最小的那层"
+    这类判定塞回 JS —— 那正是视频页 6/6 全败的成因(RCA 2026-08-07)。
+    """
+    from app.browser.topic_dropdown import COLLECT_LAYERS_JS
+
+    for key in ("cls:", "rect:", "items:", "has_tag:"):
+        assert key in COLLECT_LAYERS_JS, key
+    for decided in ("no_exact_match", "no_floating_layer", "success:"):
+        assert decided not in COLLECT_LAYERS_JS, f"判定回流到 JS 里了: {decided}"
+
+
+def test_topic_failure_reasons_are_distinguishable():
+    """三种失败必须分得开:没浮层 / 没找到下拉 / 下拉里没这词。"""
+    from app.browser.topic_dropdown import select_topic_option
+
+    editor = {"x": 100.0, "y": 700.0, "width": 600.0, "height": 200.0}
+    preview = {"cls": "x", "rect": {"x": 1200.0, "y": 500.0, "width": 200.0, "height": 50.0},
+               "items": [{"text": "#心理科普", "x": 1300.0, "y": 520.0}]}
+
+    assert select_topic_option({"layers": []}, "心理科普", editor)["reason"] == "no_floating_layer"
+    assert select_topic_option({"layers": [preview]}, "心理科普", editor)["reason"] \
+        == "topic_dropdown_not_found"
+    assert select_topic_option({"layers": [_dropdown_layer(["#别的 1万次浏览", "#词 2万次浏览"])]},
+                               "心理科普", editor)["reason"] == "no_exact_match"
