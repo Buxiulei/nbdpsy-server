@@ -42,7 +42,14 @@ _DEFAULT_STEPS = {
 
 
 class _Page:
-    """假 page:本文件把每一个真读 DOM 的调用都换成了 stub,page 只需能挂/摘响应监听。"""
+    """假 page:本文件把每一个真读 DOM 的调用都换成了 stub,page 只需能挂/摘响应监听。
+
+    唯一的例外是 ``evaluate``:原创声明的**提交后回读**直接在编排层读开关 checked
+    (没有独立的读函数可 stub),故这里按 ``original_checked`` 如实吐回三态。
+    """
+
+    def __init__(self, original_checked=None):
+        self.original_checked = original_checked
 
     def on(self, *_a, **_kw):
         pass
@@ -52,6 +59,9 @@ class _Page:
 
     def wait_for_timeout(self, *_a, **_kw):
         pass
+
+    def evaluate(self, _js, _arg=None):
+        return self.original_checked
 
 
 class _Human:
@@ -157,8 +167,8 @@ def _wire(
     return calls
 
 
-def _run(**kwargs):
-    return bnc.set_note_components(_Page(), 1, _NOTE, **kwargs)
+def _run(page=None, **kwargs):
+    return bnc.set_note_components(page or _Page(), 1, _NOTE, **kwargs)
 
 
 _FULL_EDIT = {
@@ -400,6 +410,187 @@ def test_mixed_request_partially_applied(monkeypatch):
     assert result["status"] == "partially_applied"
     assert result["applied"] == {"activity": False, "title": True}
     assert [f["component"] for f in result["failed"]] == ["activity"]
+
+
+# ---------------- 补录原创声明的编排(运营 2026-08-08 来文) ----------------
+
+
+def _wire_original(monkeypatch, calls, outcome):
+    """把原创声明步换成可编程 stub,并把**它收到的 kwargs** 记进 ``calls``。
+
+    记 kwargs 是这组用例的要害:运营特意问过"编辑页补声明是不是走同一段协议弹窗逻辑",
+    答案必须由测试钉住,不能靠人读代码保证。
+    """
+    def fake_apply(_page, _human, **kw):
+        calls.append(("original_declaration", kw))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(bnc, "apply_original_declaration", fake_apply)
+
+
+def test_original_declaration_reuses_the_publish_chain_function(monkeypatch):
+    """补声明调的必须是**发布链那一个** ``apply_original_declaration``,且带协议弹窗链。
+
+    这是运营来文里点名要确认的事:08-07 那个「拟人随机偏移 40% 概率撞上《原创声明须知》
+    超链接」的修复在这个函数**内部**,编辑链只要共用它,修复就自动覆盖。要是哪天有人
+    在编辑链里另写一份协议弹窗逻辑,这条会红。
+    """
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "done", "observed": {"via": "consent_modal"}})
+
+    result = _run(_Page(original_checked=True), set_original_declaration=True)
+
+    hit = [kw for key, kw in [c for c in calls if isinstance(c, tuple)]
+           if key == "original_declaration"]
+    assert len(hit) == 1, f"补声明步应恰好跑一次: {calls}"
+    assert hit[0] == {"handle_consent_modal": True}, (
+        f"必须带 handle_consent_modal=True 走协议弹窗链,实收 {hit[0]}"
+    )
+    assert result["applied"] == {"original_declaration": True}
+    assert result["status"] == "done"
+
+
+def test_original_declaration_runs_after_components_and_before_publish(monkeypatch):
+    """次序与发布链一致:三组件 → 原创声明 → 发布,且全流程仍只有一次提交。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "done"})
+
+    _run(_Page(original_checked=True), collection_id="c1", set_original_declaration=True)
+
+    flat = [c[0] if isinstance(c, tuple) else c for c in calls]
+    assert flat.index("components") < flat.index("original_declaration")
+    assert flat.index("original_declaration") < flat.index("publish")
+    assert flat.count("publish") == 1
+
+
+def test_original_declaration_only_and_skipped_never_submits(monkeypatch):
+    """只请求补声明、且本就是开态 → **一次发布都不点**,零改动不值得付一次全量覆盖提交。
+
+    运营要拿它对 49 篇批量重跑,每篇白提交一次就是几十次真发布。
+    """
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "skipped", "observed": "already_on"})
+
+    result = _run(set_original_declaration=True)
+
+    assert "publish" not in [c[0] if isinstance(c, tuple) else c for c in calls]
+    assert result["submitted"] is False
+    assert result["status"] == "done"
+    assert result["applied"] == {"original_declaration": True}
+    assert result["components"]["original_declaration"]["status"] == "skipped"
+
+
+def test_skipped_declaration_still_submits_when_something_else_changed(monkeypatch):
+    """本就是开态、但同一单里还挂了合集 → 照常提交(零改动豁免只对"整单零改动"生效)。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "skipped", "observed": "already_on"})
+
+    result = _run(_Page(original_checked=True),
+                  collection_id="c1", set_original_declaration=True)
+
+    assert [c[0] if isinstance(c, tuple) else c for c in calls].count("publish") == 1
+    assert result["submitted"] is True
+    assert result["applied"] == {"collection": True, "original_declaration": True}
+
+
+def test_original_declaration_failure_does_not_block_other_components(monkeypatch):
+    """补声明失败**不阻断**其余组件(与三组件同款:告警不阻断)。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {
+        "status": "error", "reason": "original_consent_not_ticked: 点了但回读仍未勾",
+        "observed": {"consent_ticked": False},
+    })
+
+    result = _run(_Page(original_checked=False),
+                  collection_id="c1", set_original_declaration=True)
+
+    assert result["submitted"] is True, "合集是真改动,该提交还得提交"
+    assert result["applied"] == {"collection": True, "original_declaration": False}
+    assert result["status"] == "partially_applied"
+    reason = next(f["reason"] for f in result["failed"]
+                  if f["component"] == "original_declaration")
+    assert reason.startswith("original_consent_not_ticked:"), reason
+
+
+def test_original_declaration_only_failure_is_whole_job_failed(monkeypatch):
+    """本单只有补声明这一件事,它失败 = 整单失败(没有"其余"可言),且不点发布。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {
+        "status": "error", "reason": "original_confirm_never_enabled: 勾了同意但按钮没解禁",
+        "observed": {"confirm_enabled": False},
+    })
+
+    result = _run(set_original_declaration=True)
+
+    assert "publish" not in [c[0] if isinstance(c, tuple) else c for c in calls]
+    assert result["submitted"] is False
+    assert result["status"] == "failed"
+    assert "note_components_all_failed" in result["error"]
+    assert result["components"]["original_declaration"]["observed"] == {
+        "confirm_enabled": False}
+
+
+def test_original_declaration_exception_is_caught_not_escaped(monkeypatch):
+    """补声明抛异常也只落 error,绝不穿出去 —— 穿出去会丢掉其余组件的结果。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, RuntimeError("弹窗炸了"))
+
+    result = _run(_Page(original_checked=False),
+                  collection_id="c1", set_original_declaration=True)
+
+    assert result["components"]["original_declaration"]["status"] == "error"
+    assert "弹窗炸了" in result["components"]["original_declaration"]["reason"]
+    assert result["applied"]["collection"] is True
+
+
+@pytest.mark.parametrize(
+    "checked, expect",
+    [(True, True), (False, False), (None, None)],
+)
+def test_original_declaration_readback_is_three_state(monkeypatch, checked, expect):
+    """提交后回读开关 checked 三态如实:true / false / 读不到=null(不乐观当成功)。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "done"})
+
+    result = _run(_Page(original_checked=checked), set_original_declaration=True)
+
+    assert result["applied"]["original_declaration"] is expect
+
+
+def test_original_declaration_not_executed_when_edit_step_aborts(monkeypatch):
+    """前序破坏性编辑步失败弃提交时,补声明步如实记「因前序失败未执行」——它确实没跑。"""
+    calls = []
+    _wire(monkeypatch, calls, gate_error="图数对不上", body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, {"status": "done"})
+
+    result = _run(set_original_declaration=True, **_FULL_EDIT)
+
+    assert result["aborted_before_submit"] is True
+    assert "original_declaration" not in [
+        c[0] for c in calls if isinstance(c, tuple)], "弃提交路径不该跑补声明"
+    assert result["components"]["original_declaration"]["reason"] == bnc._SKIPPED_REASON
+
+
+def test_pure_component_request_has_no_declaration_key(monkeypatch):
+    """没请求补声明时,结果里**不许**多出 original_declaration 键(老调用方读同一份 JSON)。"""
+    calls = []
+    _wire(monkeypatch, calls, body_texts=("旧正文", "旧正文"))
+    _wire_original(monkeypatch, calls, AssertionError("没请求就不该跑补声明"))
+
+    result = _run(_Page(original_checked=False), collection_id="c1")
+
+    assert "original_declaration" not in result["applied"]
+    assert "original_declaration" not in result["components"]
 
 
 # ---------------- 服务层:台账回写接线(设计 3.3) ----------------

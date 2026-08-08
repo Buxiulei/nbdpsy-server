@@ -64,6 +64,7 @@ def start_components(
     collection_name: str | None = None,
     remove_collection_id: str | None = None,
     remove_collection_name: str | None = None,
+    set_original_declaration: bool = False,
 ) -> str:
     """REST 触发一次三组件设置 / 笔记编辑;登记 browser_jobs 台账,返回轮询 id。
 
@@ -83,6 +84,7 @@ def start_components(
         "quoted_note_id": quoted_note_id,
         "activity_id": activity_id,
         "related_counselor": related_counselor,
+        "set_original_declaration": set_original_declaration,
     }
     if edits:
         payload.update(edits)
@@ -136,10 +138,13 @@ async def execute(account_id: int, payload: dict) -> dict:
         for field in EDIT_FIELDS
         if payload.get(field) is not None
     }
-    if not any(components.values()) and not edits:
+    # 原创声明补录:纯布尔开关(只开不关),不进 COMPONENT_FIELDS —— 那一族是 id 字符串。
+    set_original_declaration = bool(payload.get("set_original_declaration"))
+    if not any(components.values()) and not edits and not set_original_declaration:
         return {
             "error": "no_component_requested: collection_id / remove_collection_id / "
-                     "quoted_note_id / activity_id / 编辑字段(title / content / 图片增删)"
+                     "quoted_note_id / activity_id / set_original_declaration / "
+                     "编辑字段(title / content / 图片增删)"
                      "至少要给一个,否则这次编辑什么都不会改"
         }
 
@@ -154,6 +159,7 @@ async def execute(account_id: int, payload: dict) -> dict:
                 result = await asyncio.to_thread(
                     _apply_sync, account_id, cookies, note_id, components, edits,
                     collection_name, remove_collection_name,
+                    set_original_declaration,
                 )
         # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
         return await _sync_ledger(account_id, note_id, result)
@@ -176,6 +182,7 @@ def _apply_sync(
     edits: dict | None = None,
     collection_name: str | None = None,
     remove_collection_name: str | None = None,
+    set_original_declaration: bool = False,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
@@ -190,7 +197,8 @@ def _apply_sync(
         return set_note_components(
             client.page, account_id, note_id, **components,
             collection_name=collection_name,
-            remove_collection_name=remove_collection_name, **(edits or {})
+            remove_collection_name=remove_collection_name,
+            set_original_declaration=set_original_declaration, **(edits or {})
         )
     finally:
         client.stop()

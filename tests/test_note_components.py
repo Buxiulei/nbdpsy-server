@@ -32,8 +32,9 @@ class _El:
     """假元素:只提供被测代码真用到的能力(读文本/读 value/取矩形/子查询/被点)。"""
 
     def __init__(self, text="", *, on_click=None, value="", children=None, href=None,
-                 on_type=None, on_hover=None):
+                 on_type=None, on_hover=None, cls=None):
         self._text = text
+        self._cls = cls
         self.on_click = on_click
         self.on_type = on_type   # 被 type_text 输入时的副作用(他人笔记检索框用)
         self.on_hover = on_hover  # 被 hover 时的副作用(合集 chip 的 × 是 hover 才显)
@@ -51,6 +52,8 @@ class _El:
         return True
 
     def get_attribute(self, name):
+        if name == "class":
+            return self._cls
         return self._href if name == "href" else None
 
     def bounding_box(self):
@@ -135,6 +138,10 @@ class Editor:
         permission_after_submit=None,
         quote_card_titles=None,
         other_notes=(),
+        original_declared=False,
+        original_consent_effective=True,
+        original_row_absent=False,
+        original_persists_on_readback=True,
     ):
         self.permission = permission
         self.row_band_probes = []  # 防遮挡带探测记录(选择器)
@@ -172,6 +179,18 @@ class Editor:
         self.silent_activity_clicks = silent_activity_clicks
         self.permission_before_submit = permission_before_submit
         self.permission_after_submit = permission_after_submit
+        # ── 原创声明补录(夹具 content_settings.json 从编辑页 /publish/update 采;
+        # 协议弹窗形态与发布页夹具 original_modal_publish_page.json 一致)──
+        # declared_for_real = 平台侧真的声明了;checked = 开关行回读到的 checked
+        # (点开关会**乐观**翻 true,X 关掉弹窗又重置 —— 探针实证的那个坑)。
+        self.original_row_absent = original_row_absent
+        self.original_consent_effective = original_consent_effective
+        self.original_persists_on_readback = original_persists_on_readback
+        self.original_declared_for_real = original_declared
+        self.original_checked = original_declared
+        self.original_modal_open = False
+        self.original_consent_ticked = False
+        self.original_closed_by_x = False
         self.submitted = 0
         self.page = _FakePage(self)
 
@@ -181,6 +200,12 @@ class Editor:
         """一次页面加载:活动列表随页面返回(设计 2.9)。"""
         self.popover_open = False
         self.modal_open = False
+        # 重进页面:弹窗态清空,开关回读取平台真值(可配是否回显已声明态)
+        self.original_modal_open = False
+        self.original_consent_ticked = False
+        self.original_checked = (
+            self.original_declared_for_real and self.original_persists_on_readback
+        )
         self.page.emit(
             "https://creator.xiaohongshu.com/api/galaxy/v2/creator/activity_center/list",
             {"data": {"list": [
@@ -275,6 +300,31 @@ class Editor:
     def _select_quote(self, title):
         self._selected_quote = title
 
+    # ---- 原创声明的点击副作用(复刻真号探针实证的三段语义) ----
+
+    def _click_original_switch(self):
+        """点开关:checked **乐观**翻 true,同时弹出协议弹窗(两份夹具都如此)。"""
+        self.original_checked = True
+        self.original_modal_open = True
+
+    def _tick_original_consent(self):
+        """勾「我已阅读并同意」;撞上《原创声明须知》超链接时事件被吃掉,勾不上。"""
+        if self.original_consent_effective:
+            self.original_consent_ticked = True
+
+    def _confirm_original(self):
+        """点「声明原创」:没勾同意时按钮是 disabled,点了也没用。"""
+        if not self.original_consent_ticked:
+            return
+        self.original_modal_open = False
+        self.original_declared_for_real = True
+
+    def _close_original_modal(self):
+        """点 X 关弹窗:探针实证 checked 被重置回未声明态。"""
+        self.original_modal_open = False
+        self.original_closed_by_x = True
+        self.original_checked = self.original_declared_for_real
+
     def _click_activity(self, name):
         if self.silent_activity_clicks > 0:
             self.silent_activity_clicks -= 1
@@ -352,6 +402,35 @@ class Editor:
                     ],
                 }))
             return cards
+        if sel == bnc._ORIGINAL_ROW:
+            return [] if self.original_row_absent else [_El("原创声明")]
+        if sel == bnc._ORIGINAL_SWITCH:
+            if self.original_row_absent:
+                return []
+            return [_El("", on_click=self._click_original_switch)]
+        if sel == bnc._ORIGINAL_MODAL:
+            return [_El("笔记完成原创声明后")] if self.original_modal_open else []
+        if sel == bnc._ORIGINAL_MODAL_CLOSE:
+            if not self.original_modal_open:
+                return []
+            return [_El("", on_click=self._close_original_modal)]
+        if sel in bnc._ORIGINAL_CONSENT_CANDIDATES:
+            if not self.original_modal_open:
+                return []
+            return [_El("我已阅读并同意 《原创声明须知》",
+                        on_click=self._tick_original_consent)]
+        if sel == bnc._ORIGINAL_CONSENT_SIMULATOR:
+            if not self.original_modal_open:
+                return []
+            # 勾选态看 class 有没有 unchecked(隐藏 input 是 0×0,读不到也点不着)
+            cls = "d-checkbox-simulator --color-bg-white"
+            if not self.original_consent_ticked:
+                cls += " unchecked"
+            return [_El("", cls=cls, on_click=self._tick_original_consent)]
+        if sel == bnc._ORIGINAL_CONFIRM_BUTTON:
+            if not self.original_modal_open:
+                return []
+            return [_El(bnc._ORIGINAL_CONFIRM_TEXT, on_click=self._confirm_original)]
         if sel == bnc._PERMISSION_DESC:
             return [_El(self.permission)] if self.permission else []
         if sel == bnc._TITLE_INPUT:
@@ -399,6 +478,16 @@ class _FakePage:
         pass
 
     def evaluate(self, js, _arg=None):
+        if "original-wrapper" in js:
+            # 开关行没有时读不到 input → null(与真页面同语义,不是 False)
+            if self.editor.original_row_absent:
+                return None
+            return self.editor.original_checked
+        if "isDisabled" in js:
+            # 「声明原创」按钮:勾了同意才解禁
+            if not self.editor.original_modal_open:
+                return None
+            return self.editor.original_consent_ticked
         if "contenteditable" in js:
             return self.editor.body
         if "elementFromPoint" in js:
@@ -2264,3 +2353,153 @@ def test_remove_aborted_edit_marks_step_as_not_executed(monkeypatch, wired):
                title="新标题")
     assert out["aborted_before_submit"] is True
     assert out["components"]["collection_remove"]["reason"] == bnc._SKIPPED_REASON
+
+
+# ---------------- 补录原创声明:真走一遍假 DOM(运营 2026-08-08 来文) ----------------
+#
+# 与上面 wire 那组的分工:那边钉编排(谁先谁后、提不提交、结果怎么汇总),这边钉
+# **页面上到底怎么做的** —— 开关点了没、协议弹窗走没走完、失败时弹窗关没关。
+# 两份夹具的结构一致性由 test_original_declaration.py 那组选择器真值锁负责。
+
+
+def _original_clicks(human):
+    """本次跑里所有与原创声明有关的点击 reason(不含三组件/发布)。"""
+    return [reason for reason, _text in human.clicks
+            if "原创" in reason or "同意" in reason or "声明" in reason]
+
+
+def test_original_already_on_is_skipped_with_zero_clicks(monkeypatch, wired):
+    """**幂等的立命之本**:进页面先读当前态,已是开态 → skipped 且一次都不点。
+
+    运营要拿这条对 49 篇批量重跑;只要这里多点一下,重跑就会把已达标的笔记再走一遍
+    协议弹窗,还顺带引出一次真提交。
+    """
+    editor = Editor(original_declared=True)
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    out = _run(editor, set_original_declaration=True)
+
+    assert out["components"]["original_declaration"]["status"] == "skipped"
+    assert out["components"]["original_declaration"]["observed"] == "already_on"
+    assert _original_clicks(wired[-1]) == [], "已是开态就一次都不许点"
+    assert editor.original_modal_open is False, "零点击就不会弹出协议弹窗"
+    assert out["submitted"] is False and editor.submitted == 0
+    assert out["applied"] == {"original_declaration": True}
+    assert out["status"] == "done"
+
+
+def test_original_off_walks_the_whole_consent_chain(monkeypatch, wired):
+    """关态 → 点开关 → 勾「我已阅读并同意」→ 点「声明原创」→ done,顺序不许乱。"""
+    editor = Editor(original_declared=False)
+    _wire(monkeypatch, editor, wired)
+
+    out = _run(editor, set_original_declaration=True)
+
+    reasons = _original_clicks(wired[-1])
+    toggle = next(i for i, r in enumerate(reasons) if "打开原创声明开关" in r)
+    consent = next(i for i, r in enumerate(reasons) if "同意" in r)
+    confirm = next(i for i, r in enumerate(reasons) if "点「声明原创」" in r)
+    assert toggle < consent < confirm, reasons
+    assert editor.original_declared_for_real is True
+    assert editor.original_closed_by_x is False, "走成了就不该用 X 关弹窗"
+    assert out["components"]["original_declaration"]["status"] == "done"
+    assert out["components"]["original_declaration"]["observed"]["via"] == "consent_modal"
+    assert out["submitted"] is True and editor.submitted == 1
+    assert out["applied"] == {"original_declaration": True}
+
+
+def test_original_consent_click_targets_the_16px_square(monkeypatch, wired):
+    """勾同意点的必须是 16×16 的 simulator 方块,且**不加随机偏移**。
+
+    这正是 08-07 那个修复:点宽容器时随机偏移约 40% 概率落进《原创声明须知》超链接,
+    链接吃掉事件 → 勾不上 → 08-05~08-07 那 49 篇全没标上。编辑链共用同一个函数,
+    所以这条修复在这里必须同样成立 —— 这是运营点名要确认的事。
+    """
+    editor = Editor(original_declared=False)
+    _wire(monkeypatch, editor, wired)
+    seen = []
+    real_click = _Human.click
+
+    def spy(self, target, *, reason="", **kw):
+        seen.append((reason, kw.get("random_offset", True)))
+        return real_click(self, target, reason=reason, **kw)
+
+    monkeypatch.setattr(_Human, "click", spy)
+
+    out = _run(editor, set_original_declaration=True)
+
+    hits = [(r, off) for r, off in seen if "同意" in r]
+    assert len(hits) == 1, f"勾同意应恰好点一次: {seen}"
+    reason, random_offset = hits[0]
+    assert "simulator 方块" in reason, f"必须点方块而不是宽容器: {reason}"
+    assert random_offset is False, "16×16 的方块上随机偏移只会把落点推向边缘"
+    assert out["components"]["original_declaration"]["status"] == "done"
+
+
+def test_original_consent_ineffective_reports_reason_and_observed(monkeypatch, wired):
+    """勾不上(复刻撞链接)→ error 带可执行的 reason 与当场取证,且**把弹窗关掉**。
+
+    残留弹窗会盖住发布按钮(2026-08-02 事故同型),比声明没成更严重。
+    """
+    editor = Editor(original_declared=False, original_consent_effective=False)
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    out = _run(editor, set_original_declaration=True)
+
+    step = out["components"]["original_declaration"]
+    assert step["status"] == "error"
+    assert step["reason"].startswith("original_consent_not_ticked:"), step["reason"]
+    assert step["observed"]["via"] == "consent_modal"
+    assert step["observed"]["consent_ticked"] is False
+    assert "unchecked" in step["observed"]["consent_simulator_class"]
+    assert editor.original_modal_open is False, "链走不完必须关弹窗"
+    assert editor.original_closed_by_x is True
+    assert editor.original_declared_for_real is False
+    # 本单只有补声明 → 整单失败,且一次发布都不点
+    assert out["status"] == "failed"
+    assert out["submitted"] is False and editor.submitted == 0
+    assert "note_components_all_failed" in out["error"]
+
+
+def test_original_entry_missing_is_error_not_silent_skip(monkeypatch, wired):
+    """页面上压根没有「原创声明」这一行 → 报错,绝不静默当成"不用补"。"""
+    editor = Editor(original_declared=False, original_row_absent=True)
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    out = _run(editor, set_original_declaration=True)
+
+    step = out["components"]["original_declaration"]
+    assert step["status"] == "error"
+    assert step["reason"].startswith("original_entry_not_found:"), step["reason"]
+    assert out["submitted"] is False
+
+
+def test_original_readback_false_when_platform_does_not_show_it(monkeypatch, wired):
+    """编辑器里声明成了,但重进页面开关没回显开态 → applied=False,绝不报 done。
+
+    平台是否在编辑页回显已声明态**没有实测证据**(手上没有"已声明笔记的编辑页"夹具)。
+    真要是不回显,这里就该如实报 false 让人去人工核对,而不是乐观当成功 ——
+    这条产品线的失败是静默的。
+    """
+    editor = Editor(original_declared=False, original_persists_on_readback=False)
+    _wire(monkeypatch, editor, wired)
+
+    out = _run(editor, set_original_declaration=True)
+
+    assert editor.original_declared_for_real is True, "编辑器里确实点成了"
+    assert out["components"]["original_declaration"]["status"] == "done"
+    assert out["applied"]["original_declaration"] is False
+    assert out["status"] == "failed"
+
+
+def test_original_declaration_with_collection_submits_once(monkeypatch, wired):
+    """补声明与三组件同一单:仍然只提交一次,两项都回读确认。"""
+    editor = Editor(original_declared=False)
+    _wire(monkeypatch, editor, wired)
+
+    out = _run(editor, collection_id="c1", collection_name="咨询师简介",
+               set_original_declaration=True)
+
+    assert editor.submitted == 1, "提交次数就是风险次数"
+    assert out["applied"] == {"collection": True, "original_declaration": True}
+    assert out["status"] == "done"

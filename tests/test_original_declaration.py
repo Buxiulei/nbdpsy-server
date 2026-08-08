@@ -566,3 +566,111 @@ def test_declared_requires_modal_gone_AND_switch_on(monkeypatch):
     assert page.modal_open is False, "弹窗确实关了"
     assert out["status"] == "error", f"开关没开就不许报 done: {out}"
     assert "switch_not_on_after_confirm" in out["reason"]
+
+
+# ---------------- 编辑页 vs 发布页:两份真号夹具的结构同构锁(2026-08-08) ----------------
+#
+# 起因:补录原创声明(POST /note-components 的 set_original_declaration)让**编辑页**
+# 也走这段协议弹窗链,而 08-07 的修复与所有选择器真值都是在**发布页**取的证。运营直接
+# 问过「编辑页补声明是不是走同一段逻辑」。答案是同一个函数,但那只解决了"代码是同一份";
+# 页面结构是不是也同一份,得由夹具说话 —— 这组测试就是那个"会红的东西"。
+#
+# 两份夹具:
+#   编辑页 tests/fixtures/pages/content_settings.json
+#           (账号1,2026-08-05,url = /publish/update?id=...&noteType=normal)
+#   发布页 tests/fixtures/pages/original_modal_publish_page.json(账号10,2026-08-07)
+
+
+def _edit_page_probe():
+    import json
+    import pathlib
+
+    path = (pathlib.Path(__file__).parent / "fixtures" / "pages"
+            / "content_settings.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _edit_page_modal_node(probe):
+    """编辑页夹具里那个协议弹窗本体节点(class 含 d-modal 且带 creator-modal-style)。"""
+    nodes = probe["extra"]["after_toggle_on"]["dialogs"]["[class*='modal']"]
+    hits = [n for n in nodes
+            if "creator-modal-style" in n["attrs"].get("class", "")
+            and "d-modal-mask" not in n["attrs"].get("class", "")]
+    assert len(hits) == 1, f"编辑页夹具里应恰好一个协议弹窗本体: {[n['attrs'] for n in nodes]}"
+    return hits[0]
+
+
+def test_edit_page_fixture_really_came_from_the_update_page():
+    """先钉住这份夹具的出身 —— 它必须是**编辑页**采的,否则下面的同构结论毫无意义。"""
+    probe = _edit_page_probe()
+    assert "/publish/update" in probe["url"], probe["url"]
+
+
+def test_switch_row_is_identical_on_both_pages():
+    """开关行:编辑页与发布页的 class **逐字节相同**,同一个 .original-wrapper .d-switch。"""
+    edit_class = _edit_page_probe()["extra"]["original_row"]["switch_el"]["attrs"]["class"]
+    publish_class = _publish_page_probe()["row_state_before_click"]["switch_class"]
+    assert edit_class == publish_class, f"编辑页 {edit_class!r} vs 发布页 {publish_class!r}"
+    assert _bnc._ORIGINAL_SWITCH == ".original-wrapper .d-switch"
+
+
+def test_consent_modal_is_the_same_component_on_both_pages():
+    """协议弹窗:两页的 class 链一致,且都能被 ``_ORIGINAL_MODAL`` 选中。
+
+    再加一条更强的证据:编辑页的**开关行**与发布页的**弹窗内复选框/按钮**带同一个 Vue
+    scope id ``data-v-0cb8c711`` —— 同一个单文件组件渲染出来的,不是两套长得像的实现。
+    """
+    edit_modal = _edit_page_modal_node(_edit_page_probe())
+    publish_html = _publish_page_probe()["modal_structure"]["full_outerHTML"]
+    for token in ("d-modal", "d-modal-no-footer", "creator-modal-style"):
+        assert token in edit_modal["attrs"]["class"], edit_modal["attrs"]["class"]
+        assert token in publish_html, token
+    assert _bnc._ORIGINAL_MODAL == ".d-modal.creator-modal-style"
+
+    scope = "data-v-0cb8c711"
+    edit_row = _edit_page_probe()["extra"]["original_row"]["row"]
+    assert scope in edit_row["attrs"], edit_row["attrs"]
+    assert scope in publish_html, "发布页弹窗里应带同一个 Vue scope id"
+
+
+def test_consent_and_confirm_text_identical_on_both_pages():
+    """弹窗文案两页一字不差 —— 「我已阅读并同意」与「声明原创」都在编辑页的弹窗里。
+
+    ⚠️ 编辑页夹具**没有**直接留下 ``.d-checkbox-simulator`` / ``custom-button.bg-red``
+    这两个 class:那次探针只 dump 了 class 含 dialog/modal/agreement/confirm 的节点,
+    而复选框与按钮的 class 一个都不含这些子串 —— 是**采集口径**没覆盖到,不是它们不存在
+    (弹窗聚合文本里这两个控件的文案都在)。这个残余不确定性由代码里的两级兜底承担:
+    simulator 定位不到就回退点宽容器,真值按钮选择器不中就按文案找。
+    """
+    edit_text = _edit_page_modal_node(_edit_page_probe())["text"]
+    assert _bnc._ORIGINAL_CONSENT_TEXT in edit_text, edit_text
+    assert _bnc._ORIGINAL_CONFIRM_TEXT in edit_text, edit_text
+    assert "《原创声明须知》" in edit_text, "撞链接那个根因的肇事元素,编辑页同样在"
+
+    publish_boxes = _publish_page_probe()["modal_structure"]["checkboxes"]
+    assert any(_bnc._ORIGINAL_CONSENT_TEXT in b["text"] for b in publish_boxes)
+
+
+def test_close_icon_is_identical_on_both_pages():
+    """兜底关弹窗的 X:两页同 class 同尺寸(16×16),关不掉弹窗会盖住发布按钮。"""
+    edit_nodes = _edit_page_probe()["extra"]["after_toggle_on"]["dialogs"]["[class*='modal']"]
+    edit_close = next(n for n in edit_nodes
+                      if "d-modal-close" in n["attrs"].get("class", ""))
+    publish_close = _publish_page_probe()["modal_structure"]["close_candidates"][0]
+    assert "d-modal-close" in publish_close["attrs"]["class"]
+    assert (edit_close["rect"]["width"], edit_close["rect"]["height"]) == (16, 16)
+    assert (publish_close["rect"]["width"], publish_close["rect"]["height"]) == (16, 16)
+
+
+def test_optimistic_checked_trap_exists_on_the_edit_page_too():
+    """编辑页同样有那个坑:点开关后 checked 已翻 true,而弹窗**还开着**。
+
+    所以编辑链也绝不能拿 checked 当终判 —— 这正是 handle_consent_modal=True 的理由,
+    补录链路必须跟发布链走同一条路。
+    """
+    extra = _edit_page_probe()["extra"]
+    assert extra["original_row"]["checkbox_checked"] is False, "点之前是关态"
+    # after_toggle_on 里行状态嵌在 ["row"] 下(与 original_row 那层平级的采集口径差异)
+    assert extra["after_toggle_on"]["row"]["checkbox_checked"] is True, "点一下就乐观翻 true"
+    modal = _edit_page_modal_node(_edit_page_probe())
+    assert modal["visible"] is True, "而同一快照里弹窗仍开着 —— checked 不是已声明的证据"

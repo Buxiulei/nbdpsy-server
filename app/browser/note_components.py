@@ -2183,6 +2183,7 @@ def _run_edit_steps(
 def _skipped_components(
     collection_id: Optional[str], quoted_note_id: Optional[str], activity_id: Optional[str],
     remove_collection_id: Optional[str] = None,
+    set_original_declaration: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """弃提交时组件步一步都没走:请求过的组件如实记「因前序失败未执行」。
 
@@ -2195,8 +2196,14 @@ def _skipped_components(
             ("collection", collection_id),
             ("quote", quoted_note_id),
             ("activity", activity_id),
+            ("original_declaration", set_original_declaration),
         ) if value
     }
+
+
+# 「零变更」的幂等 skipped 步:编辑器里一个字都没改,不值得为它付一次全量覆盖提交。
+# 见 set_note_components ⑥bis。
+_IDEMPOTENT_NOOP_KEYS = ("collection_remove", "original_declaration")
 
 
 # ---------------- 编辑已发布笔记:完整流程 ----------------
@@ -2218,6 +2225,7 @@ def set_note_components(
     add_images: Optional[List[str]] = None,
     remove_image_indexes: Optional[List[int]] = None,
     expected_image_count: Optional[int] = None,
+    set_original_declaration: bool = False,
 ) -> Dict[str, Any]:
     """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片:进更新页 → 改 → 提交 → 回读。
 
@@ -2238,6 +2246,11 @@ def set_note_components(
         remove_image_indexes: 按发布态图序删除的 1-based 下标。
         expected_image_count: 调用方声明的现有图数;有图片操作时必给,与页面实数不符
             → 一次图片点击都不发生,整单弃提交(编辑设计 4.3)。
+        set_original_declaration: 给这篇**补录原创声明**(只开不关)。走的是与发布链
+            **同一个** ``apply_original_declaration(handle_consent_modal=True)``——
+            08-07 那个"拟人随机偏移 40% 概率撞上《原创声明须知》超链接"的修复在那个函数
+            **内部**,所以编辑链共用它就自动覆盖了同一个修复,不会重蹈 08-05~08-07 的覆辙。
+            幂等:进页面先读当前态,已是开态 → ``skipped`` 且**零点击**。
 
     Returns:
         ``{"status": "done"|"partially_applied"|"failed", "applied": {...}, "failed": [...],
@@ -2297,7 +2310,7 @@ def set_note_components(
             return _compose(
                 note_id,
                 _skipped_components(collection_id, quoted_note_id, activity_id,
-                                    remove_collection_id),
+                                    remove_collection_id, set_original_declaration),
                 {}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_before,
@@ -2316,25 +2329,48 @@ def set_note_components(
             quoted_note_id=quoted_note_id,
             activity_id=activity_id,
         )
+
+        # ⑤bis 原创声明补录(运营 2026-08-08 来文:08-05~08-07 那 49 篇要补上标记)。
+        # **复用发布链同一个函数**,不另写一份协议弹窗逻辑 —— 08-07 那个修复(点 16×16 的
+        # .d-checkbox-simulator 方块而非宽容器,躲开 40% 概率撞上《原创声明须知》超链接)
+        # 就在 apply_original_declaration 内部,共用它 = 修复自动覆盖编辑链。运营特意提醒
+        # "确认那个修复也覆盖了编辑链",答案就是这一行:同一个函数,没有第二份实现。
+        # 位置与发布链一致(组件之后),失败仅告警不阻断其余组件。
+        if set_original_declaration:
+            try:
+                outcomes["original_declaration"] = apply_original_declaration(
+                    page, human, handle_consent_modal=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断其余组件
+                outcomes["original_declaration"] = {
+                    "status": "error", "reason": f"original_exception: {exc}"}
+            logger.info(
+                f"[note_components] 原创声明补录: "
+                f"{outcomes['original_declaration'].get('status')} "
+                f"{outcomes['original_declaration'].get('reason', '')}"
+            )
+
         body_after = read_body_text(page)
         # ⑥ 提交决策:组件 done/skipped 或**任一编辑步 done** 都算"有东西可提交"
         in_editor_ok = [k for k, v in outcomes.items() if v["status"] in ("done", "skipped")]
         edits_ok = [k for k, v in edits["outcomes"].items() if v.get("status") == "done"]
-        # ⑥bis **移出的幂等零点击不提交**:``collection_remove`` 落 skipped 表示"本就不在
-        # 该合集",编辑器里一个字都没改。若这次请求只有它算数,就**不点发布** —— 提交是
-        # 全量覆盖语义,为一次零变更付一次覆盖风险毫无道理;存量清理会对上百篇非目标笔记
-        # 跑这条路,每篇白提交一次就是上百次真发布。生效结论直接取编辑器内回读(那本就是
-        # "它不在这个合集里"的直接证据,不需要提交后再确认一遍)。
-        if (
-            (outcomes.get("collection_remove") or {}).get("status") == "skipped"
-            and in_editor_ok == ["collection_remove"] and not edits_ok
-        ):
+        # ⑥bis **幂等零点击不提交**:``collection_remove`` 落 skipped 表示"本就不在该合集",
+        # ``original_declaration`` 落 skipped 表示"本就是开态",两者都是编辑器里一个字
+        # 都没改。若这次请求只有这类步算数,就**不点发布** —— 提交是全量覆盖语义,为一次
+        # 零变更付一次覆盖风险毫无道理;存量清理 / 批量补录会对上百篇已达标的笔记跑这条路,
+        # 每篇白提交一次就是上百次真发布。生效结论直接取编辑器内回读(那本就是"它已经
+        # 是目标状态"的直接证据,不需要提交后再确认一遍)。
+        noop_skipped = [
+            key for key in _IDEMPOTENT_NOOP_KEYS
+            if (outcomes.get(key) or {}).get("status") == "skipped"
+        ]
+        if noop_skipped and set(in_editor_ok) <= set(noop_skipped) and not edits_ok:
             logger.info(
-                f"[note_components] 账号{account_id} note_id={note_id}: 本就不在合集 "
-                f"{remove_collection_id},零点击零提交(幂等)"
+                f"[note_components] 账号{account_id} note_id={note_id}: "
+                f"{noop_skipped} 本就已是目标状态,零点击零提交(幂等)"
             )
             return _compose(
-                note_id, outcomes, {"collection_remove": True}, submitted=False,
+                note_id, outcomes, {key: True for key in noop_skipped}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_after,
                 edit_outcomes=edits["outcomes"], images_before=images_before,
@@ -2381,6 +2417,7 @@ def set_note_components(
             collection_id=collection_id, remove_collection_id=remove_collection_id,
             quoted_note_id=quoted_note_id,
             activity_id=activity_id, outcomes=outcomes, responses=responses,
+            set_original_declaration=set_original_declaration,
             title=title, content=content,
             wants_add=bool(add_images), wants_remove=bool(remove_image_indexes),
             images_before=images_before, removed=edits["removed"], added=edits["added"],
@@ -2424,6 +2461,7 @@ def _verify_after_submit(
     activity_id: Optional[str],
     outcomes: Dict[str, Dict[str, Any]],
     remove_collection_id: Optional[str] = None,
+    set_original_declaration: bool = False,
     responses: ComponentResponses,
     title: Optional[str] = None,
     content: Optional[str] = None,
@@ -2518,6 +2556,21 @@ def _verify_after_submit(
         if not verified["activity"]:
             logger.error(
                 f"[note_components] 活动回读未生效:「{name}」按钮不是「{_ACTIVITY_LINKED_TEXT}」"
+            )
+    if set_original_declaration:
+        # 判据 = 重进编辑页把开关行的 checked 再读一遍。三态如实:True / False /
+        # 读不到(页面没这行、脚本抛异常)→ None(未确认),绝不乐观当成功。
+        # ⚠️ **尚无"已声明笔记的编辑页"夹具**:平台是否在编辑页回显已声明态没有实测证据。
+        # 若它不回显,这里会把真声明成功的笔记报成 False —— 首批真号跑完必须人工对一次
+        # 平台侧标记再放量,别让一次假阴性引出反复重跑(每次重跑都是一次真提交)。
+        try:
+            checked = page.evaluate(_ORIGINAL_CHECKED_JS)
+        except Exception:  # noqa: BLE001 — 读不到就是未确认,不是失败
+            checked = None
+        verified["original_declaration"] = checked if isinstance(checked, bool) else None
+        if verified["original_declaration"] is not True:
+            logger.error(
+                f"[note_components] 原创声明回读未确认:开关行 checked={checked!r}"
             )
 
     # ---- 编辑项回读(编辑设计 3.2 判据)----

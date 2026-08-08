@@ -99,7 +99,8 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "POST", "path": "/api/accounts/{account_id}/note-components",
-        "summary": "异步编辑一篇已发布笔记:三组件 + 标题/正文/图片增删(会真提交一次发布,慎用)",
+        "summary": "异步编辑一篇已发布笔记:三组件 + 标题/正文/图片增删 + 补录原创声明"
+                   "(会真提交一次发布,慎用)",
         "admin_only": False,
         "params": {
             "account_id": "path,int",
@@ -134,6 +135,12 @@ MANIFEST_ENTRIES = [
             "activity_id": "body,str|None(关联哪个活动,取自 GET /activities)",
             "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
                                   "是 quoted_note_id 的替代写法,由系统推导引用哪篇)",
+            "set_original_declaration": "body,bool|None(**补录原创声明**,2026-08-08 上线。"
+                                        "**只支持开启**:传 true 才动手,传 false 直接 422"
+                                        "(关闭的平台行为未取证且是破坏性动作,不在本期范围);"
+                                        "**幂等**:已是开态 → components.original_declaration."
+                                        "status='skipped'、applied.original_declaration=true、"
+                                        "**零点击**,可安全批量重跑)",
             "title": "body,str|None(整体替换标题;省略/null=不改;**空串=清空标题**,"
                      "与 null 语义不同;显示长度 >20 直接 422,**不截断**)",
             "content": "body,str|None(整体替换正文;省略/null=不改;≤900 字;"
@@ -149,9 +156,10 @@ MANIFEST_ENTRIES = [
         },
         "returns": '{job_id, status:"queued"}',
         "errors": "403=无该号授权;404=账号不存在,或**带编辑字段时**台账里查无此 note_id;"
-                  "422=note_id 为空,或九个字段一个都没给,或只给了 related_counselor 但"
+                  "422=note_id 为空,或十个字段一个都没给,或只给了 related_counselor 但"
                   "推导不出任何公开推介笔记(以上三种这次编辑都什么都不会改),"
-                  "或 collection_id 与 remove_collection_id 同时给(加入与移出语义相反);"
+                  "或 collection_id 与 remove_collection_id 同时给(加入与移出语义相反),"
+                  "或 set_original_declaration 传了 false(只支持开启);"
                   "422 还包括编辑字段自身不合法:title 显示长度 >20 / content 为空串或 >900 / "
                   "给了图片操作却没给 expected_image_count / remove 下标重复或越界 / "
                   "删完原图剩 <1 / 改完总数 >18 / add_images 落盘失败 / "
@@ -185,6 +193,29 @@ MANIFEST_ENTRIES = [
                  "③ **确认弹窗尚未取证**:点移除的 × 之后若平台弹出任何弹窗,系统**绝不盲点**,"
                  "整单中止(不提交)并把弹窗原文放进 error(collection_remove_unknown_modal);"
                  "看到它请把原文回报给我们补取证,别自行重试。"
+                 "**补录原创声明(set_original_declaration)另有五条**(2026-08-08 上线,"
+                 "为 08-05~08-07 那批漏标的笔记补标):"
+                 "① **只支持开启**——传 false 直接 422,不静默忽略;"
+                 "② **幂等 skipped**——进编辑页先读当前开关态,已是开态就 status='skipped'、"
+                 "applied.original_declaration=true 且**零点击**,批量重跑安全;"
+                 "③ **零改动不提交**——这次只请求了补声明且落了 skipped、其余组件/编辑字段都"
+                 "没给时,**一次发布都不点**(submitted=false),上百次重跑不会变成上百次真提交;"
+                 "④ **走的是与发布链完全同一段协议弹窗逻辑**——补声明调用的就是发布链那个"
+                 "apply_original_declaration(handle_consent_modal=true),08-07 那个根因修复"
+                 "(拟人点击的随机偏移有约 40% 概率落在《原创声明须知》超链接上、被链接吃掉"
+                 "事件所以勾不上;改为精确点 16×16 的复选框方块)在该函数**内部**,"
+                 "编辑链共用它 = 同一个修复自动覆盖,系统里没有第二份协议弹窗实现;"
+                 "⑤ **回读判据 = 重进编辑页把开关 checked 再读一遍**,三态如实给"
+                 "(true/false/null)。⚠️ 平台是否在编辑页回显「已声明」态**尚无实测证据**,"
+                 "若它不回显,这里会把真补上的笔记报成 false —— **首批先跑 1-2 篇,人工到"
+                 "笔记里确认原创标记真的出现了再放量**,别看到 false 就反复重跑"
+                 "(每次重跑都是一次真提交)。"
+                 "**批量补录的节奏**:本端点起真浏览器会话,受**同账号每小时会话帽**限制"
+                 "(系统层 4、运营发起 12,见 queue.detail.kind_of_cap);所以跨多个账号的"
+                 "补录**按号分散比堆在一个号上快得多**,同号内则本就严格串行"
+                 "(per-account 锁)。看到 202 后的轮询里"
+                 "**status=queued 是正常排队不是失败**——queue 段会告诉你排第几、大概何时"
+                 "有额度,**照它等就行,千万别重试**(重试只会把队排得更长)。"
                  "**引用推导仅在显式引用意图时进行**(2026-08-04 收口):只传 "
                  "collection_id/activity_id/编辑项时**绝不**顺带推导出引用——本端点对已"
                  "发布笔记只做被请求的事(发布端点 POST /api/publish-jobs 的隐式推导是"
@@ -219,7 +250,8 @@ MANIFEST_ENTRIES = [
         "summary": "轮询笔记编辑结果(三组件 + 标题/正文/图片,逐项生效情况)",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, result_status?, applied?:{collection/collection_remove/quote/"
-                   "activity/title/content/image_add/image_remove: true|false|null}, "
+                   "activity/original_declaration/title/content/image_add/image_remove: "
+                   "true|false|null}, "
                    "failed?:[{component,reason}], submitted?, permission_before?, "
                    "permission_after?, permission_preserved?, permission_restored?, "
                    "body_appended?, topics_injected?, topics_dropped?, images_before?, "
@@ -234,6 +266,12 @@ MANIFEST_ENTRIES = [
                  "applied.collection_remove 同款三态,但它的 true 有两种来路:真移出后重进"
                  "页面确认合集区已不含目标(submitted=true),或**笔记本就不在该合集**"
                  "(幂等零点击,submitted=false)——两者都是「现在它确实不在那个合集里」。"
+                 "applied.original_declaration 同款三态,true 也有两种来路:补上后重进页面"
+                 "读到开关是开态(submitted=true),或**本就已声明**(幂等零点击,"
+                 "submitted=false)。⚠️ 平台是否在编辑页回显已声明态尚无实测证据,"
+                 "**首批先跑 1-2 篇人工核对原创标记再放量**,看到 false 别直接重跑"
+                 "(每次重跑都是一次真提交);components.original_declaration.reason / "
+                 "observed 给出当场取证(勾没勾上、按钮解没解禁、弹窗关没关)。"
                  "一项都没生效时整体落 error(reason 里带 note_components_all_failed)。"
                  "submitted=有没有观察到那次提交请求的响应;"
                  "permission_preserved=false 表示可见性档位被这次提交改动了(严重),"
@@ -360,6 +398,14 @@ class NoteComponentsRequest(BaseModel):
         description="这篇笔记推介哪位咨询师(姓名),作为 quoted_note_id 的替代;"
                     "两者都给时以显式 quoted_note_id 为准",
     )
+    set_original_declaration: bool | None = Field(
+        default=None,
+        description="给这篇**补录原创声明**(2026-08-08 上线,为 08-05~08-07 那批漏标的笔记"
+                    "补标)。**只支持开启**:传 true 才动手,传 **false 直接 422** —— 平台侧"
+                    "能不能关没取证,而关闭是破坏性动作,不在本期范围,静默忽略等于假成功。"
+                    "**幂等**:进页面先读当前态,已是开态 → status='skipped' 且**零点击**;"
+                    "若这次请求只有它一件事且落了 skipped,**一次发布都不点**",
+    )
     # ── 已发布笔记编辑(设计 docs/design/2026-08-03-note-editing-design.md 3.1)──
     # 五个字段全可选,与三组件同一次请求、同一次提交共存。
     title: str | None = Field(
@@ -388,6 +434,21 @@ class NoteComponentsRequest(BaseModel):
     )
 
     @model_validator(mode="after")
+    def _original_declaration_is_open_only(self):
+        """``set_original_declaration=false`` → 422,**不静默当成"没请求"**。
+
+        本期只做**开启**:平台侧能不能关掉原创声明一次都没取证过,而关闭是破坏性动作
+        (声明撤回可能影响流量权益,且不可逆性未知)。调用方显式传 false 是在表达一个
+        我们兑现不了的意图 —— 静默忽略它就是这条产品线最忌讳的假成功,所以当场打回。
+        """
+        if self.set_original_declaration is False:
+            raise ValueError(
+                "set_original_declaration 只支持 true(开启):关闭原创声明的平台行为"
+                "未取证且是破坏性动作,本期不做;不想补声明就整个字段别传"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _require_one_component(self):
         """一个组件 / 一项编辑都不给 → 422(``related_counselor`` 也算给了,它会推导出引用)。
 
@@ -407,6 +468,7 @@ class NoteComponentsRequest(BaseModel):
                 self.quoted_note_id,
                 self.activity_id,
                 self.related_counselor,
+                self.set_original_declaration,
                 self.title is not None,
                 self.content is not None,
                 self.add_images,
@@ -415,8 +477,8 @@ class NoteComponentsRequest(BaseModel):
         ):
             raise ValueError(
                 "collection_id / remove_collection_id / quoted_note_id / activity_id / "
-                "related_counselor / title / content / add_images / "
-                "remove_image_indexes 至少要给一个"
+                "related_counselor / set_original_declaration / title / content / "
+                "add_images / remove_image_indexes 至少要给一个"
             )
         return self
 
@@ -596,7 +658,7 @@ async def start_note_components_endpoint(
     # 那一关同样拦掉。
     if edits is None and not any(
         (payload.collection_id, payload.remove_collection_id, quoted_note_id,
-         payload.activity_id)
+         payload.activity_id, payload.set_original_declaration)
     ):
         # 用 422 而不是裸 ValueError(→400):与请求体校验那一关同样的失败语义,
         # 调用方不该因为"拦在哪一层"看到两种状态码。
@@ -621,6 +683,7 @@ async def start_note_components_endpoint(
         collection_name=payload.collection_name,
         remove_collection_id=payload.remove_collection_id,
         remove_collection_name=payload.remove_collection_name,
+        set_original_declaration=bool(payload.set_original_declaration),
         edits=edits,
     )
     return {"job_id": job_id, "status": "queued"}

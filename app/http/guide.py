@@ -239,6 +239,24 @@ CHANGELOG_ENTRIES = [
                  "layers_seen(共看到几层浮层)、rejected_classes(被判据拒掉的层 class)。",
     },
     {
+        "date": "2026-08-08",
+        "title": "已发布笔记可以补录原创声明了",
+        "kind": "feature",
+        "summary": "笔记编辑端点新增 set_original_declaration:给**已发布**的笔记补上原创声明"
+                   "(为 08-05~08-07 那批漏标的补标)。**只支持开启**,传 false 直接 422"
+                   "(关闭的平台行为未取证且是破坏性动作)。**幂等**:已是开态就 skipped 且"
+                   "**一次发布都不点**,批量重跑安全。回执三态与三组件同款"
+                   "(applied.original_declaration = true/false/null)。",
+        "endpoints": [
+            "/api/accounts/{account_id}/note-components",
+            "/api/note-components/{job_id}",
+        ],
+        "notes": "补声明走的是**发布链完全同一个** apply_original_declaration(协议弹窗链),"
+                 "所以 08-07 那个根因修复(勾选点位从宽容器收窄到 16×16 方块、关掉随机偏移,"
+                 "躲开约 40% 撞进《原创声明须知》链接的概率)自动覆盖编辑链,系统里没有第二份"
+                 "协议弹窗实现。批量补录时按号分散(同号有每小时会话帽),看到 queued 别重试。",
+    },
+    {
         "date": "2026-08-07",
         "title": "排队可见性:轮询直接告诉你排第几、在等什么、还要等多久",
         "kind": "feature",
@@ -603,6 +621,19 @@ CHANGELOG_ENTRIES = [
 # ---------------------------------------------------------------------------
 
 KNOWN_LIMITATIONS = [
+    {
+        "area": "published_notes",
+        "what": "补录原创声明(set_original_declaration)的**提交后回读判据尚未真号验证**:"
+                "系统重进编辑页读那个开关的 checked,读到 true 才判 applied=true。但平台是否"
+                "在编辑页回显「已声明」态,手上**没有任何实测证据**(现有夹具是一篇未声明笔记的"
+                "编辑页)。若平台不回显,真补上的笔记会被报成 applied=false。"
+                "**先跑 1-2 篇、到笔记里人工确认原创标记真的出现了再放量**;看到 false 不要"
+                "直接重跑——每次重跑都是一次真提交。",
+        "why": "编辑链此前完全没接过原创声明这个能力,08-07 那轮真号取证跑的是发布页。"
+               "在拿到「已声明笔记的编辑页」这份证据之前,回读只能如实报三态,"
+               "不能替调用方乐观地把 false 猜成 true。",
+        "since": "2026-08-08",
+    },
     {
         "area": "publish",
         "what": "播客(audio)发布链的三处浏览器控件——音频上传弹窗内部、「去发布」之后的发布表单、"

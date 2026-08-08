@@ -155,7 +155,7 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
             "note_id": "6a4ce556", "collection_id": "c1", "collection_name": None,
             "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": "n-quote", "activity_id": "43561",
-            "related_counselor": None,
+            "related_counselor": None, "set_original_declaration": False,
         }
 
         poll = await c.get(
@@ -777,3 +777,167 @@ def test_service_passes_remove_fields_to_browser_layer(monkeypatch):
     )
     assert seen["remove_collection_id"] == "c1"
     assert seen["remove_collection_name"] == "咨询师简介"
+
+
+# ---------------- 补录原创声明(2026-08-08)----------------
+
+
+async def test_set_original_declaration_alone_is_a_valid_request(tmp_path, monkeypatch):
+    """只给 set_original_declaration=true 就构成一次合法请求(不必再凑一个组件)。
+
+    运营的 49 篇补录就是这个形态:除了补声明什么都不改。
+    """
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("补声明号", "uNcOrigOnly", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "6a707e9f0000000008012876", "set_original_declaration": True,
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import select
+
+            row = await s.scalar(select(BrowserJob))
+        payload = json.loads(row.payload)
+        assert row.kind == "note_components"
+        assert payload["set_original_declaration"] is True
+        # 只补声明就不该顺带挂上任何组件
+        assert payload["collection_id"] is None and payload["quoted_note_id"] is None
+
+
+async def test_set_original_declaration_false_is_rejected(tmp_path, monkeypatch):
+    """传 false → 422:本期只支持**开启**,静默忽略等于假成功。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("关声明号", "uNcOrigOff", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "n1", "set_original_declaration": False,
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+        assert "只支持 true" in r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import func, select
+
+            assert await s.scalar(select(func.count()).select_from(BrowserJob)) == 0
+
+
+async def test_set_original_declaration_false_rejected_even_with_other_components(
+    tmp_path, monkeypatch
+):
+    """搭着别的组件传 false 也照样 422 —— 不许"反正还有别的事做"就把它咽下去。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("关声明混号", "uNcOrigOffMix", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "n1", "collection_id": "c1",
+            "set_original_declaration": False,
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+
+
+def test_service_passes_original_declaration_to_browser_layer(monkeypatch):
+    """服务层 → 浏览器层的参数名不许漂(与移出字段同款兜底)。"""
+    seen = {}
+
+    def fake_set(page, account_id, note_id, **kwargs):
+        seen.update(kwargs)
+        return {"status": "done", "applied": {}}
+
+    class _Client:
+        def __init__(self, *_a, **_kw):
+            self.page = object()
+
+        def start(self):
+            return {"success": True}
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(note_components, "set_note_components", fake_set)
+    monkeypatch.setattr(note_components, "SyncClient", _Client)
+    note_components._apply_sync(
+        1, _COOKIES, "n1",
+        {"collection_id": None, "remove_collection_id": None,
+         "quoted_note_id": None, "activity_id": None},
+        None, None, None, True,
+    )
+    assert seen["set_original_declaration"] is True
+
+
+async def test_execute_treats_declaration_only_payload_as_a_real_request(monkeypatch):
+    """execute 的"至少给一个"判定要认这个布尔字段,否则纯补录 payload 会被当成空请求。"""
+    seen = {}
+
+    async def fake_load(_account_id):
+        return _COOKIES
+
+    def fake_apply(*args):
+        seen["set_original_declaration"] = args[7]
+        return {"status": "done", "applied": {"original_declaration": True}}
+
+    monkeypatch.setattr(note_components, "load_account_cookies", fake_load)
+    monkeypatch.setattr(note_components, "_apply_sync", fake_apply)
+
+    async def fake_sync(_account_id, _note_id, result):
+        return result
+
+    monkeypatch.setattr(note_components, "_sync_ledger", fake_sync)
+    out = await note_components.execute(
+        1, {"note_id": "n1", "set_original_declaration": True}
+    )
+    assert "error" not in out, out
+    assert seen["set_original_declaration"] is True
+
+
+def test_manifest_params_cover_every_request_field():
+    """**字段级防漂移**:请求体每一个字段都必须在 manifest 的 params 里有一条说明。
+
+    端点级防漂移(tests/test_manifest.py)只管"端点在不在",加了字段忘了写 manifest
+    它一声不吭 —— 而 manifest 就是调用方(skill / 运营)唯一的接口说明书,字段不在
+    上面 = 这个能力对外不存在。所以这道门在这里补上。
+    """
+    from app.http.note_components_rest import MANIFEST_ENTRIES, NoteComponentsRequest
+
+    entry = next(
+        e for e in MANIFEST_ENTRIES
+        if e["method"] == "POST" and e["path"].endswith("/note-components")
+    )
+    missing = set(NoteComponentsRequest.model_fields) - set(entry["params"])
+    assert not missing, f"这些请求字段没写进 manifest params:{sorted(missing)}"
+
+
+def test_manifest_states_the_original_declaration_contract():
+    """manifest 必须写清补声明的三条语义:只支持开启 / 幂等 skipped / 零改动不提交。
+
+    运营是照 manifest 用的:少写一条"幂等",他们就不敢批量重跑;少写一条"零改动不提交",
+    他们会以为每次重跑都在真发布。
+    """
+    from app.http.note_components_rest import MANIFEST_ENTRIES
+
+    entry = next(
+        e for e in MANIFEST_ENTRIES
+        if e["method"] == "POST" and e["path"].endswith("/note-components")
+    )
+    text = entry["params"]["set_original_declaration"] + entry["notes"] + entry["errors"]
+    assert "只支持开启" in text
+    assert "skipped" in text and "零点击" in text
+    assert "一次发布都不点" in text
+    assert "422" in entry["errors"] and "set_original_declaration" in entry["errors"]
+    # 批量补录的节奏提示(会话帽 + 看到 queued 别重试)
+    assert "每小时会话帽" in entry["notes"]
+    assert "别重试" in entry["notes"]
+    # 与发布链共用同一个函数这件事,必须写在对外说明里(运营点名要的答复)
+    assert "apply_original_declaration" in entry["notes"]
+
+
+def test_polling_manifest_lists_original_declaration_in_applied():
+    """轮询端点的 returns 要列出 applied.original_declaration,否则调用方不知道去读它。"""
+    from app.http.note_components_rest import MANIFEST_ENTRIES
+
+    entry = next(
+        e for e in MANIFEST_ENTRIES
+        if e["method"] == "GET" and "{job_id}" in e["path"]
+    )
+    assert "original_declaration" in entry["returns"]
