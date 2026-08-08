@@ -2597,13 +2597,30 @@ def _verify_after_submit(
             )
 
     if cover_path:
-        # 判据 = 重进更新页把封面区再读一遍:``noCover`` 没了 = 平台侧确实换成了自定义封面。
-        # 三态如实:True / False / 读不到(页面没封面区、脚本抛异常)→ None(未确认)。
-        state = _read_cover_state(page)
-        verified["cover"] = None if state is None else (state.get("no_cover") is False)
+        # 回读判据分层(2026-08-08 账号5 真号首验暴露的过严缺陷):**强信号(指纹变化)成立
+        # 即判 true,辅助信号(noCover 消失)读不到时不参与、绝不否决强信号**。
+        #   - 强信号:提交前的封面区背景图指纹(``fingerprint_before``,平台首帧的正式 CDN)
+        #     变成非空的新指纹 → 封面真换了。这条最可靠 —— 账号5 上 App 已目视确认换成功、
+        #     指纹从 sns-na-i2 CDN 变成刚上传的 ros-preview;
+        #   - 辅助信号:noCover class 从 True 消失成 False = 平台侧确认换成自定义封面;读不到
+        #     (None)时不参与判定,**不能因为辅助信号缺失就把强信号已成立的结果推翻成 false**。
+        # 注意用 ``_read_cover_verify_state`` 而非 ``_read_cover_state``:后者 .operator 浮层
+        # 缺失就整条返回 None,会把指纹一起丢掉(账号5 正是 .operator 读不到但指纹在)。
+        cover_outcome = outcomes.get("cover") or {}
+        fp_before = cover_outcome.get("fingerprint_before")
+        nc_before = cover_outcome.get("no_cover_before")
+        post = _read_cover_verify_state(page)
+        fp_after = (post or {}).get("fingerprint") or None
+        nc_after = (post or {}).get("no_cover") if isinstance(post, dict) else None
+        verified["cover"] = _cover_verified(fp_before, fp_after, nc_before, nc_after)
+        extra["cover_observed"] = {
+            "fingerprint_before": fp_before, "fingerprint_after": fp_after,
+            "no_cover_before": nc_before, "no_cover_after": nc_after,
+        }
         if verified["cover"] is not True:
             logger.error(
-                f"[note_components] 封面回读未生效:封面区仍是平台首帧态(state={state!r})"
+                f"[note_components] 封面回读未确认:指纹 {fp_before!r}→{fp_after!r}、"
+                f"noCover {nc_before!r}→{nc_after!r}(强信号未变、辅助信号未确认消失)"
             )
 
     # ---- 编辑项回读(编辑设计 3.2 判据)----
@@ -3193,6 +3210,66 @@ def _cover_changed(before: Dict[str, Any], after: Optional[Dict[str, Any]]) -> b
     return bool(after.get("fingerprint")) and after.get("fingerprint") != before.get("fingerprint")
 
 
+# 提交后回读专用:与 ``_COVER_STATE_JS`` 的关键差别是 **.operator 缺失也照读指纹**。
+# ``_COVER_STATE_JS`` 里"没 .operator 就整条返回 null"是**提交前幂等判据**的红线(判不出
+# 现状就不动手);但提交后回读要的是"封面到底换没换",这时哪怕悬停浮层不在(账号5 真号
+# 首验就是这样),缩略图背景图指纹仍是可靠强信号,绝不能连它一起丢。noCover 判不出就记
+# null(辅助信号缺失,不参与判定),整个封面区都不在才返回 null。
+_COVER_VERIFY_STATE_JS = r"""() => {
+  const sec = document.querySelector('.publish-page-content-cover');
+  if (!sec) return null;
+  const op = sec.querySelector('.operator');
+  const thumb = sec.querySelector('.cover .default.column:not(.operator)')
+             || sec.querySelector('.cover .default.column');
+  let fingerprint = '';
+  if (thumb) {
+    fingerprint = thumb.style.backgroundImage
+      || window.getComputedStyle(thumb).backgroundImage || '';
+    const img = thumb.querySelector('img[src^="http"]');
+    if (!fingerprint && img) fingerprint = img.src;
+  }
+  return {
+    no_cover: op ? (op.getAttribute('class') || '').split(/\s+/).indexOf('noCover') >= 0 : null,
+    fingerprint: String(fingerprint).slice(0, 300),
+  };
+}"""
+
+
+def _read_cover_verify_state(page) -> Optional[Dict[str, Any]]:
+    """提交后回读封面区 → ``{"no_cover": bool|None, "fingerprint": str}``;整区不在返回 ``None``。
+
+    ``no_cover`` 为 ``None`` 表示悬停浮层读不到(辅助信号缺失),但指纹仍照读 —— 这正是
+    账号5 真号首验的处境,别再让浮层缺失把强信号一起吞掉。
+    """
+    try:
+        state = page.evaluate(_COVER_VERIFY_STATE_JS)
+    except Exception:  # noqa: BLE001 — 读不到就是不可确认,不是失败
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _cover_verified(
+    fp_before: Optional[str],
+    fp_after: Optional[str],
+    nc_before: Optional[bool],
+    nc_after: Optional[bool],
+) -> bool:
+    """提交后封面回读判据(分层,任一强信号成立即 ``True``)。
+
+    - **强信号 —— 指纹变化**:有提交前基线(``fp_before is not None``,排掉封面步没执行/出错
+      时的空基线),且提交后封面区指纹非空并与基线不同 → 判换成。账号5 真号已证:这是
+      悬停浮层读不到时唯一可靠的凭据;
+    - **辅助信号 —— noCover 消失**:``nc_before`` 为 ``True`` 且 ``nc_after`` 为 ``False``
+      (平台侧确认换成自定义封面)。``nc_after`` 读不到(``None``)时**不参与、不否决**;
+    - 两者都不成立(指纹没变 / 没基线 + noCover 没确认消失)→ ``False``,保留 fail-loud。
+    """
+    if fp_before is not None and fp_after and fp_after != fp_before:
+        return True
+    if nc_before is True and nc_after is False:
+        return True
+    return False
+
+
 def _find_cover_modal(page):
     """按文案认领「设置封面」弹窗;没有返回 ``None``。
 
@@ -3429,6 +3506,7 @@ def apply_cover_change(page, human: SyncHumanActions, cover_path: str) -> Dict[s
         )
     logger.info("[note_components] 封面已在编辑器内换上(待提交生效)")
     return {"status": "done", "cover_path": cover_path,
+            "no_cover_before": before.get("no_cover"),
             "fingerprint_before": before.get("fingerprint"),
             "fingerprint_after": after.get("fingerprint")}
 

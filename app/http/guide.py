@@ -224,6 +224,27 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-08",
+        "title": "改封面回读判据分层:换成功却报 false 的过严缺陷已修(账号5 真号首验)",
+        "kind": "fix",
+        "summary": "改封面能力真号首验暴露过严缺陷:封面**确实换成功了**(App 目视确认,指纹从"
+                   "正式 CDN sns-na-i2 变成刚上传的 ros-preview 预览),回执却报 "
+                   "applied.cover=false / cover_not_verified。根因:旧判据依赖提交后重进更新页"
+                   "读封面浮层 .operator 的 noCover class,而这条笔记提交后 .operator 读不到"
+                   "(noCover 前后都是 None),辅助判据失效时**没退回只认指纹变化**,把强信号"
+                   "已成立的结果推翻成了 false。**修法**:回读判据改成分层 —— ①**指纹变化是"
+                   "强信号**(提交前封面区背景图指纹变成非空新指纹即判换成,最可靠);②noCover "
+                   "消失是**辅助信号**,读不到(None)时不参与、**绝不否决**强信号;③两者都没变/"
+                   "读不到才 false(保留 fail-loud)。判据仍是**封面真的变了**,不是「点了就算成」。",
+        "endpoints": [
+            "/api/accounts/{account_id}/note-components",
+            "/api/note-components/{job_id}",
+        ],
+        "notes": "回执 observed 里 fingerprint_before/after 与 no_cover_before/after 都保留供排查。"
+                 "提交后回读改用「.operator 缺失也照读缩略图指纹」的宽松读法,不再让浮层缺失把"
+                 "指纹一起吞掉;提交前的幂等判据仍是严格读法(判不出现状就不动手)。",
+    },
+    {
+        "date": "2026-08-08",
         "title": "播客选择器换真值:三处占位全部落地,并揪出一个从没被发现的 tab 判据缺陷",
         "kind": "fix",
         "summary": "第三轮真号取证(账号9)首次走到发布表单,播客链的三处占位选择器换成实测真值:"

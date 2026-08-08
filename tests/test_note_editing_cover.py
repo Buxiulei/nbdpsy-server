@@ -480,6 +480,49 @@ def test_aborted_edit_marks_cover_as_not_executed(monkeypatch, wired):
     assert "前序破坏性编辑步失败" in skipped["cover"]["reason"]
 
 
+# ---------------- 回读判据分层:_cover_verified(2026-08-08 账号5 真号首验) ----------------
+#
+# 缺陷:封面确实换成功(App 目视确认 + 指纹从 sns-na-i2 CDN 变成 ros-preview 新图),但因为
+# 这条笔记提交后 .operator 浮层读不到 → noCover_before/after 都是 None,旧判据"noCover 消失"
+# 失效,却没退回"只认指纹变化",把换成功报成了 false。修法:强信号(指纹变)成立即 true,
+# 辅助信号(noCover 消失)读不到时不参与、不否决强信号。
+
+
+def test_cover_verified_fingerprint_changed_with_nocover_unreadable_is_true():
+    """①(账号5 真号那个 case,本次核心):指纹变 + noCover 读不到(None)→ true。
+
+    **这条断言有牙**:退回旧的"noCover 消失 *且* 指纹变化都要"逻辑,None 的 noCover 让
+    "且"永不成立,本用例必红 —— 正是它守住"辅助信号缺失不否决强信号"。
+    """
+    assert bnc._cover_verified(
+        "https://sns-na-i2.xhscdn.com/frame-0",
+        "https://ros-preview.xhscdn.com/new-cover",
+        None, None,
+    ) is True
+
+
+def test_cover_verified_fingerprint_changed_with_nocover_gone_is_true():
+    """②:指纹变 + noCover true→false → true(两个强/辅信号都指向换成)。"""
+    assert bnc._cover_verified("cdn/frame-0", "cdn/custom-1", True, False) is True
+
+
+def test_cover_verified_nothing_changed_is_false():
+    """③:指纹没变 + noCover 没变 → false(cover_not_verified,保留 fail-loud)。"""
+    assert bnc._cover_verified("cdn/frame-0", "cdn/frame-0", True, True) is False
+    # 全读不到(封面区都拿不到)同样是 false,不乐观当成功
+    assert bnc._cover_verified(None, None, None, None) is False
+
+
+def test_cover_verified_nocover_gone_without_fingerprint_change_is_true():
+    """④:指纹没变但 noCover 消失 → true —— noCover 消失是平台侧「已换成自定义封面」的确认。"""
+    assert bnc._cover_verified("cdn/frame-0", "cdn/frame-0", True, False) is True
+
+
+def test_cover_verified_no_baseline_does_not_fire_strong_signal():
+    """守边界:封面步没执行/出错时 fp_before 是 None,读到平台首帧指纹**不能**误判成换成。"""
+    assert bnc._cover_verified(None, "cdn/frame-0", None, None) is False
+
+
 # ---------------- REST 契约 ----------------
 
 

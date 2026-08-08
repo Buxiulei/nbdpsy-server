@@ -234,6 +234,9 @@ class Editor:
         self.cover_no_cover = not (
             self.cover_declared_for_real and self.cover_persists_on_readback
         )
+        # 指纹随封面态同步:换成功且落地 → 自定义指纹;被静默丢弃则退回平台首帧指纹
+        # (回读强信号靠 fingerprint_before≠fingerprint_after 判定,丢弃时两者必须相等)
+        self.cover_fingerprint = "cdn/frame-0" if self.cover_no_cover else "cdn/custom-1"
         self.page.emit(
             "https://creator.xiaohongshu.com/api/galaxy/v2/creator/activity_center/list",
             {"data": {"list": [
