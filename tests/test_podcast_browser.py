@@ -146,11 +146,15 @@ class _Page:
         raise Exception("no match")
 
 
-def _tab_eval(active_text):
-    """伪造 ``active_tab_text`` 用的那段只读 JS。"""
+def _tab_eval(*active_texts):
+    """伪造 tab 判据那段只读 JS —— 返回**所有**带 active 的 tab 文案(复数)。
+
+    复数是真值:2026-08-08 取证实测 DOM 里同时存在两个 ``.creator-tab.active``
+    (一个残留在「上传视频」上没摘掉、一个正确挂在「发播客」上)。
+    """
     def _fn(script, *a):
-        if "creator-tab.active" in script:
-            return active_text
+        if "creator-tab" in script and "active" in script:
+            return list(active_texts)
         return None
     return _fn
 
@@ -177,7 +181,9 @@ def test_ensure_podcast_tab_clicks_the_creator_tab_div():
     state = {"active": "上传视频"}
 
     def _fn(script, *a):
-        return state["active"] if "creator-tab.active" in script else None
+        if "creator-tab" in script and "active" in script:
+            return [state["active"]]
+        return None
 
     page = _Page(elements=[tab, inner], eval_fn=_fn)
     human = _Human()
@@ -294,8 +300,8 @@ def _collection_page(*, crop_needed=True):
     page = _Page(elements=[entry], body_text="播客合集")
 
     def _fn(script, *a):
-        if "creator-tab.active" in script:
-            return "发播客"
+        if "creator-tab" in script and "active" in script:
+            return ["发播客"]
         if "button.create-btn" in script:
             if state["stage"] != "create":
                 return {"found": False}
@@ -545,3 +551,284 @@ def test_step3a_default_timeout_scales_with_audio_size(tmp_path, monkeypatch):
     seen["error"] = r["error"]
     # 200MB → 300 + 2*120 = 540s(默认配置),报错里会带这个预算
     assert "540" in seen["error"], seen["error"]
+
+
+# =====================================================================
+# 2026-08-08 真号取证(账号9·米之木木)落定的真值:命中路径锁
+# fixtures: data/scene_captures/podcast_selectors/account9_podcast_publish_probe.json
+# =====================================================================
+
+
+# ---------------- tab 判据:两个 active 同时存在 ----------------
+
+
+def test_podcast_tab_active_when_a_stale_active_tab_comes_first():
+    """DOM 里同时有两个 ``.creator-tab.active`` → 只要其中一个是「发播客」就算激活。
+
+    取证铁证(``all_creator_tabs_evidence``):「上传视频」残留 active 排在文档序更前,
+    ``document.querySelector('.creator-tab.active')`` 抓到的正是那个错的
+    —— 老判据在这里 100% 误判"没切过去",而页面内容其实早就是播客上传区。
+    """
+    page = _Page(eval_fn=_tab_eval("上传视频", "发播客"))
+    assert podcast_mod.is_podcast_tab_active(page) is True
+
+
+def test_podcast_tab_active_falls_back_to_content_marker():
+    """class 判据全军覆没时,用**内容判据**兜底(上传区文案是发播客 tab 独有的)。"""
+    page = _Page(eval_fn=_tab_eval("上传视频"),
+                 body_text="草稿箱(0) 将音频文件拖拽到此,或点击上传音频 支持m4a、mp3")
+    assert podcast_mod.is_podcast_tab_active(page) is True
+
+
+def test_podcast_tab_inactive_when_neither_signal_holds():
+    """两路判据都不命中 → False(内容判据只是兜底,不是永远为真的橡皮图章)。"""
+    page = _Page(eval_fn=_tab_eval("上传视频"), body_text="拖拽视频到此处")
+    assert podcast_mod.is_podcast_tab_active(page) is False
+
+
+# ---------------- 引导浮层:关不掉,只能绕 ----------------
+
+
+def test_exposed_click_point_reproduces_the_captured_sliver():
+    """按真号 rect 算出的穿透点必须复现取证当场那一颗:(643.7, 342.0)。
+
+    浮层压住「上传音频」按钮左侧约 81px,右侧留 39px 暴露缝——四种关闭手段实测
+    全部无效(present_after 全 True、四张截图像素级无变化),这条缝是唯一走通的路。
+    """
+    btn = {"x": 543.3333129882812, "y": 322, "w": 120, "h": 40}
+    tip = {"x": 262, "y": 268, "w": 360, "h": 116}
+    point = podcast_mod.exposed_click_point(btn, tip)
+    assert point is not None
+    assert abs(point[0] - 643.7) < 0.5, point
+    assert point[1] == 342.0, point
+    # 点必须落在按钮内、且在浮层右边界之外——两个不变量各自钉死
+    assert btn["x"] < point[0] < btn["x"] + btn["w"]
+    assert point[0] > tip["x"] + tip["w"]
+
+
+def test_exposed_click_point_refuses_a_too_narrow_sliver():
+    """缝窄到不可靠(窗口尺寸一变就归零)→ 返回 None,由调用方退回直接点按钮。"""
+    btn = {"x": 543.0, "y": 322, "w": 120, "h": 40}
+    tip = {"x": 262, "y": 268, "w": 396, "h": 116}  # 右边界 658,只剩 5px
+    assert podcast_mod.exposed_click_point(btn, tip) is None
+
+
+def test_exposed_click_point_none_when_tooltip_does_not_overlap():
+    """浮层压根没盖住按钮(垂直/水平任一不相交)→ None,不做多余的坐标点击。"""
+    btn = {"x": 543.0, "y": 322, "w": 120, "h": 40}
+    assert podcast_mod.exposed_click_point(
+        btn, {"x": 262, "y": 600, "w": 360, "h": 116}) is None, "垂直不相交"
+    assert podcast_mod.exposed_click_point(
+        btn, {"x": 0, "y": 268, "w": 100, "h": 116}) is None, "水平不相交"
+
+
+def test_exposed_click_point_tolerates_garbage_rect():
+    """rect 读残了(缺键 / None)→ None,取证读数绝不制造异常。"""
+    assert podcast_mod.exposed_click_point(None, None) is None
+    assert podcast_mod.exposed_click_point({"x": 1}, {"x": 1, "y": 1, "w": 1, "h": 1}) is None
+
+
+def test_dismiss_tooltip_records_that_no_method_works():
+    """四招全试仍在 → present_after=True 且 tried 记全,**不抛错**(它不挡合集入口)。"""
+    tooltip = _El("div", "播客合集上线啦", cls="guide", children=[_El("div", "", cls="close-btn")])
+    page = _Page(elements=[tooltip])
+    human = _Human()
+    out = podcast_mod.dismiss_guide_tooltip(page, human)
+    assert out["present_after"] is True
+    assert out["tried"] == ["close_button", "escape", "blank_click"]
+
+
+def test_dismiss_tooltip_scopes_close_button_to_the_container():
+    """关闭按钮**只在浮层容器内**找 —— 页面别处的同名 ``.close-btn`` 一次都不许点。
+
+    取证第一版就栽在这:``document.querySelector('.close-btn')`` 抓到了别处的按钮。
+    """
+    decoy = _El("div", "", cls="close-btn")           # 页面别处的同名按钮
+    inner = _El("div", "", cls="close-btn")
+    tooltip = _El("div", "播客合集上线啦", cls="guide", children=[inner])
+    page = _Page(elements=[decoy, tooltip])
+    human = _Human()
+    podcast_mod.dismiss_guide_tooltip(page, human)
+    clicked = [t for t, _ in human.clicks]
+    assert inner in clicked, "该点的是容器内那颗"
+    assert decoy not in clicked, "绝不能点到页面别处的同名 close-btn"
+
+
+# ---------------- 音频弹窗内部:两个 input 靠 accept 分辨 ----------------
+
+
+def _audio_modal_page():
+    """复刻真号弹窗:``.audio-upload-modal`` 里两个同 class 的 file input。"""
+    button = _El("button", "上传音频", cls="d-button custom-button upload-button")
+    audio = _El("input", "", cls="upload-input",
+                attrs={"type": "file", "accept": ".mp3,.wav,.aac,.flac,.m4a"})
+    cover = _El("input", "", cls="upload-input",
+                attrs={"type": "file", "accept": ".jpg,.jpeg,.png,.webp"})
+    modal = _El("div", "上传音频 音频封面 取消 去发布",
+                cls="d-modal d-modal-centered creator-modal-style audio-upload-modal")
+    page = _Page(elements=[button, modal, audio, cover])
+
+    def _fn(script, *a):
+        if "creator-tab" in script and "active" in script:
+            return ["发播客"]
+        if "audio_modal_present" in script:
+            return {
+                "file_inputs": [{"cls": e.cls, "accept": e.attrs.get("accept", "")}
+                                for e in page.elements if e.tag == "input"],
+                "go_publish": [],
+                "audio_modal_present": page.query_selector(".audio-upload-modal") is not None,
+                "page_text": "",
+            }
+        return None
+
+    page.eval_fn = _fn
+    return page, button, audio, cover
+
+
+def test_step2a_tells_audio_and_cover_inputs_apart_by_accept(monkeypatch):
+    """命中路径:两个 ``input.upload-input`` 同 class,**唯一区分靠 accept** → 各就各位。
+
+    这是取证 ②(``modal_file_inputs``)的直接落地:音频 accept 是音频扩展名、
+    封面 accept 是图片扩展名,没有第二个可用特征。
+    """
+    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", False)
+    page, button, audio, cover = _audio_modal_page()
+    tasks = _tasks(page)
+    r = tasks.step2a_upload_audio("/data/ep.mp3", "/data/cover.png")
+    assert r["success"] is True, r
+    assert audio.files == ["/data/ep.mp3"], "音频必须进音频位"
+    assert cover.files == ["/data/cover.png"], "封面必须进封面位"
+    assert r["audio_cover"]["status"] == "done"
+
+
+def test_step2a_clicks_the_exposed_sliver_when_tooltip_cannot_be_closed(monkeypatch):
+    """浮层关不掉 → 点**按钮右侧暴露缝的坐标**穿透它,而不是点按钮元素(会点在浮层上)。"""
+    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", False)
+    page, button, audio, cover = _audio_modal_page()
+    tooltip = _El("div", "播客合集上线啦", cls="guide")
+    page.elements = [tooltip] + page.elements
+    monkeypatch.setattr(podcast_mod, "upload_audio_click_point", lambda _p: (643.7, 342.0))
+    tasks = _tasks(page)
+    r = tasks.step2a_upload_audio("/data/ep.mp3")
+    assert r["success"] is True, r
+    clicked = [t for t, _ in tasks.human.clicks]
+    assert (643.7, 342.0) in clicked, "该点的是暴露缝坐标"
+    assert button not in clicked, "浮层还在时点按钮元素等于点在浮层上"
+
+
+def test_step2a_clicks_the_button_element_when_no_tooltip(monkeypatch):
+    """浮层不在 → 老老实实点按钮元素(不为不存在的遮挡做坐标点击)。"""
+    monkeypatch.setattr(atomic_mod.settings, "SELFHEAL_ENABLED", False)
+    page, button, audio, _cover = _audio_modal_page()
+    called = {"n": 0}
+
+    def _boom(_p):
+        called["n"] += 1
+        return (1.0, 2.0)
+
+    monkeypatch.setattr(podcast_mod, "upload_audio_click_point", _boom)
+    tasks = _tasks(page)
+    tasks.step2a_upload_audio("/data/ep.mp3")
+    clicked = [t for t, _ in tasks.human.clicks]
+    assert button in clicked
+    assert called["n"] == 0, "没浮层就不该去算穿透点"
+
+
+def test_audio_probe_reports_the_modal_presence():
+    """当场取证要能回答"弹窗到底开没开" —— 定位失败时这是第一个要看的字段。"""
+    page, _b, _a, _c = _audio_modal_page()
+    tasks = _tasks(page)
+    got = tasks._audio_probe()
+    assert got["audio_modal_present"] is True
+
+
+# ---------------- 发布表单 + 合集选择控件 ----------------
+
+
+def _publish_form_page(*, with_options=False, name="心理急救包"):
+    """复刻真号发布表单(URL target=audio)的关键结构。"""
+    title = _El("input", "", cls="d-text",
+                attrs={"type": "text", "placeholder": "填写标题会有更多赞哦"})
+    body = _El("div", "", cls="tiptap ProseMirror", attrs={"contenteditable": "true"})
+    card_title = _El("div", "加入播客合集", cls="collection-plugin-content-title")
+    content = _El("div", "加入播客合集 汇集系列播客，有利于连续性收听",
+                  cls="collection-plugin-content", children=[card_title])
+    create_link = _El("div", "创建播客合集", cls="collection-plugin-create")
+    wrapper = _El("div", "加入播客合集 汇集系列播客，有利于连续性收听 创建播客合集",
+                  cls="collection-plugin-wrapper", children=[content, create_link])
+    setting = _El("div", "加入播客合集 原创声明", cls="publish-page-content-setting-content",
+                  children=[wrapper])
+    elements = [title, body, setting, content, card_title, create_link, wrapper]
+    page = _Page(elements=elements, body_text="加入播客合集 汇集系列播客")
+    if with_options:
+        option = _El("li", name, cls="option")
+        dropdown = _El("div", name, cls="d-dropdown", children=[option])
+
+        def _open():
+            page.elements = elements + [dropdown]
+            page.body_text = f"加入播客合集 {name}"
+
+        return page, {content: _open, card_title: _open}, {"create_link": create_link,
+                                                           "content": content,
+                                                           "option": option}
+    return page, {}, {"create_link": create_link, "content": content}
+
+
+def test_select_collection_hits_the_real_card_and_picks_the_option(monkeypatch):
+    """命中路径:按真值定位到合集卡 → 点开 → 选中同名候选 → 回读到名字 → done。"""
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    page, handlers, els = _publish_form_page(with_options=True)
+    human = _wire(page, handlers)
+    out = podcast_mod.select_podcast_collection(page, human, "心理急救包")
+    assert out["status"] == "done", out
+    assert any(t is els["option"] for t, _ in human.clicks), "得真点中候选项"
+
+
+def test_select_collection_never_clicks_the_create_link(monkeypatch):
+    """**绝不点「创建播客合集」** —— 它直达合集创建页,点下去等于把发布表单丢了。
+
+    这条是真值带来的新风险:创建入口 ``.collection-plugin-create`` 就压在整卡容器
+    ``.collection-plugin-wrapper`` 的右侧(x867 落在 wrapper 的 355~987 区间内),
+    对着整卡做带随机偏移的拟人点击有实打实的概率撞上它 —— 故点击目标收窄到
+    ``.collection-plugin-content``(右边界 859 < 867,与创建入口零重叠)。
+    """
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(podcast_mod, "_COLLECTION_SELECT_TIMEOUT_S", 0.1)
+    page, handlers, els = _publish_form_page(with_options=True)
+    human = _wire(page, handlers)
+    podcast_mod.select_podcast_collection(page, human, "心理急救包")
+    clicked = [t for t, _ in human.clicks]
+    assert els["create_link"] not in clicked
+    assert els["content"] in clicked, "该点的是不含创建入口的内容区"
+
+
+def test_select_collection_fails_loud_when_options_never_render(monkeypatch):
+    """点开了但候选列表始终不出现 → fail-loud(展开后的结构本轮**未取证**)。"""
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(podcast_mod, "_COLLECTION_SELECT_TIMEOUT_S", 0.1)
+    page, handlers, _ = _publish_form_page()
+    human = _wire(page, handlers)
+    out = podcast_mod.select_podcast_collection(page, human, "心理急救包")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("podcast_collection_not_in_options")
+    assert out["observed"]["collection_card_present"] is True, "取证要说清卡片是在的"
+
+
+def test_select_collection_reports_a_missing_card_distinctly(monkeypatch):
+    """整张合集卡都不在 → 另一种 reason(与"卡在、候选没出来"必须可区分)。"""
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    page = _Page(elements=[], body_text="发布笔记")
+    out = podcast_mod.select_podcast_collection(page, _Human(), "心理急救包")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("podcast_collection_field_not_found")
+    assert out["observed"]["collection_card_present"] is False
+
+
+def test_publish_form_probe_reads_the_captured_selectors():
+    """发布表单取证读的是真值控件,不再只丢一段页面文本。"""
+    page, _h, _e = _publish_form_page()
+    got = podcast_mod._publish_form_probe(page)
+    assert got["title_input_present"] is True
+    assert got["body_editor_present"] is True
+    assert got["setting_content_present"] is True
+    assert got["collection_card_present"] is True

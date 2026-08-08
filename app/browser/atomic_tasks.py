@@ -182,9 +182,10 @@ def classify_video_upload_state(
 def go_publish_enabled(button_state: dict) -> bool:
     """播客「去发布」按钮到底能不能点(纯函数,吃 ``_audio_probe`` 读出来的一颗按钮)。
 
-    ⚠️ 该按钮的禁用态形态**未取证**(实拍只确认了"未传音频时是禁用的"这件事)。
-    故三路判据取**与**:``disabled`` 属性、``aria-disabled``、class 里的 disabled 类,
-    **全都表明不禁用**才算可点。
+    禁用态形态已取证(2026-08-08,账号9):解禁时 ``disabled`` 属性消失、class 里**不含**
+    任何 disabled 字样(即平台只用 attribute,不挂 disabled 类)。三路判据仍取**与**:
+    ``disabled`` 属性、``aria-disabled``、class 里的 disabled 类,**全都表明不禁用**才算可点
+    —— 多读两路的成本是零,而平台哪天改成挂 class 时这里不会漏判。
 
     为什么取"与"而不是"或":读不懂的形态一律当禁用。点一颗禁用按钮永远不会成功,
     只会换来一句"发布超时"(图文那边 2026-08-02 真号事故就是这么来的);而多等一轮
@@ -1397,38 +1398,44 @@ class XHSPublishAtomicTasks:
 
     # ============ 播客分支(step2a/step3a,替代图文的 step2/3/4) ============
     #
-    # 取证状态**分两档,别混着读**(2026-08-07 真号取证,账号9):
-    # - **已取证**:「发播客」tab 的切换与激活判据(见 app/browser/podcast.py);
-    #   上传区文案「将音频文件拖拽到此,或点击上传音频」;红色「上传音频」按钮
-    #   ``button.upload-button``;右侧「通过RSS导入音频」(不做)。
-    # - **未取证**:点「上传音频」之后那个弹窗的**内部结构** —— 音频 file input、
-    #   音频封面 file input、上传进度反馈、「去发布」按钮的禁用态判据,一个都没抓到。
-    #   两轮真号会话都被「播客合集上线啦」引导浮层挡住(它正压在上传按钮上),
-    #   而且发播客 tab 首屏的 ``input[type=file]`` 数量实测为 **0** —— 与视频 tab
-    #   (首屏就有一个隐藏 input)完全不同,说明 input 是点开弹窗后才挂上去的。
+    # 取证状态(2026-08-08 真号取证,账号9,账号「米之木木」,
+    # data/scene_captures/podcast_selectors/):**弹窗内部已取证**。
+    # - 弹窗容器 ``.audio-upload-modal``(完整链
+    #   ``.d-modal.d-modal-centered.d-modal-no-footer.creator-modal-style.audio-upload-modal``);
+    # - 弹窗里**两个** file input **class 完全相同**(都是 ``input.upload-input``),
+    #   **唯一的区分特征是 accept**:音频 ``.mp3,.wav,.aac,.flac,.m4a``、
+    #   封面 ``.jpg,.jpeg,.png,.webp``。没有第二个可用特征——别再找别的了;
+    # - 「去发布」解禁判据:音频卡出现绿勾「上传成功」+ 封面缩略图渲染完成,两者约 2 秒内
+    #   同时达成,按钮 ``disabled`` 属性消失、class 里**不含**任何 disabled 字样。
+    #   ⚠️ 该轮用 10 分 15 秒 / 2.35MB 的音频测,解禁几乎即时,**未观测到视频那种
+    #   "转码等待"阶段**;接近 2 小时上限的长音频有没有额外等待**没验证过**。
     #
-    # 所以下面这两步写成 **fail-loud**:定位不到就带当场取证报错,**绝不静默假装做过**。
+    # 发播客 tab 首屏的 ``input[type=file]`` 数量实测为 **0** —— 与视频 tab(首屏就有
+    # 一个隐藏 input)完全不同:input 是点开弹窗后才挂上去的,所以必须先开弹窗。
+    #
+    # 这两步仍写成 **fail-loud**:定位不到就带当场取证报错,**绝不静默假装做过**。
     # 媒体步失败 = 整条发布任务失败(与视频的 step2v/step3v 同级),交状态机排重试。
-    # 换真值时改的是这几个常量 + 补命中路径单测,控制流不必动。
 
-    # 音频 file input:占位候选。第一条按视频那套 class 类推,第二条按 accept 里
-    # 平台大概率会写的扩展名,最后退回"弹窗打开后新出现的裸 file input"。
+    # 弹窗容器:只用于当场取证回答"弹窗到底开没开"(定位失败时第一个要看的字段)。
+    _AUDIO_MODAL = ".audio-upload-modal"
+    # 音频 file input:按 accept 里的音频扩展名认。不加 ``.audio-upload-modal`` 前缀
+    # 是因为首屏 file input 实测为 0、页面上没有第二个音频 accept 的 input,前缀只会
+    # 在平台改弹窗 class 时白白多一条失效路径。
     _AUDIO_FILE_INPUT_SELECTORS = [
-        "input[type='file'].upload-input",
+        "input.upload-input[type='file'][accept*='.mp3']",
         "input[type='file'][accept*='.mp3']",
         "input[type='file'][accept*='audio']",
-        "input[type='file']",
     ]
-    # 音频封面 file input:与音频 input 的区分特征未取证 —— 只能靠 accept 里的图片
-    # 扩展名把它与音频那个区分开(合集封面页实测 accept=".jpg,.jpeg,.png,.webp",
-    # 弹窗里大概率同款)。**区分不出来就不传封面**,绝不把音频灌进封面位。
+    # 音频封面 file input:同一个 class,靠图片 accept 与音频那个分开。
+    # 万一区分不出来(候选就是刚才那个音频 input)就**不传封面**,
+    # 绝不把封面灌进音频位——那会把已传好的音频顶掉。
     _AUDIO_COVER_INPUT_SELECTORS = [
+        "input.upload-input[type='file'][accept*='.jpg']",
         "input[type='file'][accept*='.jpg']",
-        "input[type='file'][accept*='.png']",
         "input[type='file'][accept*='image']",
     ]
-    # 「去发布」按钮:实拍确认未传音频时禁用,故它的翻转 = 上传完成的主判据。
-    # 具体禁用属性(disabled / class / 自定义属性)未取证,三种都读、任一表明可点即可点。
+    # 「去发布」按钮:实拍确认未传音频时禁用、传完即翻转,故它是上传完成的主判据。
+    # 精确文本匹配已取证够用(``_GO_PUBLISH_TEXTS``),按钮无稳定 class 可挂。
     _GO_PUBLISH_TEXTS = ("去发布",)
 
     def step2a_upload_audio(
@@ -1474,7 +1481,18 @@ class XHSPublishAtomicTasks:
                     "observed": self._audio_probe(),
                     "screenshot": self._take_screenshot("03_no_upload_audio_button"),
                 }
-            self.human.click(button, reason="打开上传音频弹窗")
+            # 浮层关不掉是**常态**(08-08 取证四招全无效):此时改点按钮右侧那条没被
+            # 压住的暴露缝,穿透浮层点中按钮。缝算不出来(尺寸变了 / 形态变了)就退回
+            # 直接点按钮元素 —— 没观测过的遮挡形态下瞎点坐标比点在浮层上更糟。
+            sliver = (
+                podcast_page.upload_audio_click_point(self.page)
+                if tooltip.get("present_after") else None
+            )
+            if sliver is not None:
+                logger.info(f"引导浮层没关掉,改点按钮右侧暴露缝 {sliver}")
+                self.human.click(sliver, reason="穿透引导浮层点「上传音频」")
+            else:
+                self.human.click(button, reason="打开上传音频弹窗")
             self.human.wait(1.0, 1.8, context="等上传音频弹窗渲染")
 
             upload_input = self._find_element_with_retry(
@@ -1486,8 +1504,8 @@ class XHSPublishAtomicTasks:
                 return {
                     "success": False,
                     "error": (
-                        "上传音频弹窗里没找到音频 file input(选择器待真号 fixtures 落定;"
-                        f"引导浮层处理结果 {tooltip})"
+                        "上传音频弹窗里没找到音频 file input(accept 含 .mp3 的那个);"
+                        f"引导浮层处理结果 {tooltip}"
                     ),
                     "observed": self._audio_probe(),
                     "screenshot": self._take_screenshot("03_no_audio_file_input"),
@@ -1509,9 +1527,10 @@ class XHSPublishAtomicTasks:
     def _set_audio_cover(self, cover_path: Optional[str], audio_input) -> Dict[str, Any]:
         """给播客设音频封面(可选);**失败只告警不阻断**,回退成不设封面。
 
-        ``audio_input`` 传进来只为一件事:**排除它** —— 弹窗里两个 file input 的区分
-        特征未取证,若按图片 accept 找到的恰好就是刚才那个音频 input,说明区分不出来,
-        此时**宁可不设封面也绝不把封面灌进音频位**(那会把已传好的音频顶掉)。
+        ``audio_input`` 传进来只为一件事:**排除它** —— 弹窗里两个 file input 的 class
+        完全一样(``input.upload-input``),全靠 accept 分辨;若按图片 accept 找到的恰好
+        就是刚才那个音频 input,说明这一刻区分不出来,此时**宁可不设封面也绝不把封面灌进
+        音频位**(那会把已传好的音频顶掉)。
         """
         if not cover_path:
             return {"status": "skipped", "reason": "no_cover_requested"}
@@ -1558,9 +1577,10 @@ class XHSPublishAtomicTasks:
             return {
                 file_inputs: inputs,
                 go_publish: btn,
+                audio_modal_present: !!document.querySelector('%s'),
                 page_text: (document.body.innerText || '').slice(0, 1500),
             };
-        }"""
+        }""" % self._AUDIO_MODAL
         try:
             got = self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001 — 取证本身绝不制造新异常

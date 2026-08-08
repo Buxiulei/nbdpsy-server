@@ -2,29 +2,46 @@
 
 选择器的取证状态**分两档**,别混着读:
 
-**已真号取证**(2026-08-07,账号9,``data/scene_captures/podcast/``):
+**已真号取证**(2026-08-07 与 2026-08-08 两轮,账号9,
+``data/scene_captures/podcast/`` 与 ``data/scene_captures/podcast_selectors/``):
 - 顶部 4 个 tab 都是 ``div.creator-tab``,当前激活的额外带 ``active`` 类;
   ⚠️ 点「发播客」后 URL 只追加 ``&from=tab_switch``(一次性来源标记,**不是**可复用的
-  mode 参数)——所以判据只认 DOM 的 ``.creator-tab.active`` 文本,**不做 URL 兜底**
-  (与图文 tab 的 ``?type=normal`` 兜底刻意不同,那条路在播客上不存在);
+  mode 参数)——所以判据只认 DOM,**不做 URL 兜底**(与图文 tab 的 ``?type=normal``
+  兜底刻意不同,那条路在播客上不存在);
+  ⚠️⚠️ 08-08 取证推翻了"active 唯一"这个隐含假设:DOM 里**同时**存在两个
+  ``.creator-tab.active`` —— 一个残留在「上传视频」上没被摘掉、一个正确挂在
+  「发播客」上,而 ``document.querySelector`` 取文档序第一个、抓到的正是错的那个
+  (那一轮 3 次会话 ``ensure_podcast_tab`` 全程判定失败,页面其实早就是播客上传区)。
+  故判据改成:读**所有** active 的文案取并集,再叠一路独立的**内容判据**兜底;
 - 「上传音频」红按钮 ``button.upload-button``;右侧 RSS 是 ``button.rss-button``;
 - 「播客合集」区入口文案「新建播客合集」,**点击后是整页内容替换,不是 modal**
   ——所以它与"有没有传音频"完全解耦,可以独立触达;
 - 合集创建页三个字段与「创建」按钮的禁用判据(见下方常量);
 - 合集封面 accept 实测为 ``.jpg,.jpeg,.png,.webp`` —— **含 webp**,与设计文档
-  「合集封面无 webp」的假设相反,以实测 DOM 为准。
+  「合集封面无 webp」的假设相反,以实测 DOM 为准;
+- 发布表单(``publish/publish?...&target=audio``)的标题 / 正文 / 内容设置区,
+  以及**播客合集卡的真实文案是「加入播客合集」**(旧占位猜的「播客合集 / 选择合集 /
+  加入合集」三个全部落空)。
 
-**未取证(占位值,fail-loud)**:音频上传弹窗内部结构(见 ``app/browser/atomic_tasks.py``
-的 step2a/step3a)。两轮真号取证都被下面这个引导浮层挡住,没能进到弹窗里。
+**仍未取证(占位值,fail-loud)**:
+- 合集卡点开之后的候选结构(下拉?二级弹窗?)—— 为控制真号操作范围没有再点;
+- 底部固定栏「暂存离开」+「发布」的精确选择器:取证只按 ``[class*=publish-btn]``
+  查过、**未命中**,截图确认按钮在。注意这**不能**推出"播客页与图文/视频页不同款"
+  —— 图文/视频用的是 ``<xhs-publish-btn>`` 自定义元素(closed shadow),本来就不会被
+  一个 class 查询命中。播客页到底是不是同一个 host,**没验过**;
+- 接近 2 小时上限的长音频有没有额外的转码等待(取证用的是 10 分 15 秒 / 2.35MB)。
 
-**引导浮层**(本页最大的坑):「播客合集上线啦」的 popover **正压在「上传音频」按钮上**
-(截图 ``02_upload_audio_modal_retry.png`` 铁证),不先关掉它,点上传音频点的是浮层。
-``dismiss_guide_tooltip`` 尽最大努力关它,但**关不掉不算失败** —— 它不挡合集入口
-(入口在页面下方),而音频那条路会在 step2a 以"找不到 file input + 当场取证"收口。
+**引导浮层**(本页最大的坑):「播客合集上线啦」的 popover **正压在「上传音频」按钮上**。
+08-08 取证把四种关闭手段(容器内 ``.close-btn`` / Esc / 点空白 / 精确重定位再点)
+**全部实测无效**——``present_after`` 四次全 True、四张截图像素级无变化。走通的是**绕过**
+而不是关闭:浮层只压住 120px 宽按钮的左侧约 81px,右侧留一条约 39px 的暴露缝,精确点
+这条缝能穿透浮层点中按钮、弹窗正常打开(见 ``exposed_click_point``)。这条缝的宽度是
+**当次窗口尺寸下的实测值**,尺寸/文案一变随时可能归零 —— 所以算不出缝就退回直接点按钮,
+而 ``dismiss_guide_tooltip`` 的四招一个不删(平台哪天修好了它就又能关掉)。
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -33,6 +50,9 @@ from app.browser.sync_human_actions import SyncHumanActions
 # ── 已取证:tab ──
 PODCAST_TAB_TEXT = "发播客"
 _CREATOR_TAB = "div.creator-tab"
+# 内容判据:发播客 tab 首屏上传区的文案,别的 tab 上不存在。
+# 它是 class 判据之外**独立的一路**信号 —— 08-08 取证脚本正是靠它绕过了 active 误判。
+_PODCAST_CONTENT_MARKER = "将音频文件拖拽到此"
 
 # ── 已取证:发播客 tab 首屏 ──
 UPLOAD_AUDIO_BUTTON = "button.upload-button"
@@ -50,8 +70,14 @@ _CREATE_DISABLED_CLASS = "create-btn-disabled"
 # 「创建」按钮会一直保持禁用 —— 这是第二轮取证里最贵的一个发现(填全了按钮仍禁用)。
 _CROP_CONFIRM_TEXTS = ("确定", "确认")
 
-# 引导浮层(未精确取证:第二轮点了 .close-btn 后截图像素级无变化,说明没点中它)
+# 引导浮层:文案是它唯一稳定的抓手 —— 真容器是 create-podcast-collection 区块内一个
+# 绝对/固定定位的悬浮子元素,**没有稳定 class 名可挂**(08-08 取证结论)。
 _GUIDE_TOOLTIP_TEXT = "播客合集上线啦"
+# 暴露缝的最小可用宽度(px):比这还窄就不信它,退回直接点按钮。
+# 实测值 39.3px,取 12 是留足拟人点击的随机偏移余量,又不至于把实测那条缝判掉。
+_MIN_EXPOSED_WIDTH_PX = 12.0
+# 从浮层右边界再让开 2px 再点 —— 与取证脚本算点位的公式逐字一致(那一点是实打实点中过的)。
+_SLIVER_MARGIN_PX = 2.0
 
 # 各步等待窗口(秒)
 _CREATE_PAGE_TIMEOUT_S = 15.0
@@ -68,24 +94,60 @@ def _norm(text: Optional[str]) -> str:
 # ────────────────────────── tab 三件套 ──────────────────────────
 
 
-def active_tab_text(page) -> str:
-    """当前激活 tab 的文案(读 ``.creator-tab.active``);读不到返回空串。
+def active_tab_texts(page) -> List[str]:
+    """**所有**带 active 的 ``.creator-tab`` 文案(去空、保持文档序);读不到返回空表。
+
+    为什么是复数:08-08 真号取证实测 DOM 里同时挂着两个 ``.creator-tab.active``,
+    ``document.querySelector`` 取文档序第一个 —— 抓到的恰是残留在「上传视频」上的
+    那个陈旧 active,于是 ``ensure_podcast_tab`` 在三次会话里全程判定失败,而页面
+    内容其实早就是播客上传区了。取并集就没有"抓到哪一个"这回事。
 
     只读 DOM 不看 URL:实测点 tab 只在 URL 追加 ``&from=tab_switch`` 这个一次性来源
     标记,刷新/再切换后它还在,拿它判"现在在哪个 tab"必然误判。
     """
     try:
-        return _norm(page.evaluate(
-            "() => { const el = document.querySelector('div.creator-tab.active');"
-            " return el ? (el.innerText || '') : ''; }"
-        ))
+        got = page.evaluate(
+            "() => Array.from(document.querySelectorAll('div.creator-tab.active'))"
+            ".map(el => el.innerText || '')"
+        )
     except Exception:  # noqa: BLE001 — 读判据失败只当"这轮没读到"
-        return ""
+        return []
+    if not isinstance(got, (list, tuple)):
+        return []
+    return [t for t in (_norm(x) for x in got) if t]
+
+
+def active_tab_text(page) -> str:
+    """激活 tab 的文案,单值形态(只给日志/报错取证用);读不到返回空串。
+
+    多个 active 并存时返回文档序第一个 —— 判定请用 ``is_podcast_tab_active``,
+    别拿这个单值去判,它可能正是那个陈旧的残留 active。
+    """
+    texts = active_tab_texts(page)
+    return texts[0] if texts else ""
+
+
+def _podcast_content_present(page) -> bool:
+    """内容判据:页面上有没有发播客 tab 独有的上传区文案。"""
+    try:
+        return _PODCAST_CONTENT_MARKER in (page.inner_text("body") or "")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def is_podcast_tab_active(page) -> bool:
-    """是否已切到「发播客」tab(判据 = ``.creator-tab.active`` 的文本)。"""
-    return PODCAST_TAB_TEXT in active_tab_text(page)
+    """是否已切到「发播客」tab —— **两路独立判据取或**。
+
+    ① 任一 ``.creator-tab.active`` 的文案是「发播客」;
+    ② 页面上出现发播客独有的上传区文案(内容判据)。
+
+    取"或"而不是"与":两路各自都会**漏报**(① 栽在陈旧 active 上、② 在平台改文案时
+    失效),但都不会**误报** —— 别的 tab 既不会把自己标成「发播客」,也不会渲染
+    「将音频文件拖拽到此」。漏报的代价是白点一次 tab,误报的代价是在别的 tab 上乱传文件。
+    """
+    if PODCAST_TAB_TEXT in active_tab_texts(page):
+        return True
+    return _podcast_content_present(page)
 
 
 def _find_tab(page, text: str):
@@ -134,10 +196,17 @@ def ensure_podcast_tab(page, human: SyncHumanActions, tries: int = 3) -> bool:
 def dismiss_guide_tooltip(page, human: SyncHumanActions) -> Dict[str, Any]:
     """尽最大努力关掉「播客合集上线啦」引导浮层;**关不掉不抛错**,如实回报做了什么。
 
-    为什么它非关不可:实测这个 popover 正压在「上传音频」按钮上,不关就点不到按钮
-    (两轮真号取证都卡在这)。为什么关不掉又不算失败:它不挡下方的合集入口,而音频
-    那条路会在 step2a 以「找不到 file input + 当场取证」明确收口 —— 在这里抛错只会
-    把一个**可能**的阻塞说成确定的失败。
+    ⚠️ **现状是关不掉**:08-08 真号取证把这里的三招连同"精确重定位再点 close-btn"
+    第四招一起试了个遍,``present_after`` 四次全 True、四张截图像素级无变化。三招
+    一个不删,是因为它们零成本、且平台哪天修好了这个浮层就又能关掉;真正让音频那条路
+    走通的是 ``exposed_click_point`` 那条**绕过**(点按钮右侧没被压住的暴露缝)。
+
+    关闭按钮**必须 scope 到浮层容器内查**(下面就是这么做的):页面别处也有 class 含
+    close 的按钮,``document.querySelector('.close-btn')`` 会抓到那个 —— 取证脚本
+    第一版就栽在这里。
+
+    为什么关不掉不算失败:它不挡下方的合集入口,而音频那条路会在 step2a 以「找不到
+    file input + 当场取证」明确收口 —— 在这里抛错只会把一个**可能**的阻塞说成确定的失败。
 
     三段递进(前一段成了就不做后面的):浮层容器内的关闭按钮 → Esc → 点页面空白处。
     """
@@ -198,6 +267,82 @@ def _find_guide_tooltip(page):
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def exposed_click_point(
+    button_rect: Optional[dict],
+    tooltip_rect: Optional[dict],
+    *,
+    min_width_px: float = _MIN_EXPOSED_WIDTH_PX,
+) -> Optional[Tuple[float, float]]:
+    """算「上传音频」按钮上**没被引导浮层盖住**的那条缝的点击点;算不出返回 None。
+
+    纯函数(只吃两个 rect,不碰 page),因为这条几何判断是本页最脆的一环,必须能脱离
+    真页面钉死:实测浮层 x262 w360(右边界 622)压住按钮 x543.3 w120(右边界 663.3)
+    的左侧约 81px,右侧剩约 39px —— 点 (643.7, 342.0) 穿透浮层点中了按钮、弹窗正常打开。
+
+    只处理"浮层从左侧压住按钮、右侧留缝"这**一种实测到的形态**,别的一律返回 None
+    让调用方退回直接点按钮:没观测过的遮挡形态下瞎算坐标,点出去的是哪儿谁也不知道。
+
+    ``min_width_px``:缝比它还窄就不信 —— 39px 是那次窗口尺寸下的值,尺寸/文案一变
+    随时可能归零,而拟人点击本身还带随机偏移,窄缝上偏一点就又点回浮层了。
+    """
+    btn = _rect(button_rect)
+    tip = _rect(tooltip_rect)
+    if btn is None or tip is None:
+        return None
+    bx, by, bw, bh = btn
+    tx, ty, tw, th = tip
+    if bw <= 0 or bh <= 0:
+        return None
+    if ty + th <= by or by + bh <= ty:
+        return None  # 垂直不相交:没挡住,不用绕
+    left = tx + tw + _SLIVER_MARGIN_PX
+    if left <= bx:
+        return None  # 浮层右边界还在按钮左边:水平不相交,同上
+    right = bx + bw
+    if right - left < min_width_px:
+        return None
+    return ((left + right) / 2.0, by + bh / 2.0)
+
+
+def _rect(raw: Optional[dict]) -> Optional[Tuple[float, float, float, float]]:
+    """把 ``{"x","y","w","h"}`` 读成四元组;缺键/非数一律 None(读数绝不制造异常)。"""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return (float(raw["x"]), float(raw["y"]), float(raw["w"]), float(raw["h"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# 只读 dump:一次拿回「上传音频」按钮与引导浮层的 rect。**取最内层那个浮层元素**
+# (文档序里祖先在前、后代在后,故取最后一个命中的)—— 祖先容器的 rect 是整个
+# create-podcast-collection 区块(1060px 宽),拿它算缝会把整颗按钮都算成被盖住。
+_UPLOAD_BUTTON_RECT_JS = r"""() => {
+    const btn = document.querySelector('button.upload-button');
+    if (!btn) return null;
+    let tip = null;
+    for (const el of document.querySelectorAll('div')) {
+        const t = el.innerText || '';
+        if (t.includes('%s') && t.length < 120) tip = el;
+    }
+    if (!tip) return null;
+    const r = e => { const b = e.getBoundingClientRect();
+                     return {x: b.x, y: b.y, w: b.width, h: b.height}; };
+    return {btn: r(btn), tip: r(tip)};
+}""" % _GUIDE_TOOLTIP_TEXT
+
+
+def upload_audio_click_point(page) -> Optional[Tuple[float, float]]:
+    """读现场 rect,算出穿透引导浮层点中「上传音频」按钮的坐标;算不出返回 None。"""
+    try:
+        got = page.evaluate(_UPLOAD_BUTTON_RECT_JS)
+    except Exception:  # noqa: BLE001 — 读数失败只当"这次绕不了"
+        return None
+    if not isinstance(got, dict):
+        return None
+    return exposed_click_point(got.get("btn"), got.get("tip"))
 
 
 # ────────────────────────── 播客合集创建 ──────────────────────────
@@ -434,15 +579,36 @@ def _read_create_result(page, name: str, tooltip: dict, crop: dict) -> Dict[str,
     }
 
 
-# ────────────────────── 发布表单里选播客合集(未取证,fail-loud) ──────────────────────
+# ────────────────────── 发布表单里选播客合集 ──────────────────────
 #
-# ⚠️ **本段的选择器全部是占位值,一个都没有真号验证过**:「去发布」之后的发布表单
-# 从未到达(E4)。控制流是确定的:找到合集选择控件 → 点开 → 按名称选中 → 回读确认。
-# 每一步定位不到就带当场取证报 error,**绝不静默假装选上了**;调用方(sync_client)
-# 对 error 的处理是告警不阻断 —— 笔记照发,只是不进合集。
-_COLLECTION_FIELD_TEXTS = ("播客合集", "选择合集", "加入合集")
+# 取证状态(08-08,账号9,已走到发布表单):
+# **已取证** —— 表单结构与合集卡本体。真实文案是**「加入播客合集」**;旧占位猜的
+# 「播客合集 / 选择合集 / 加入合集」三个**全部落空**(``collection_field_text_hits``
+# 三项全 false),留着只会在真正的控件旁边匹配到别的东西。
+# **未取证** —— 卡片**点开之后**的候选形态(下拉?二级弹窗?):为控制真号操作范围
+# 没有再点。故 ``_COLLECTION_OPTION_SCOPE`` 仍是占位值,找不到候选就 fail-loud。
+#
+# 控制流不变:找到合集控件 → 点开 → 按名称选中 → 回读确认。每一步定位不到就带当场
+# 取证报 error,**绝不静默假装选上了**;调用方(sync_client)对 error 的处理是告警
+# 不阻断 —— 笔记照发,只是不进合集。
+_COLLECTION_CARD = ".collection-plugin-wrapper"
+# 卡内标题文案(``.collection-plugin-content-title`` 的文本),按文案兜底时用它。
+_COLLECTION_FIELD_TEXTS = ("加入播客合集",)
+# 点击目标**刻意收窄到内容区**而不是整卡:整卡 ``.collection-plugin-wrapper`` 横跨
+# x355~987,而「创建播客合集」直达创建页的入口 ``.collection-plugin-create`` 就压在
+# x867~971 —— 在整卡上做带随机偏移的拟人点击有实打实的概率撞进它,一撞就离开发布表单、
+# 整篇笔记白填。内容区 ``.collection-plugin-content`` 右边界 859 < 867,零重叠。
+# (同款教训:原创声明勾选点位从宽容器收窄到 16×16 方块那次。)
+_COLLECTION_CLICK_TARGET = ".collection-plugin-content"
+# ⚠️ 占位值:点开之后的候选层结构未取证。
 _COLLECTION_OPTION_SCOPE = ".d-dropdown, .d-popover, .d-modal, [class*='select']"
 _COLLECTION_SELECT_TIMEOUT_S = 15.0
+
+# ── 已取证:发布表单(publish/publish?...&target=audio)──
+# 标题会自动预填音频文件名(去扩展名);正文与图文/视频同款 tiptap 编辑器。
+_PUBLISH_TITLE_INPUT = 'input.d-text[placeholder*="填写标题"]'
+_PUBLISH_BODY_EDITOR = 'div.tiptap[contenteditable="true"]'
+_PUBLISH_SETTING_CONTENT = ".publish-page-content-setting-content"
 
 
 def select_podcast_collection(
@@ -453,12 +619,12 @@ def select_podcast_collection(
     用名称不用 id:合集创建后能否回读到平台侧 id 未取证(E4/E5),而名称是实拍确认的
     必填项(≤20 字)。真号取证若发现下拉带 id 且名称可重复,把这里换成按 id 选即可。
     """
-    field = _find_text(page, _COLLECTION_FIELD_TEXTS)
+    field = _find_collection_field(page)
     if field is None:
         return {"status": "error",
                 "reason": f"podcast_collection_field_not_found: 发布表单里没有"
-                          f"{'/'.join(_COLLECTION_FIELD_TEXTS)} 这类合集控件"
-                          f"(选择器待真号 fixtures 落定)",
+                          f"「{_COLLECTION_FIELD_TEXTS[0]}」这张合集卡"
+                          f"({_COLLECTION_CARD} / {_COLLECTION_CLICK_TARGET} 均未命中)",
                 "observed": _publish_form_probe(page)}
     human.click(field, reason="打开播客合集选择")
     human.wait(0.8, 1.5, context="等合集候选渲染")
@@ -487,6 +653,22 @@ def select_podcast_collection(
     return {"status": "done", "name": name, "observed": evidence}
 
 
+def _find_collection_field(page):
+    """定位发布表单里那张播客合集卡的**可点区域**;找不到返回 None。
+
+    两级:先按真值 ``.collection-plugin-content``(不含创建入口的内容区),
+    再退回按文案「加入播客合集」找 —— 后者是平台改 class 时的兜底,不是猜测:
+    文案本身是 08-08 实拍读到的。**两级都绕开** ``.collection-plugin-create``。
+    """
+    try:
+        target = page.query_selector(_COLLECTION_CLICK_TARGET)
+    except Exception:  # noqa: BLE001
+        target = None
+    if target is not None:
+        return target
+    return _find_text(page, _COLLECTION_FIELD_TEXTS)
+
+
 def _find_option_by_name(page, name: str):
     """在下拉/弹层范围内按文案找候选项;找不到返回 None。"""
     target = _norm(name)
@@ -507,18 +689,27 @@ def _find_option_by_name(page, name: str):
 
 
 def _publish_form_probe(page) -> Dict[str, Any]:
-    """播客发布表单的当场取证(表单结构未取证,先把页面原样交出去供人工判读)。"""
+    """播客发布表单的当场取证:逐个真值控件在不在 + 页面文本。
+
+    为什么逐个报而不是只丢页面文本:合集选不上时,第一件要分清的事是"整张卡不在"
+    (表单没渲染完 / 页型变了)还是"卡在但候选没出来"(点开之后的结构未取证)。
+    """
     evidence: Dict[str, Any] = {}
     try:
         evidence["page_text"] = _norm(page.inner_text("body"))[:1200]
     except Exception:  # noqa: BLE001 — 取证本身绝不制造新异常
         evidence["page_text"] = ""
-    try:
-        evidence["dropdown_present"] = (
-            page.query_selector(_COLLECTION_OPTION_SCOPE) is not None
-        )
-    except Exception:  # noqa: BLE001
-        evidence["dropdown_present"] = False
+    for key, selector in (
+        ("title_input_present", _PUBLISH_TITLE_INPUT),
+        ("body_editor_present", _PUBLISH_BODY_EDITOR),
+        ("setting_content_present", _PUBLISH_SETTING_CONTENT),
+        ("collection_card_present", _COLLECTION_CARD),
+        ("dropdown_present", _COLLECTION_OPTION_SCOPE),
+    ):
+        try:
+            evidence[key] = page.query_selector(selector) is not None
+        except Exception:  # noqa: BLE001
+            evidence[key] = False
     return evidence
 
 
