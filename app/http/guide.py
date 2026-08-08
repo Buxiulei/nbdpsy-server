@@ -223,6 +223,31 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 
 CHANGELOG_ENTRIES = [
     {
+        "date": "2026-08-09",
+        "title": "补挂话题三修:追加场景 # 粘连修复 + 聚焦失败取证 + 失败原因细分",
+        "kind": "fix",
+        "summary": "放量实测暴露的两个真号缺陷 + 一条原因码细分。"
+                   "①**追加场景 # 粘连**:笔记已有话题实体(蓝色 chip)时往后补,``#`` 直接粘在"
+                   "chip 边界(tail 见 ``[话题]##失眠``)编辑器不弹联想浮层,浮层空被误判换词——"
+                   "「失眠」这种大众词也报不存在。修法:每个话题输入前先补一个空格分隔,``#`` 与"
+                   "前一个实体分开浮层才弹(从零场景多一个空格无害,小红书吞多余空格);失败回删"
+                   "连分隔空格一起删净不留残缺。②**content_box_focus_failed 不再是黑箱**:补话题"
+                   "第一步聚焦正文框失败时带回当场取证(主选择器是否命中/页面有几个 "
+                   "contenteditable/命中框矩形与视口高/是否滚进过视口),分清「选择器没命中」"
+                   "(页面结构异常)与「命中了但焦点没落进」(时序)。③**失败原因细分**:原 "
+                   "``no_floating_layer`` 更名 ``topic_dropdown_not_shown``,语义钉死为「浮层根本"
+                   "没弹」(candidates 空)。",
+        "endpoints": [
+            "/api/accounts/{account_id}/note-components",
+            "/api/note-components/{job_id}",
+        ],
+        "notes": "**话题失败原因码按 candidates 空/非空区分处置**:``topic_dropdown_not_shown``"
+                 "(candidates 空,浮层没弹)/ ``topic_dropdown_not_found``(有浮层没找到真下拉,"
+                 "多半抓到右侧预览面板镜像)—— 这两者是**定位/输入问题,该反馈我们修,绝不换词**;"
+                 "只有 ``no_exact_match``(candidates 非空、真下拉在但没这词)才是真·平台没这词、"
+                 "换词才有意义。此前追加场景一律糊成 no_exact_match 误导调用方白烧会话换词。",
+    },
+    {
         "date": "2026-08-08",
         "title": "已发布笔记可以补挂话题了(追加语义,存量视频笔记话题空置的补救)",
         "kind": "feature",

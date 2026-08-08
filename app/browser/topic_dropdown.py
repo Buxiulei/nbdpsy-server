@@ -28,11 +28,13 @@
 
 "抓错容器"和"词不存在"是两种完全不同的处置,旧代码都糊成 ``no_exact_match``:
 
-- ``no_floating_layer``:页面上压根没有候选浮层(采集不再按"含该话题文案"预筛,所以真页面上
-  它基本不会再出现 —— 换来的是"下拉在、里面没这个词"也看得见了,不会被误报成没浮层);
-- ``topic_dropdown_not_found``:有浮层,但没有一个通过判据 —— 我们**没找到真下拉**,
-  别再拿"这词平台没有"糊弄自己;
-- ``no_exact_match``:真下拉在,里面确实没有这个词。
+- ``topic_dropdown_not_shown``:页面上压根没有候选浮层(``candidates`` 为空)—— 追加场景
+  最常见的失败,``#`` 紧贴前一个话题实体粘连、编辑器没弹联想浮层(RCA 2026-08-09)。这是
+  **定位/输入问题**,调用方该反馈我们修,**绝不能换词**;
+- ``topic_dropdown_not_found``:有浮层,但没有一个通过判据 —— 我们**没找到真下拉**(抓到的
+  多半是右侧预览面板的镜像容器),同属"别拿'这词平台没有'糊弄自己",也**不该换词**;
+- ``no_exact_match``:真下拉在(``candidates`` 非空),里面确实没有这个词 —— **这一个才是
+  真·平台没这词**,调用方据此换词才有意义。
 """
 
 import re
@@ -209,7 +211,9 @@ def select_topic_option(payload: Optional[Dict[str, Any]], tag_name: str,
                 return hit
 
     if not layers:
-        reason, focus = "no_floating_layer", None
+        # 浮层根本没弹(candidates 空):追加场景 # 粘连前一个话题实体的典型征状,
+        # 是定位/输入问题不是"词不存在",调用方绝不能据此换词(RCA 2026-08-09)。
+        reason, focus = "topic_dropdown_not_shown", None
     elif not accepted:
         # 有浮层但没一个是下拉:抓错容器,和"词不存在"必须分开记
         reason, focus = "topic_dropdown_not_found", (rejected[0] if rejected else None)

@@ -521,7 +521,7 @@ def test_collect_js_only_enumerates_and_never_decides():
 
     for key in ("cls:", "rect:", "items:", "has_tag:"):
         assert key in COLLECT_LAYERS_JS, key
-    for decided in ("no_exact_match", "no_floating_layer", "success:"):
+    for decided in ("no_exact_match", "topic_dropdown_not_shown", "success:"):
         assert decided not in COLLECT_LAYERS_JS, f"判定回流到 JS 里了: {decided}"
 
 
@@ -533,7 +533,8 @@ def test_topic_failure_reasons_are_distinguishable():
     preview = {"cls": "x", "rect": {"x": 1200.0, "y": 500.0, "width": 200.0, "height": 50.0},
                "items": [{"text": "#心理科普", "x": 1300.0, "y": 520.0}]}
 
-    assert select_topic_option({"layers": []}, "心理科普", editor)["reason"] == "no_floating_layer"
+    assert select_topic_option({"layers": []}, "心理科普", editor)["reason"] \
+        == "topic_dropdown_not_shown"
     assert select_topic_option({"layers": [preview]}, "心理科普", editor)["reason"] \
         == "topic_dropdown_not_found"
     assert select_topic_option({"layers": [_dropdown_layer(["#别的 1万次浏览", "#词 2万次浏览"])]},

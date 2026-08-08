@@ -232,17 +232,36 @@ def test_dropdown_present_but_word_absent_is_no_exact_match():
     assert out["candidates"], "下拉里看到什么必须带出来"
 
 
-def test_no_layers_at_all_keeps_no_floating_layer():
-    """页面上压根没有浮层:沿用 no_floating_layer(这条语义没变)。"""
+def test_reason_split_keys_on_candidates_emptiness():
+    """缺陷3 核心不变量:candidates 空 → topic_dropdown_not_shown(浮层没弹,别换词);
+    candidates 非空无匹配 → no_exact_match(真没这词,才换词)。两条断言有牙,互为对照。"""
+    # 空浮层:candidates 必空,reason 必是"没弹"
+    shown = select_topic_option({"layers": []}, "失眠", editor_rect=IMAGE_EDITOR_RECT)
+    assert shown["reason"] == "topic_dropdown_not_shown"
+    assert not shown["candidates"]
+
+    # 真下拉在但没这词:candidates 必非空,reason 必是"换词"
+    layer = real_dropdown_layer("别的话题", editor_rect=IMAGE_EDITOR_RECT)
+    absent = select_topic_option({"layers": [layer]}, "失眠", editor_rect=IMAGE_EDITOR_RECT)
+    assert absent["reason"] == "no_exact_match"
+    assert absent["candidates"]
+
+
+def test_no_layers_at_all_is_topic_dropdown_not_shown():
+    """页面上压根没有浮层(candidates 空)→ topic_dropdown_not_shown(定位/输入问题,别换词)。
+
+    改名自 no_floating_layer(2026-08-09 缺陷3):调用方按 candidates 空/非空区分
+    "浮层没弹(反馈)"vs"真没这词(换词)",这条正是"浮层没弹"的判据锚点。
+    """
     out = select_topic_option({"layers": []}, "心理科普", editor_rect=IMAGE_EDITOR_RECT)
 
-    assert out["reason"] == "no_floating_layer"
+    assert out["reason"] == "topic_dropdown_not_shown"
     assert out["candidates"] == [] and out["item_count"] == 0
 
 
 def test_missing_payload_does_not_blow_up():
     """采集 JS 没回东西时,判据交明确失败,不抛异常打断整条发布。"""
-    assert select_topic_option(None, "心理科普")["reason"] == "no_floating_layer"
+    assert select_topic_option(None, "心理科普")["reason"] == "topic_dropdown_not_shown"
 
 
 # ── 拿不到正文框几何时的兜底 ──

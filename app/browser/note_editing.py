@@ -610,28 +610,73 @@ _BODY_FOCUS_JS = r"""() => {
 _FOCUS_TRIES = 2
 
 
-def _focus_body_end(page, human) -> bool:
-    """拟人滚进视口 → 点击聚焦正文框 → **验焦点** → 光标移末尾。返回是否聚焦成功。
+# 聚焦失败取证(RCA 2026-08-09 号6播客):补话题第一步就报 ``content_box_focus_failed`` 时,
+# 回执里只有一个原因码,分不清是**正文框选择器压根没命中**(该笔记编辑页结构异常/平台改版)
+# 还是**命中了但点完焦点没落进去**(时序太早/被顶出视口)——两者处置天差地别。同期号1/号8
+# 播客同选择器成功,故这不是播客页选择器普遍不同,是该笔记特异,不硬猜、只把当场证据带回:
+# 主选择器是否命中、页面上有几个 contenteditable、命中框的矩形与视口高、以及是否滚进过视口。
+_FOCUS_FORENSICS_JS = r"""() => {
+    const sel = "div.tiptap.ProseMirror[contenteditable='true']";
+    const primary = document.querySelector(sel);
+    const anyCe = document.querySelectorAll("[contenteditable='true']");
+    const rect = primary ? primary.getBoundingClientRect() : null;
+    const ae = document.activeElement;
+    return {
+        primary_matched: !!primary,
+        contenteditable_count: anyCe.length,
+        primary_rect: rect ? {x: Math.round(rect.x), y: Math.round(rect.y),
+                              w: Math.round(rect.width), h: Math.round(rect.height)} : null,
+        viewport_h: window.innerHeight,
+        active_tag: ae ? String(ae.tagName || '').toLowerCase() : null,
+    };
+}"""
+
+
+def _focus_forensics(page) -> dict:
+    """聚焦失败时抓一份当场证据;读不到只回最小骨架(取证绝不制造新异常)。"""
+    try:
+        data = page.evaluate(_FOCUS_FORENSICS_JS)
+        return dict(data) if isinstance(data, dict) else {"probe_error": "non_dict"}
+    except Exception as exc:  # noqa: BLE001
+        return {"probe_error": str(exc)[:120]}
+
+
+def _focus_body_end(page, human) -> tuple[bool, dict]:
+    """拟人滚进视口 → 点击聚焦正文框 → **验焦点** → 光标移末尾。
+
+    返回 ``(ok, forensic)``:``ok=True`` 时 ``forensic`` 为空 dict;失败时 ``forensic`` 带
+    当场证据(见 ``_FOCUS_FORENSICS_JS``),供调用方塞进 ``content_box_focus_failed`` 回执,
+    把这个黑箱失败变成下一次可诊断的事件(RCA 2026-08-09 号6播客两单全败无从下手)。
 
     与 atomic_tasks step6 同款纪律(2026-08-03 文字版事故):正文框可能被上传预览顶出
     视口,``getBoundingClientRect`` 中心落在顶栏,点击根本没进正文框,后续 ``#话题`` 打进
     虚空、下拉永不弹。所以每次都重新滚 + 重新取坐标 + 点完只读验 ``activeElement``。
     """
+    scrolled_into_view = False
     for _ in range(_FOCUS_TRIES):
         box = _scroll_into_view(page, human, [_BODY_EDITOR], intent="正文框(补话题)")
         if box is None:
             continue
+        scrolled_into_view = True
         cx, cy = _click_point(box)
         human.click((cx, cy), reason="聚焦正文框(补话题)")
         human.wait(0.2, 0.5, context="聚焦后停顿")
         try:
             if bool(page.evaluate(_BODY_FOCUS_JS)):
                 human.press_key("Control+End", reason="光标移到正文末尾(补话题)")
-                return True
+                return True, {}
         except Exception:  # noqa: BLE001 — 读焦点失败当没聚焦上,下一轮重滚重点
             pass
         logger.warning("[note_editing] 聚焦正文框后焦点不在编辑区,重滚动重点")
-    return False
+    forensic = _focus_forensics(page)
+    forensic["scrolled_into_view"] = scrolled_into_view
+    logger.warning(
+        f"[note_editing] 补话题聚焦正文框失败 | 选择器命中={forensic.get('primary_matched')} "
+        f"contenteditable数={forensic.get('contenteditable_count')} "
+        f"矩形={forensic.get('primary_rect')} 视口高={forensic.get('viewport_h')} "
+        f"滚进视口={scrolled_into_view}"
+    )
+    return False, forensic
 
 
 def append_topics(page, human, to_add: list[str]) -> dict:
@@ -657,19 +702,28 @@ def append_topics(page, human, to_add: list[str]) -> dict:
     """
     if not to_add:
         return {"status": "skipped", "in_editor_added": [], "failed": []}
-    if not _focus_body_end(page, human):
-        # 聚焦不上 = 一个都打不进去,全体失败(但正文原样未动,可整体重试)
+    focused, focus_forensic = _focus_body_end(page, human)
+    if not focused:
+        # 聚焦不上 = 一个都打不进去,全体失败(但正文原样未动,可整体重试)。带聚焦取证,
+        # 让 content_box_focus_failed 不再是黑箱(RCA 2026-08-09 号6播客)。
         return {
             "status": "error",
             "in_editor_added": [],
-            "failed": [{"tag": t, "reason": "content_box_focus_failed"} for t in to_add],
+            "failed": [
+                {"tag": t, "reason": "content_box_focus_failed", **focus_forensic}
+                for t in to_add
+            ],
         }
     added: list[str] = []
     failed: list[dict] = []
     for tag in to_add:
         tag_name = str(tag).lstrip("#").strip()
-        tag_text = f"#{tag_name}"
-        human.type_text(None, tag_text, click_first=False)
+        # 追加场景光标紧贴前一个话题实体(蓝色 chip),``#`` 直接粘在 chip 边界上编辑器**不弹**
+        # 话题联想浮层(RCA 2026-08-09:失败样本 tail 见 ``[话题]##失眠``,浮层空被误判
+        # ``no_exact_match``)。每个话题输入前先补一个空格分隔,``#`` 与前一个实体/正文分开,
+        # 浮层才触发。从零场景前面是正文/空,多一个空格无害(小红书吞多余空格)。
+        typed_text = f" #{tag_name}"
+        human.type_text(None, typed_text, click_first=False)
         human.wait(1.5, 2.5, context="等待话题下拉")
         # 每次都重新取正文框矩形当几何锚(不持句柄:聚焦重渲染会让旧句柄脱离)
         box = _locate(page, [_BODY_EDITOR]) or {}
@@ -696,7 +750,9 @@ def append_topics(page, human, to_add: list[str]) -> dict:
             failed.append(detail)
             try:
                 page.keyboard.press("Escape")
-                for _ in range(len(tag_text)):
+                # 连分隔空格一起回删干净:只删 ``#tag`` 会留下空格残留,逐个失败累积会撑坏
+                # 正文(``len(typed_text)`` 已含开头那个分隔空格)。
+                for _ in range(len(typed_text)):
                     page.keyboard.press("Backspace")
             except Exception as exc:  # noqa: BLE001 — 回删失败只记一笔,不阻断其余话题
                 logger.info(f"[note_editing] 回删话题异常: {exc}")

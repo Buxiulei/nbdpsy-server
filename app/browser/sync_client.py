@@ -740,7 +740,7 @@ class SyncClient:
             if topics:
                 r6 = atomic.step6_set_publish_options(tags=topics)
                 if not r6.get("success"):
-                    # 逐话题的失败原因(content_box_focus_failed / no_floating_layer / …)
+                    # 逐话题的失败原因(content_box_focus_failed / topic_dropdown_not_shown / …)
                     # 一并打出来:只丢一句 error 的话,运营看到的永远是"话题没上",
                     # 分不清是正文框没聚焦还是这个话题在平台上根本不存在。
                     logger.warning(
