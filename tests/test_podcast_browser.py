@@ -628,6 +628,76 @@ def test_exposed_click_point_tolerates_garbage_rect():
     assert podcast_mod.exposed_click_point({"x": 1}, {"x": 1, "y": 1, "w": 1, "h": 1}) is None
 
 
+# ---------------- 浮层定位规则:三条件纯函数 + 缝宽上界 ----------------
+
+
+def test_pick_tooltip_rect_takes_min_area_positioned_overlay():
+    """从所有文案命中的候选里挑真浮层:position∈{absolute,fixed} + **面积最小**。
+
+    这条规则就是取证脚本当场用的那条(文案 + 定位 + 面积最小);它取到的那颗真浮层
+    rect 再喂 ``exposed_click_point`` 必须复现真号点中过的 (643.7, 342.0)。
+
+    候选里刻意混进两个陷阱:一个**排在文档序最后**的大祖先容器(面积最大)、一个
+    面积更小但 ``position: static`` 的普通块 —— 前者是"取最后一个"近似版的毒饵、
+    后者是"不做 position 过滤"的毒饵,新规则两个都得躲开。
+    """
+    candidates = [
+        # 真浮层:绝对定位、面积 360×116;排在文档序中间,既不是最后也不是面积最小。
+        {"position": "fixed", "x": 262, "y": 268, "w": 360, "h": 116},
+        # 毒饵①:面积更小(10×10)但 static,不该被选(否则 position 过滤没牙)。
+        {"position": "static", "x": 0, "y": 0, "w": 10, "h": 10},
+        # 毒饵②:大祖先容器(900×500),排在**最后**,近似版"取最后一个"会中招。
+        {"position": "absolute", "x": 100, "y": 100, "w": 900, "h": 500},
+    ]
+    tip = podcast_mod._pick_tooltip_rect(candidates)
+    assert tip == {"x": 262.0, "y": 268.0, "w": 360.0, "h": 116.0}, tip
+
+    btn = {"x": 543.3333129882812, "y": 322, "w": 120, "h": 40}
+    point = podcast_mod.exposed_click_point(btn, tip)
+    assert point is not None
+    assert abs(point[0] - 643.7) < 0.5, point
+    assert point[1] == 342.0, point
+
+
+def test_pick_tooltip_rect_ignores_non_positioned_and_zero_area():
+    """position 非 absolute/fixed、或 w/h ≤ 0 的候选一律排除,即使它面积更小。"""
+    candidates = [
+        {"position": "static", "x": 0, "y": 0, "w": 1, "h": 1},        # 非定位
+        {"position": "relative", "x": 0, "y": 0, "w": 2, "h": 2},      # 非定位
+        {"position": "absolute", "x": 5, "y": 5, "w": 0, "h": 50},     # 零宽
+        {"position": "fixed", "x": 6, "y": 6, "w": 40, "h": 0},        # 零高
+        {"position": "absolute", "x": 262, "y": 268, "w": 360, "h": 116},  # 唯一合格
+    ]
+    assert podcast_mod._pick_tooltip_rect(candidates) == {
+        "x": 262.0, "y": 268.0, "w": 360.0, "h": 116.0}
+
+
+def test_pick_tooltip_rect_none_when_no_positioned_candidate():
+    """没有任何定位候选(全 static / 空表 / None)→ None,让调用方退回直接点按钮。"""
+    assert podcast_mod._pick_tooltip_rect(None) is None
+    assert podcast_mod._pick_tooltip_rect([]) is None
+    assert podcast_mod._pick_tooltip_rect(
+        [{"position": "static", "x": 1, "y": 1, "w": 9, "h": 9}]) is None
+    # 读残的候选(缺键 / 非数)不制造异常,只是被跳过
+    assert podcast_mod._pick_tooltip_rect(
+        [{"position": "absolute", "x": "oops"}]) is None
+
+
+def test_exposed_click_point_refuses_a_too_wide_sliver():
+    """缝宽超过按钮宽度一半 → 判定 tip 命中了气泡内层(右边界偏小),返回 None。
+
+    危害链:命中内层 content div → tip 右边界偏小 → 算出的缝**变宽**、点位左移趋向
+    浮层。``_MIN_EXPOSED_WIDTH_PX`` 是下界,对"缝被算宽"不设防;上界这道在此补齐,
+    命中即退回点按钮元素中心(调用方对 None 的处理),而不是硬点一个可疑坐标。
+    """
+    btn = {"x": 543.3, "y": 322, "w": 120, "h": 40}  # 右边界 663.3
+    # tip 命中气泡内层:仍从 x262 起、仍盖住按钮左侧(右边界 555 > 按钮左边 543.3,水平确有
+    # 重叠),但只盖住约 12px → 缝 = 663.3-(555+2) ≈ 106px,是按钮宽的 0.88 倍,越过一半上界。
+    tip = {"x": 262, "y": 268, "w": 293, "h": 116}
+    point = podcast_mod.exposed_click_point(btn, tip)
+    assert point is None, point
+
+
 def test_dismiss_tooltip_records_that_no_method_works():
     """四招全试仍在 → present_after=True 且 tried 记全,**不抛错**(它不挡合集入口)。"""
     tooltip = _El("div", "播客合集上线啦", cls="guide", children=[_El("div", "", cls="close-btn")])

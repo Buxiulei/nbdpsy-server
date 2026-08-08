@@ -78,6 +78,13 @@ _GUIDE_TOOLTIP_TEXT = "播客合集上线啦"
 _MIN_EXPOSED_WIDTH_PX = 12.0
 # 从浮层右边界再让开 2px 再点 —— 与取证脚本算点位的公式逐字一致(那一点是实打实点中过的)。
 _SLIVER_MARGIN_PX = 2.0
+# 暴露缝宽度相对按钮宽度的**上界**:超过这个比例就判定浮层 rect 抓小了(命中了气泡内层
+# content div,右边界偏小 → 缝被算宽 → 点位左移趋向浮层正中央),不信这条缝、退回点按钮。
+# 取 0.5 的依据:08-08 实测浮层盖住按钮左侧约 81px、右侧只留约 39px(39/120≈0.33),
+# 即真浮层盖住按钮 2/3 强。缝要是宽过按钮的一半,等于浮层盖住不到一半 —— 与"盖住左侧 81px"
+# 这条实测事实直接矛盾,只可能是 rect 抓错了。0.33 落在 0.5 以内留足余量,而"整颗按钮
+# 都算成暴露"(1.0)、命中内层(0.88)这两种失效形态都被这道上界挡在门外。
+_MAX_EXPOSED_WIDTH_RATIO = 0.5
 
 # 各步等待窗口(秒)
 _CREATE_PAGE_TIMEOUT_S = 15.0
@@ -169,7 +176,11 @@ def _find_tab(page, text: str):
 
 
 def ensure_podcast_tab(page, human: SyncHumanActions, tries: int = 3) -> bool:
-    """确保停在「发播客」tab;未激活则点 tab 重试,直到 ``.creator-tab.active`` 认它。
+    """确保停在「发播客」tab;未激活则点 tab 重试,直到 ``is_podcast_tab_active`` 认它。
+
+    判据是**两路取或**(见 ``is_podcast_tab_active``):任一 ``.creator-tab.active`` 文案
+    是「发播客」,**或**页面出现发播客独有的上传区文案 —— 08-08 取证后不再单认那个会栽在
+    陈旧 active 上的 class 判据。
 
     **没有 URL 兜底**(见模块头):这条路在播客上不存在,重试就只是再点一次 tab。
     """
@@ -274,6 +285,7 @@ def exposed_click_point(
     tooltip_rect: Optional[dict],
     *,
     min_width_px: float = _MIN_EXPOSED_WIDTH_PX,
+    max_width_ratio: float = _MAX_EXPOSED_WIDTH_RATIO,
 ) -> Optional[Tuple[float, float]]:
     """算「上传音频」按钮上**没被引导浮层盖住**的那条缝的点击点;算不出返回 None。
 
@@ -284,8 +296,12 @@ def exposed_click_point(
     只处理"浮层从左侧压住按钮、右侧留缝"这**一种实测到的形态**,别的一律返回 None
     让调用方退回直接点按钮:没观测过的遮挡形态下瞎算坐标,点出去的是哪儿谁也不知道。
 
-    ``min_width_px``:缝比它还窄就不信 —— 39px 是那次窗口尺寸下的值,尺寸/文案一变
-    随时可能归零,而拟人点击本身还带随机偏移,窄缝上偏一点就又点回浮层了。
+    缝宽有**下界也有上界**,两头都是防"缝被算歪":
+    - ``min_width_px``:缝比它还窄就不信 —— 39px 是那次窗口尺寸下的值,尺寸/文案一变
+      随时可能归零,而拟人点击本身还带随机偏移,窄缝上偏一点就又点回浮层了;
+    - ``max_width_ratio``:缝宽过按钮宽度的这个比例就不信 —— 浮层 rect 若抓成了气泡内层
+      content div(右边界偏小),缝会被**算宽**、点位左移趋向浮层正中央,下界拦不住这种。
+      实测真浮层盖住按钮 2/3 强、缝只占 1/3,缝要是宽过一半只可能是 rect 抓错了。
     """
     btn = _rect(button_rect)
     tip = _rect(tooltip_rect)
@@ -301,9 +317,47 @@ def exposed_click_point(
     if left <= bx:
         return None  # 浮层右边界还在按钮左边:水平不相交,同上
     right = bx + bw
-    if right - left < min_width_px:
-        return None
+    sliver = right - left
+    if sliver < min_width_px:
+        return None  # 缝太窄,不可靠
+    if sliver > bw * max_width_ratio:
+        return None  # 缝被算宽:浮层 rect 抓小了(命中气泡内层),定位可疑,退回点按钮中心
     return ((left + right) / 2.0, by + bh / 2.0)
+
+
+def _pick_tooltip_rect(candidates: Optional[list]) -> Optional[dict]:
+    """从所有文案命中的浮层候选里挑出真正那颗的 rect;挑不出返回 None(纯函数)。
+
+    **与取证脚本逐字同一条规则**(那颗真号点中过的 (643.7, 342.0) 就是它挑出来的 rect
+    算出来的):文案已在 JS 侧筛过,这里再叠两条 —— ① ``position`` 必须是 ``absolute``
+    或 ``fixed``(浮层是脱离文档流的悬浮元素);② 在合格者里取**面积最小**的一个。
+
+    为什么非这条不可(取证脚本的血泪注释):近似版只按文案取(取最后一个 / 取第一个),
+    会被大容器抢先命中,暴露区退化成整颗按钮宽度,首次真号就点在了浮层正中央。文案会
+    在整块 ``create-podcast-collection`` 区(祖先容器)与气泡内层里同时出现,只有"定位 +
+    面积最小"这两条一起才把祖先容器和内层块都排除、锁定那颗真浮层。
+
+    ``w/h > 0`` 是兜底:面积为 0 的元素(未渲染 / display 塌陷)不参与,免得它以"面积
+    最小"混进来。读残的候选(缺键 / 非数)直接跳过,取证读数绝不制造异常。
+    """
+    best: Optional[dict] = None
+    best_area: Optional[float] = None
+    for cand in candidates or []:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("position") or "").lower() not in ("absolute", "fixed"):
+            continue
+        rect = _rect(cand)
+        if rect is None:
+            continue
+        x, y, w, h = rect
+        if w <= 0 or h <= 0:
+            continue
+        area = w * h
+        if best_area is None or area < best_area:
+            best_area = area
+            best = {"x": x, "y": y, "w": w, "h": h}
+    return best
 
 
 def _rect(raw: Optional[dict]) -> Optional[Tuple[float, float, float, float]]:
@@ -316,33 +370,44 @@ def _rect(raw: Optional[dict]) -> Optional[Tuple[float, float, float, float]]:
         return None
 
 
-# 只读 dump:一次拿回「上传音频」按钮与引导浮层的 rect。**取最内层那个浮层元素**
-# (文档序里祖先在前、后代在后,故取最后一个命中的)—— 祖先容器的 rect 是整个
-# create-podcast-collection 区块(1060px 宽),拿它算缝会把整颗按钮都算成被盖住。
+# 只读 dump:一次拿回「上传音频」按钮的 rect + **所有**文案命中的浮层候选(各带 position
+# 与 rect)。**挑哪个交给 Python 侧的 ``_pick_tooltip_rect``**(定位 + 面积最小),JS 只负责
+# 把候选连同 getComputedStyle().position 全捞回来 —— 别在 JS 里"取最后一个 / 取第一个",
+# 那会被 create-podcast-collection 祖先容器(1060px 宽)或气泡内层块抢先命中,rect 一歪
+# 整条缝就算错。文案 + len<120 只是粗筛,真正的三条件规则在纯函数里、有回归锁钉着。
 _UPLOAD_BUTTON_RECT_JS = r"""() => {
     const btn = document.querySelector('button.upload-button');
     if (!btn) return null;
-    let tip = null;
-    for (const el of document.querySelectorAll('div')) {
-        const t = el.innerText || '';
-        if (t.includes('%s') && t.length < 120) tip = el;
-    }
-    if (!tip) return null;
     const r = e => { const b = e.getBoundingClientRect();
                      return {x: b.x, y: b.y, w: b.width, h: b.height}; };
-    return {btn: r(btn), tip: r(tip)};
+    const tips = [];
+    for (const el of document.querySelectorAll('div')) {
+        const t = el.innerText || '';
+        if (t.includes('%s') && t.length < 120) {
+            const box = r(el);
+            tips.push({position: getComputedStyle(el).position,
+                       x: box.x, y: box.y, w: box.w, h: box.h});
+        }
+    }
+    return {btn: r(btn), tips: tips};
 }""" % _GUIDE_TOOLTIP_TEXT
 
 
 def upload_audio_click_point(page) -> Optional[Tuple[float, float]]:
-    """读现场 rect,算出穿透引导浮层点中「上传音频」按钮的坐标;算不出返回 None。"""
+    """读现场 rect,算出穿透引导浮层点中「上传音频」按钮的坐标;算不出返回 None。
+
+    两段都可能"算不出"、都退回 None 让调用方直接点按钮:① ``_pick_tooltip_rect`` 在所有
+    文案候选里按"定位 + 面积最小"挑不出真浮层;② ``exposed_click_point`` 判定缝太窄/太宽
+    (rect 抓歪了)。哪一段都不瞎给坐标。
+    """
     try:
         got = page.evaluate(_UPLOAD_BUTTON_RECT_JS)
     except Exception:  # noqa: BLE001 — 读数失败只当"这次绕不了"
         return None
     if not isinstance(got, dict):
         return None
-    return exposed_click_point(got.get("btn"), got.get("tip"))
+    tip = _pick_tooltip_rect(got.get("tips"))
+    return exposed_click_point(got.get("btn"), tip)
 
 
 # ────────────────────────── 播客合集创建 ──────────────────────────
