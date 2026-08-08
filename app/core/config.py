@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0
 
+    # ── 新号接入调度(onboarding_scheduler)──
+    # 扫描间隔(秒,0=关闭):有 cookie 却还卡在 cookie_status='unknown' 的号,每轮给他
+    # 登记一次 cookie_check,转 valid 后引导链自动接管。**它不是周期巡检的替身**:
+    # 只覆盖未转正的号,转正即出局,故不与同号会话总闸(系统 4 次/时)正面抢额度;
+    # 打开全矩阵巡检才会——那是每号每轮各烧一次会话。本身只跑两条 SELECT,300s 的
+    # 代价约等于零,决定新号"灌完 cookie 到自动转正"的等待上限。
+    ONBOARDING_CHECK_INTERVAL: int = 300
+    # 同号两次自动检测之间的最短间隔(小时):没有它,一个检测不过去的号会以上面那个
+    # 间隔无限重试,独自打满自己的会话额度。取 1 小时的依据:留在 unknown 里反复入选
+    # 的**只有 error(基础设施失败)**——invalid/captcha/restricted 都会写回账号状态、
+    # 自己从候选里掉出去。所以这个值调的是"基础设施抖动多久重试一次":1 小时既够
+    # camoufox/显示层那类抖动自愈,又把最坏情况从 12 次/时(必打满 4 次/时的总闸)
+    # 压到 1 次/时(总闸的四分之一,且新号此时没有别的任务与它争)。
+    ONBOARDING_CHECK_RETRY_HOURS: int = 1
+
     # 孤儿 camoufox 回收:巡检间隔(秒，0 表示关闭)与判定超龄阈值(秒)。
     # 无主(账号锁未持有)且存活超 REAP_AGE 的 camoufox 视作崩溃残留,SIGKILL 回收防内存泄露。
     BROWSER_REAP_INTERVAL: int = 300

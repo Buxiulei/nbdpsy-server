@@ -19,7 +19,8 @@
 - [ ] **`PUBLIC_BASE_URL`** = 对外访问地址（插件下载 URL、`GET /api/extension` 都用它）。
 - [ ] `DATABASE_URL`（默认 SQLite `./data/nbdpsy.db`）、`DATA_DIR`、`UPLOAD_DIR`、`API_HOST/API_PORT`、`XVFB_DISPLAY=:99`。
 - [ ] `PUBLISH_CONCURRENCY`（默认 2）、`PUBLISH_RETRY_SCHEDULE`（120,600,1800）、`PUBLISH_JOB_TIMEOUT`（600s）。
-- [ ] `COOKIE_CHECK_INTERVAL`：默认 `0`=关闭周期巡检（按需 on-demand `POST /api/accounts/{id}/cookie-checks`）；设正整数秒才起后台巡检。
+- [ ] `COOKIE_CHECK_INTERVAL`：默认 `0`=关闭周期巡检（按需 on-demand `POST /api/accounts/{id}/cookie-checks`）；设正整数秒才起后台巡检。**新号转正不依赖它**——见下条。
+- [ ] `ONBOARDING_CHECK_INTERVAL`（默认 300 秒，0=关）/ `ONBOARDING_CHECK_RETRY_HOURS`（默认 1 小时）：新号接入调度，给「有 cookie 但仍 `cookie_status='unknown'`」的号自动排**一次**检测，转 valid 后引导链（历史笔记入台账 + newcomer 补量）接管。**关掉它，新号就只能靠人工 POST 一次 cookie-checks 才转得正**。
 - [ ] `DEBUG=False`（生产）。
 
 ## 2. 起服务

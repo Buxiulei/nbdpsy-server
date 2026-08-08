@@ -39,6 +39,7 @@ from app.services.draft_clean import DraftCleanScheduler
 from app.services.dreamina import ClipReaper, DreaminaScheduler
 from app.services.interaction_backfill_scheduler import InteractionBackfillScheduler
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
+from app.services.onboarding_scheduler import OnboardingScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
 
 # 派发判据的唯一真源(见 app/services/queue_status.py 模块 docstring):什么算一次会话、
@@ -167,6 +168,7 @@ class Supervisor:
         self._note_metrics_scheduler: NoteMetricsScheduler | None = None
         self._draft_clean_scheduler: DraftCleanScheduler | None = None
         self._interaction_backfill_scheduler: InteractionBackfillScheduler | None = None
+        self._onboarding_scheduler: OnboardingScheduler | None = None
         self._egress_guard: EgressGuard | None = None
         self._video_scheduler = None
         self._dreamina_scheduler: DreaminaScheduler | None = None
@@ -237,6 +239,13 @@ class Supervisor:
                 self._session_factory, settings.INTERACTION_BACKFILL_INTERVAL
             )
             self._interaction_backfill_scheduler.start()
+        if settings.ONBOARDING_CHECK_INTERVAL > 0:
+            self._onboarding_scheduler = OnboardingScheduler(
+                self._session_factory,
+                settings.ONBOARDING_CHECK_INTERVAL,
+                settings.ONBOARDING_CHECK_RETRY_HOURS,
+            )
+            self._onboarding_scheduler.start()
         if self._include_video:
             # 平移自 app/video/worker.py:必须先 import stages 注册七阶 handler
             # (原地 mutate STAGE_HANDLERS),否则自链首阶段即 KeyError。延迟导入:
@@ -277,6 +286,9 @@ class Supervisor:
         if self._egress_guard is not None:
             await self._egress_guard.stop()
             self._egress_guard = None
+        if self._onboarding_scheduler is not None:
+            await self._onboarding_scheduler.stop()
+            self._onboarding_scheduler = None
         if self._interaction_backfill_scheduler is not None:
             await self._interaction_backfill_scheduler.stop()
             self._interaction_backfill_scheduler = None
