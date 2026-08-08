@@ -292,12 +292,13 @@ async def test_pure_component_request_skips_ledger_precheck(tmp_path, monkeypatc
         assert r.status_code == 202, r.text
         # payload 不多出编辑五键(collection_name 是 2026-08-04 起的辅助键、
         # remove_collection_* 是 2026-08-07 起的移出键、set_original_declaration 是
-        # 2026-08-08 起的补声明开关,这些**基础键一律恒在**——本条守的是"不多出编辑五键")
+        # 2026-08-08 起的补声明开关、cover 是 2026-08-08 起的改封面路径,这些**基础键
+        # 一律恒在**——本条守的是"不多出编辑五键")
         assert await _payload_of(r.json()["job_id"]) == {
             "note_id": "台账里没有这篇", "collection_id": "c1", "collection_name": None,
             "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": None, "activity_id": None, "related_counselor": None,
-            "set_original_declaration": False,
+            "set_original_declaration": False, "cover": None,
         }
 
 

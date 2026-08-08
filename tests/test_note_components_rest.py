@@ -156,6 +156,7 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
             "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": "n-quote", "activity_id": "43561",
             "related_counselor": None, "set_original_declaration": False,
+            "cover": None,
         }
 
         poll = await c.get(

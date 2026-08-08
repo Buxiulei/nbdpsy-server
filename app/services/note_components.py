@@ -65,6 +65,7 @@ def start_components(
     remove_collection_id: str | None = None,
     remove_collection_name: str | None = None,
     set_original_declaration: bool = False,
+    cover: str | None = None,
 ) -> str:
     """REST 触发一次三组件设置 / 笔记编辑;登记 browser_jobs 台账,返回轮询 id。
 
@@ -85,6 +86,7 @@ def start_components(
         "activity_id": activity_id,
         "related_counselor": related_counselor,
         "set_original_declaration": set_original_declaration,
+        "cover": cover,
     }
     if edits:
         payload.update(edits)
@@ -140,10 +142,14 @@ async def execute(account_id: int, payload: dict) -> dict:
     }
     # 原创声明补录:纯布尔开关(只开不关),不进 COMPONENT_FIELDS —— 那一族是 id 字符串。
     set_original_declaration = bool(payload.get("set_original_declaration"))
-    if not any(components.values()) and not edits and not set_original_declaration:
+    # 改封面:payload 里叫 ``cover``(服务器侧图片路径,REST 层已校过存在性与扩展名),
+    # 浏览器层参数叫 ``cover_path``。也是"单独给它就构成一次有效请求"的一项。
+    cover_path = str(payload.get("cover")).strip() if payload.get("cover") else None
+    if (not any(components.values()) and not edits and not set_original_declaration
+            and not cover_path):
         return {
             "error": "no_component_requested: collection_id / remove_collection_id / "
-                     "quoted_note_id / activity_id / set_original_declaration / "
+                     "quoted_note_id / activity_id / set_original_declaration / cover / "
                      "编辑字段(title / content / 图片增删)"
                      "至少要给一个,否则这次编辑什么都不会改"
         }
@@ -159,7 +165,7 @@ async def execute(account_id: int, payload: dict) -> dict:
                 result = await asyncio.to_thread(
                     _apply_sync, account_id, cookies, note_id, components, edits,
                     collection_name, remove_collection_name,
-                    set_original_declaration,
+                    set_original_declaration, cover_path,
                 )
         # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
         return await _sync_ledger(account_id, note_id, result)
@@ -183,6 +189,7 @@ def _apply_sync(
     collection_name: str | None = None,
     remove_collection_name: str | None = None,
     set_original_declaration: bool = False,
+    cover_path: str | None = None,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
@@ -198,7 +205,8 @@ def _apply_sync(
             client.page, account_id, note_id, **components,
             collection_name=collection_name,
             remove_collection_name=remove_collection_name,
-            set_original_declaration=set_original_declaration, **(edits or {})
+            set_original_declaration=set_original_declaration,
+            cover_path=cover_path, **(edits or {})
         )
     finally:
         client.stop()

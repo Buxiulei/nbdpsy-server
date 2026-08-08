@@ -32,12 +32,13 @@ class _El:
     """假元素:只提供被测代码真用到的能力(读文本/读 value/取矩形/子查询/被点)。"""
 
     def __init__(self, text="", *, on_click=None, value="", children=None, href=None,
-                 on_type=None, on_hover=None, cls=None):
+                 on_type=None, on_hover=None, on_files=None, cls=None):
         self._text = text
         self._cls = cls
         self.on_click = on_click
         self.on_type = on_type   # 被 type_text 输入时的副作用(他人笔记检索框用)
         self.on_hover = on_hover  # 被 hover 时的副作用(合集 chip 的 × 是 hover 才显)
+        self.on_files = on_files  # 被 set_input_files 灌文件时的副作用(改封面用)
         self._value = value
         self._children = children or {}
         self._href = href
@@ -65,6 +66,10 @@ class _El:
 
     def query_selector_all(self, sel):
         return list(self._children.get(sel) or [])
+
+    def set_input_files(self, paths):
+        if self.on_files:
+            self.on_files(paths)
 
 
 class _Human:
@@ -142,6 +147,9 @@ class Editor:
         original_consent_effective=True,
         original_row_absent=False,
         original_persists_on_readback=True,
+        cover_no_cover=True,
+        cover_entry_absent=False,
+        cover_persists_on_readback=True,
     ):
         self.permission = permission
         self.row_band_probes = []  # 防遮挡带探测记录(选择器)
@@ -191,6 +199,19 @@ class Editor:
         self.original_modal_open = False
         self.original_consent_ticked = False
         self.original_closed_by_x = False
+        # ── 改封面(更新页「设置封面」弹窗链)──
+        # no_cover = 封面区 .operator 还带着 noCover(平台自动首帧);
+        # declared_for_real = 平台侧真的已是自定义封面(提交才落地);
+        # persists_on_readback = 提交后重进页面还认不认(false 复刻"静默丢弃")。
+        self.cover_entry_absent = cover_entry_absent
+        self.cover_persists_on_readback = cover_persists_on_readback
+        self.cover_declared_for_real = not cover_no_cover
+        self.cover_no_cover = cover_no_cover
+        self.cover_fingerprint = "cdn/frame-0"
+        self.cover_modal_open = False
+        self.cover_upload_tab = False
+        self.cover_files = []
+        self.cover_chosen = False
         self.submitted = 0
         self.page = _FakePage(self)
 
@@ -205,6 +226,13 @@ class Editor:
         self.original_consent_ticked = False
         self.original_checked = (
             self.original_declared_for_real and self.original_persists_on_readback
+        )
+        # 重进页面:封面弹窗态清空,封面区回读取平台真值(可配提交后认不认)
+        self.cover_modal_open = False
+        self.cover_upload_tab = False
+        self.cover_chosen = False
+        self.cover_no_cover = not (
+            self.cover_declared_for_real and self.cover_persists_on_readback
         )
         self.page.emit(
             "https://creator.xiaohongshu.com/api/galaxy/v2/creator/activity_center/list",
@@ -234,6 +262,8 @@ class Editor:
     def submit(self):
         """点发布:服务端处理 —— 这里回放"合集被静默丢弃"与"权限被改"两种实测坏行为。"""
         self.submitted += 1
+        if self.cover_chosen:
+            self.cover_declared_for_real = True
         if self.drop_collection_on_submit:
             self.collection = None
         if self.permission_after_submit is not None:
@@ -325,6 +355,45 @@ class Editor:
         self.original_closed_by_x = True
         self.original_checked = self.original_declared_for_real
 
+    # ---- 改封面的点击副作用(更新页「设置封面」弹窗链) ----
+
+    def _open_cover_modal(self):
+        self.cover_modal_open = True
+        self.cover_upload_tab = False   # 默认停在「截取封面」tab
+
+    def _switch_cover_upload_tab(self):
+        self.cover_upload_tab = True    # 图片 file input 切过来才懒挂载
+
+    def _choose_cover_files(self, paths):
+        self.cover_files = list(paths)
+
+    def _confirm_cover(self):
+        if not self.cover_files:
+            return                      # 没选图时「确定」是禁用态,点了也没用
+        self.cover_modal_open = False
+        self.cover_chosen = True
+        self.cover_no_cover = False
+        self.cover_fingerprint = "cdn/custom-1"
+
+    def _cancel_cover(self):
+        self.cover_modal_open = False
+
+    def _cover_modal_el(self):
+        return _El("设置封面 截取封面 上传封面 取消 确定", children={
+            bnc._COVER_MODAL_TAB: [
+                _El("截取封面"),
+                _El("上传封面", on_click=self._switch_cover_upload_tab),
+            ],
+            bnc._COVER_MODAL_FILE_INPUT: (
+                [_El("", cls="upload-input", on_files=self._choose_cover_files)]
+                if self.cover_upload_tab else []
+            ),
+            bnc._COVER_MODAL_CONFIRM: [
+                _El("确定", cls="d-button btn-confirm", on_click=self._confirm_cover)
+            ],
+            bnc._COVER_MODAL_CANCEL: [_El("取消", cls="cancelBtn", on_click=self._cancel_cover)],
+        })
+
     def _click_activity(self, name):
         if self.silent_activity_clicks > 0:
             self.silent_activity_clicks -= 1
@@ -349,8 +418,20 @@ class Editor:
             if self.close_icon_hover_gated and not self.chip_hovered:
                 return []
             return [_El("", on_click=self._click_close_icon)]
+        # 封面弹窗与 _ANY_MODAL 同是 .d-modal:开着时先认领它(被测代码按文案区分),
+        # 没开则走原来的"点 × 之后弹出了我们没验证过的弹窗"那条语义。
+        if sel == bnc._COVER_MODAL and self.cover_modal_open:
+            return [self._cover_modal_el()]
         if sel == bnc._ANY_MODAL:
             return [_El(self.modal_text)] if self.modal_text else []
+        if sel == bnc._COVER_SECTION:
+            return [_El("设置封面 PK封面 优质封面示例")]
+        if sel in bnc._COVER_THUMB_CANDIDATES:
+            return [_El("")]
+        if sel == bnc._COVER_OPERATOR_TEXT:
+            if self.cover_entry_absent:
+                return []
+            return [_El("修改封面", on_click=self._open_cover_modal)]
         if sel == bnc._COLLECTION_POPOVER_ITEM:
             if not self.popover_open:
                 return []
@@ -478,6 +559,12 @@ class _FakePage:
         pass
 
     def evaluate(self, js, _arg=None):
+        if "noCover" in js:
+            # 封面区当前态(改封面链的幂等判据 + 回读判据)
+            return {
+                "no_cover": self.editor.cover_no_cover,
+                "fingerprint": self.editor.cover_fingerprint,
+            }
         if "original-wrapper" in js:
             # 开关行没有时读不到 input → null(与真页面同语义,不是 False)
             if self.editor.original_row_absent:

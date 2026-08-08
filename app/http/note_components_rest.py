@@ -56,6 +56,12 @@ _MAX_IMAGES = 18
 # 注释)。**NULL 也不放行** —— NULL 是"未知",而这是一次全量覆盖提交,类型不可确认
 # 就不编辑(编辑设计 1.2:深链 noteType=normal 只对图文验证过)。
 _IMAGE_NOTE_TYPES = ("normal",)
+# 台账 note_type 里算"视频笔记"的取值。**只有视频笔记有封面区** —— 图文笔记的封面就是
+# 第一张图(与发布端点同口径),更新页上根本没有 .publish-page-content-cover 那一块。
+# NULL 同样不放行:理由与图文那条一致,类型不可确认就不做全量覆盖提交。
+_VIDEO_NOTE_TYPES = ("video",)
+# 封面图扩展名白名单(弹窗内 file input 实测 accept=image/png, image/jpeg, image/*)
+_COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 MANIFEST_ENTRIES = [
     {
@@ -153,6 +159,15 @@ MANIFEST_ENTRIES = [
                                     "(不许拿 add_images 凑数))",
             "expected_image_count": "body,int|None(你认为这篇现在有几张图;给了 add_images "
                                     "或 remove_image_indexes 时**必填**,1-18)",
+            "cover": "body,str|None(**换自定义封面**,2026-08-08 上线。服务器侧本地图片路径,"
+                     f"扩展名限 {'/'.join(_COVER_EXTS)},文件不存在 → 422。"
+                     "**只对视频笔记有效**:台账 note_type=video 才受理,**图文笔记传了直接 "
+                     "422**(图文的封面就是第一张图,与发布端点同口径;真要换请用 "
+                     "remove_image_indexes+add_images 换掉第一张),note_type 为 null 同样 422。"
+                     "**幂等**:这篇已经是自定义封面(不是平台自动截的首帧)→ "
+                     "components.cover.status='skipped'、applied.cover=true、**零点击**;"
+                     "若这次请求只有它一件事且落了 skipped,**一次发布都不点**,批量重跑安全。"
+                     "单独给它就构成一次有效请求)",
         },
         "returns": '{job_id, status:"queued"}',
         "errors": "403=无该号授权;404=账号不存在,或**带编辑字段时**台账里查无此 note_id;"
@@ -164,6 +179,9 @@ MANIFEST_ENTRIES = [
                   "给了图片操作却没给 expected_image_count / remove 下标重复或越界 / "
                   "删完原图剩 <1 / 改完总数 >18 / add_images 落盘失败 / "
                   "台账 note_type 不是图文(视频笔记与 null 一律拒绝);"
+                  "422 还包括 cover 自身不合法:扩展名不在白名单 / 文件不存在 / "
+                  "**台账 note_type 不是视频**(图文笔记与 null 一律拒绝,图文的封面是第一张图);"
+                  "带 cover 时台账查无此 note_id 同样 404;"
                   "429=运营者未完成任务配额已满。**以上失败都在建 job 前**,一步都没做,"
                   "笔记原样未动",
         "notes": "异步契约:起后台浏览器深链进笔记更新页 → 设置组件 → 点发布 → **重进页面"
@@ -210,6 +228,20 @@ MANIFEST_ENTRIES = [
                  "若它不回显,这里会把真补上的笔记报成 false —— **首批先跑 1-2 篇,人工到"
                  "笔记里确认原创标记真的出现了再放量**,别看到 false 就反复重跑"
                  "(每次重跑都是一次真提交)。"
+                 "**改封面(cover)另有四条**(2026-08-08 上线,仅视频笔记):"
+                 "① **只对视频笔记**——图文笔记的封面就是第一张图,传 cover 直接 422,"
+                 "别拿这条去改图文;"
+                 "② **幂等 skipped**——进更新页先读封面区,已经是自定义封面(不是平台自动"
+                 "截的首帧)就 status='skipped'、**零点击**、且若只请求了它则**一次发布都不点**;"
+                 "③ **回读判据是封面区真的变了**——编辑器内看「设置封面」弹窗关掉后封面缩略图"
+                 "换没换,提交后重进页面再确认平台侧不再是自动首帧态;点了不等于成了,"
+                 "所以 applied.cover 照样是 true/false/null 三态;"
+                 "④ **绝不碰**「智能推荐封面」的候选图与「PK封面」开关(点它们=换成平台的图"
+                 "而不是你给的封面,是比失败更难发现的静默错误);定位不到入口时带**当场取证**"
+                 "(封面区 outerHTML)报 error,绝不静默假装换过。"
+                 "⚠️ **改封面这条链尚未跑过真号 e2e**(选择器由 2026-08-08 真号只读取证锁定,"
+                 "但真上传+提交那一段没实跑过):**首批先跑 1-2 篇、到笔记里人工确认封面真的"
+                 "换了再放量**,看到 false 别直接重跑(每次重跑都是一次真提交)。"
                  "**批量补录的节奏**:本端点起真浏览器会话,受**同账号每小时会话帽**限制"
                  "(系统层 4、运营发起 12,见 queue.detail.kind_of_cap);所以跨多个账号的"
                  "补录**按号分散比堆在一个号上快得多**,同号内则本就严格串行"
@@ -250,7 +282,7 @@ MANIFEST_ENTRIES = [
         "summary": "轮询笔记编辑结果(三组件 + 标题/正文/图片,逐项生效情况)",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, result_status?, applied?:{collection/collection_remove/quote/"
-                   "activity/original_declaration/title/content/image_add/image_remove: "
+                   "activity/original_declaration/cover/title/content/image_add/image_remove: "
                    "true|false|null}, "
                    "failed?:[{component,reason}], submitted?, permission_before?, "
                    "permission_after?, permission_preserved?, permission_restored?, "
@@ -272,6 +304,11 @@ MANIFEST_ENTRIES = [
                  "**首批先跑 1-2 篇人工核对原创标记再放量**,看到 false 别直接重跑"
                  "(每次重跑都是一次真提交);components.original_declaration.reason / "
                  "observed 给出当场取证(勾没勾上、按钮解没解禁、弹窗关没关)。"
+                 "applied.cover 同款三态,true 也有两种来路:换上后重进页面确认封面区不再是"
+                 "平台自动首帧(submitted=true),或**本就已是自定义封面**(幂等零点击,"
+                 "submitted=false)。⚠️ 改封面尚未跑过真号 e2e,**首批先跑 1-2 篇人工核对"
+                 "封面真的换了再放量**;components.cover.reason / observed 给出当场取证"
+                 "(封面区状态、弹窗开没开、file input 挂没挂、封面区 outerHTML)。"
                  "一项都没生效时整体落 error(reason 里带 note_components_all_failed)。"
                  "submitted=有没有观察到那次提交请求的响应;"
                  "permission_preserved=false 表示可见性档位被这次提交改动了(严重),"
@@ -432,6 +469,14 @@ class NoteComponentsRequest(BaseModel):
                     "remove_image_indexes 时**必填**。浏览器层实数不符 → 图片操作整体拒绝,"
                     "一次点击都不发生(删除类操作的第一道防呆)",
     )
+    cover: str | None = Field(
+        default=None,
+        description="给这篇换**自定义封面**的图片路径(服务器侧本地路径,"
+                    f"扩展名限 {'/'.join(_COVER_EXTS)},文件不存在直接 422)。"
+                    "**只对视频笔记有效**:图文笔记的封面就是第一张图(与发布端点同口径),"
+                    "传了直接 422。**幂等**:这篇已经是自定义封面 → status='skipped'、"
+                    "applied.cover=true 且**零点击**",
+    )
 
     @model_validator(mode="after")
     def _original_declaration_is_open_only(self):
@@ -473,12 +518,35 @@ class NoteComponentsRequest(BaseModel):
                 self.content is not None,
                 self.add_images,
                 self.remove_image_indexes,
+                self.cover,
             )
         ):
             raise ValueError(
                 "collection_id / remove_collection_id / quoted_note_id / activity_id / "
                 "related_counselor / set_original_declaration / title / content / "
-                "add_images / remove_image_indexes 至少要给一个"
+                "add_images / remove_image_indexes / cover 至少要给一个"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cover(self):
+        """封面图:扩展名白名单 + **建 job 前**确认文件真在盘上,不合规一律 422。
+
+        存在性放在入口判,是为了别让它排队两分钟、开完浏览器、进了更新页才在
+        ``set_input_files`` 那一行撞墙 —— 那时已经白烧一次真会话(还占着该号的会话帽)。
+        """
+        if self.cover is None:
+            return self
+        path = Path(self.cover)
+        if path.suffix.lower() not in _COVER_EXTS:
+            raise ValueError(
+                f"cover 扩展名 {path.suffix!r} 不在白名单 {'/'.join(_COVER_EXTS)} 内"
+                f"(平台封面上传 accept 的就是这几种图)"
+            )
+        if not path.is_file():
+            raise ValueError(
+                f"cover 指向的文件不存在:{self.cover};"
+                f"这是服务器侧本地路径,请先把图落到本服务能读到的位置"
             )
         return self
 
@@ -605,6 +673,34 @@ async def _assert_editable_note(session, account_id: int, note_id: str) -> None:
         )
 
 
+async def _assert_video_note(session, account_id: int, note_id: str) -> None:
+    """请求带 ``cover`` 时的台账前置校验:这篇必须在台账里、且是**视频**笔记。
+
+    只有视频笔记的更新页才有封面区(真号取证:``.publish-page-content-cover`` 里那个
+    「默认截取第一帧作为封面」)。图文笔记的封面就是第一张图,改它得走 add/remove_images ——
+    与其让调用方排队两分钟后拿到一句 ``cover_section_not_found``,不如在入口按台账拦掉。
+    """
+    row = await session.scalar(
+        select(PublishedNote).where(
+            PublishedNote.account_id == account_id,
+            PublishedNote.note_id == note_id,
+        )
+    )
+    if row is None:
+        raise NotFoundError(
+            f"账号 {account_id} 的台账里没有 note_id={note_id} 的笔记;"
+            f"改封面要按台账认这篇是不是视频笔记,查不到就不改"
+        )
+    if row.note_type not in _VIDEO_NOTE_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"note_id={note_id} 的台账 note_type={row.note_type!r},不是视频笔记"
+                   f"(视频为 {'/'.join(_VIDEO_NOTE_TYPES)});**图文笔记的封面就是第一张图**"
+                   f"(与发布端点同口径),要换封面请用 remove_image_indexes + add_images 换掉"
+                   f"第一张。note_type 为 null 说明台账还没同步到这篇的平台类型,先同步再改",
+        )
+
+
 async def _materialize_edit_images(edits: dict) -> None:
     """把 ``add_images`` 就地换成本地文件路径(**建 job 前**落盘,设计 3.1)。
 
@@ -641,6 +737,8 @@ async def start_note_components_endpoint(
             raise NotFoundError(f"账号 {account_id} 不存在")
         if edits is not None:
             await _assert_editable_note(session, account_id, payload.note_id)
+        if payload.cover:
+            await _assert_video_note(session, account_id, payload.note_id)
         # 引用哪篇:显式 quoted_note_id 优先;推导**仅在显式给了 related_counselor 时**
         # 进行(2026-08-04 收口,运营清单 P1-2):编辑路径的语义是"对已发布笔记只做被
         # 请求的事"——只传 collection_id/activity_id/编辑项时绝不顺带推导出一个引用
@@ -658,7 +756,7 @@ async def start_note_components_endpoint(
     # 那一关同样拦掉。
     if edits is None and not any(
         (payload.collection_id, payload.remove_collection_id, quoted_note_id,
-         payload.activity_id, payload.set_original_declaration)
+         payload.activity_id, payload.set_original_declaration, payload.cover)
     ):
         # 用 422 而不是裸 ValueError(→400):与请求体校验那一关同样的失败语义,
         # 调用方不该因为"拦在哪一层"看到两种状态码。
@@ -684,6 +782,7 @@ async def start_note_components_endpoint(
         remove_collection_id=payload.remove_collection_id,
         remove_collection_name=payload.remove_collection_name,
         set_original_declaration=bool(payload.set_original_declaration),
+        cover=payload.cover,
         edits=edits,
     )
     return {"job_id": job_id, "status": "queued"}

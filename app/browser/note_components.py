@@ -2184,6 +2184,7 @@ def _skipped_components(
     collection_id: Optional[str], quoted_note_id: Optional[str], activity_id: Optional[str],
     remove_collection_id: Optional[str] = None,
     set_original_declaration: bool = False,
+    cover_path: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """弃提交时组件步一步都没走:请求过的组件如实记「因前序失败未执行」。
 
@@ -2197,13 +2198,14 @@ def _skipped_components(
             ("quote", quoted_note_id),
             ("activity", activity_id),
             ("original_declaration", set_original_declaration),
+            ("cover", cover_path),
         ) if value
     }
 
 
 # 「零变更」的幂等 skipped 步:编辑器里一个字都没改,不值得为它付一次全量覆盖提交。
-# 见 set_note_components ⑥bis。
-_IDEMPOTENT_NOOP_KEYS = ("collection_remove", "original_declaration")
+# 见 set_note_components ⑥bis。``cover`` 落 skipped 表示"本就是自定义封面"。
+_IDEMPOTENT_NOOP_KEYS = ("collection_remove", "original_declaration", "cover")
 
 
 # ---------------- 编辑已发布笔记:完整流程 ----------------
@@ -2226,8 +2228,9 @@ def set_note_components(
     remove_image_indexes: Optional[List[int]] = None,
     expected_image_count: Optional[int] = None,
     set_original_declaration: bool = False,
+    cover_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片:进更新页 → 改 → 提交 → 回读。
+    """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片 / 换封面:进更新页 → 改 → 提交 → 回读。
 
     **全流程只有一次提交**(⑧那一次 ``click_publish``),这是方案 A 的立命之本:提交是
     全量覆盖语义,提交次数就是风险次数。文本 / 图片 / 组件混在一次请求里也只覆盖一次。
@@ -2251,6 +2254,10 @@ def set_note_components(
             08-07 那个"拟人随机偏移 40% 概率撞上《原创声明须知》超链接"的修复在那个函数
             **内部**,所以编辑链共用它就自动覆盖了同一个修复,不会重蹈 08-05~08-07 的覆辙。
             幂等:进页面先读当前态,已是开态 → ``skipped`` 且**零点击**。
+        cover_path: 给这篇换**自定义封面**的本地图片路径(只对视频笔记有效 —— 图文笔记的
+            封面就是第一张图,更新页上根本没有封面区)。走更新页「设置封面」弹窗
+            (``apply_cover_change``),与发布页那条内联链是两个操作面。幂等:已经是
+            自定义封面 → ``skipped`` 且**零点击**;失败**不阻断**其余组件。
 
     Returns:
         ``{"status": "done"|"partially_applied"|"failed", "applied": {...}, "failed": [...],
@@ -2310,7 +2317,8 @@ def set_note_components(
             return _compose(
                 note_id,
                 _skipped_components(collection_id, quoted_note_id, activity_id,
-                                    remove_collection_id, set_original_declaration),
+                                    remove_collection_id, set_original_declaration,
+                                    cover_path),
                 {}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_before,
@@ -2348,6 +2356,19 @@ def set_note_components(
                 f"[note_components] 原创声明补录: "
                 f"{outcomes['original_declaration'].get('status')} "
                 f"{outcomes['original_declaration'].get('reason', '')}"
+            )
+
+        # ⑤ter 改封面(2026-08-08 上线,只对视频笔记):走更新页「设置封面」弹窗。
+        # 与组件同族语义 —— 失败只是"没换上",原封面无损,所以**不阻断**其余组件、也不弃提交;
+        # 幂等已是自定义封面则 skipped 且零点击(见 _IDEMPOTENT_NOOP_KEYS)。
+        if cover_path:
+            try:
+                outcomes["cover"] = apply_cover_change(page, human, cover_path)
+            except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断其余组件
+                outcomes["cover"] = {"status": "error", "reason": f"cover_exception: {exc}"}
+            logger.info(
+                f"[note_components] 改封面: {outcomes['cover'].get('status')} "
+                f"{outcomes['cover'].get('reason', '')}"
             )
 
         body_after = read_body_text(page)
@@ -2418,6 +2439,7 @@ def set_note_components(
             quoted_note_id=quoted_note_id,
             activity_id=activity_id, outcomes=outcomes, responses=responses,
             set_original_declaration=set_original_declaration,
+            cover_path=cover_path,
             title=title, content=content,
             wants_add=bool(add_images), wants_remove=bool(remove_image_indexes),
             images_before=images_before, removed=edits["removed"], added=edits["added"],
@@ -2462,6 +2484,7 @@ def _verify_after_submit(
     outcomes: Dict[str, Dict[str, Any]],
     remove_collection_id: Optional[str] = None,
     set_original_declaration: bool = False,
+    cover_path: Optional[str] = None,
     responses: ComponentResponses,
     title: Optional[str] = None,
     content: Optional[str] = None,
@@ -2571,6 +2594,16 @@ def _verify_after_submit(
         if verified["original_declaration"] is not True:
             logger.error(
                 f"[note_components] 原创声明回读未确认:开关行 checked={checked!r}"
+            )
+
+    if cover_path:
+        # 判据 = 重进更新页把封面区再读一遍:``noCover`` 没了 = 平台侧确实换成了自定义封面。
+        # 三态如实:True / False / 读不到(页面没封面区、脚本抛异常)→ None(未确认)。
+        state = _read_cover_state(page)
+        verified["cover"] = None if state is None else (state.get("no_cover") is False)
+        if verified["cover"] is not True:
+            logger.error(
+                f"[note_components] 封面回读未生效:封面区仍是平台首帧态(state={state!r})"
             )
 
     # ---- 编辑项回读(编辑设计 3.2 判据)----
@@ -3057,6 +3090,388 @@ def apply_video_cover(page, human: SyncHumanActions, cover_path: str) -> Dict[st
             "reason": "cover_preview_unchanged: 灌了封面图但封面区预览没变化"
                       f"(图片数 {before.get('imgs_in_cover')} → {after.get('imgs_in_cover')})",
             "observed": {"input_selector": used, **_cover_probe(page, with_html=True)}}
+
+
+# ---------------- 已发布笔记改封面(更新页「设置封面」**弹窗**链) ----------------
+#
+# ⚠️ 与上面那段**发布页**的内联封面链(``apply_video_cover``)是两条不同的操作面,别合并:
+# 发布页封面区是内联的(点不出弹窗,已三轮探针钉死),而**更新页**点「修改封面」会弹出
+# 一个 ``.d-modal`` —— 下面这条链走的是更新页那个弹窗。
+#
+# 真号取证(账号2 视频笔记 6a1e76f9…,2026-08-08,data/scene_captures/edit_cover/):
+#   .publish-page-content-cover
+#     └─ .cover
+#         ├─ div.default.column[style=background-image:url(…封面图…)]   ← 缩略图
+#         └─ div.operator.default.column.center.noCover.pointer         ← 悬停才显的浮层
+#              ├─ .text        「修改封面」  rect {x445,y427,w56,h22}
+#              └─ .down-grade  「遇到问题?」 rect {x450,y468,w46,h20}   ← **绝不点**
+# 三条实证结论,每条都对应一次踩坑:
+#   1. ``.operator`` 的 class 带 ``noCover`` = 当前用的还是平台自动截的首帧。它就是幂等
+#      判据:没有 noCover 说明已经是自定义封面,再点一遍等于白覆盖一次;
+#   2. 入口与「遇到问题?」贴得极近且有 tooltip 覆盖区,``element.click()`` 会撞上它 ——
+#      所以按**实测矩形中心**点(``random_offset=False``,拟人层照样走贝塞尔+down/up);
+#   3. 弹窗默认停在「截取封面」tab,**图片 file input 是懒挂载在「上传封面」tab 里的**:
+#      不先切 tab 就永远 ``file_inputs=[]``(phase-1 整轮就卡在这)。
+# 弹窗内实测:``input.upload-input[type=file]`` accept=image/png,image/jpeg,image/*;
+# 「确定」``.btn-confirm`` 选图前 **class 带 disabled 且有 disabled 属性**(两处都要判);
+# 「取消」``.cancelBtn``;「上传图片」``.btn-upload`` —— **绝不点它**,真桌面上会弹原生
+# GTK 文件框卡死整条流程(见 atomic_tasks §2.4),灌文件一律走 set_input_files。
+_COVER_OPERATOR_TEXT = f"{_COVER_SECTION} .operator .text"
+# 缩略图(悬停它才唤出 .operator)。``.operator`` 自己也带 ``default column`` 两个 class,
+# 故首选带 :not(.operator) 收口,退化候选靠 DOM 顺序(缩略图在前)兜住。
+_COVER_THUMB_CANDIDATES = (
+    f"{_COVER_SECTION} .cover .default.column:not(.operator)",
+    f"{_COVER_SECTION} .cover .default.column",
+    f"{_COVER_SECTION} .cover",
+)
+# 入口文案:必须含它才敢点(挡住"抓成了旁边那个「遇到问题?」"这类错位)
+_COVER_ENTRY_TEXT = "修改封面"
+# 「设置封面」弹窗。``.d-modal`` 与 ``_ANY_MODAL`` 同选择器 —— 页面上可能同时有别的
+# ``.d-modal``,所以还要按文案特征认领(见 _find_cover_modal),绝不逮着一个就用。
+_COVER_MODAL = ".d-modal"
+_COVER_MODAL_MARKS = ("设置封面", "上传封面")
+_COVER_MODAL_TAB = ".d-modal .d-tabs-header"
+_COVER_UPLOAD_TAB_TEXT = "上传封面"
+_COVER_MODAL_FILE_INPUT = ".d-modal input.upload-input[type='file']"
+_COVER_MODAL_CONFIRM = ".d-modal .btn-confirm"
+_COVER_MODAL_CANCEL = ".d-modal .cancelBtn"
+# 各段窗口(秒):都按"真页面最慢那一次"给,失败路径靠它们收敛而不是干等
+_COVER_OPERATOR_TIMEOUT_S = 4.0    # 悬停后等浮层渲染
+_COVER_MODAL_OPEN_TIMEOUT_S = 10.0  # 点入口后等弹窗
+_COVER_INPUT_TIMEOUT_S = 8.0       # 切 tab 后等 file input 懒挂载
+_COVER_CONFIRM_TIMEOUT_S = 30.0    # 等平台收下这张图、「确定」解禁(上传要时间)
+_COVER_MODAL_CLOSE_TIMEOUT_S = 10.0  # 点确定后等弹窗自己走
+_COVER_PREVIEW_TIMEOUT_S = 10.0    # 弹窗关掉后等封面区刷新
+# 封面区当前态:``no_cover``(还是平台首帧吗)+ ``fingerprint``(缩略图背景图 URL)。
+# 判"换成了没有"用这两条的**任一变化**:noCover 只反映服务端态,提交前平台会不会当场
+# 摘掉它没取证过,所以再加一条纯前端就能看见的背景图指纹兜底。
+_COVER_STATE_JS = r"""() => {
+  const sec = document.querySelector('.publish-page-content-cover');
+  if (!sec) return null;
+  const op = sec.querySelector('.operator');
+  // 浮层不在 = 判不出现状。**绝不退化成 cls='' 那条路** —— 那会算出 no_cover:false,
+  // 被读成"已经是自定义封面"而静默跳过整步(平台一改 class 名就全线静默空转)。
+  if (!op) return null;
+  const thumb = sec.querySelector('.cover .default.column:not(.operator)')
+             || sec.querySelector('.cover .default.column');
+  const cls = op.getAttribute('class') || '';
+  let fingerprint = '';
+  if (thumb) {
+    fingerprint = thumb.style.backgroundImage
+      || window.getComputedStyle(thumb).backgroundImage || '';
+    const img = thumb.querySelector('img[src^="http"]');
+    if (!fingerprint && img) fingerprint = img.src;
+  }
+  return {
+    no_cover: cls.split(/\s+/).indexOf('noCover') >= 0,
+    fingerprint: String(fingerprint).slice(0, 300),
+  };
+}"""
+
+
+def _read_cover_state(page) -> Optional[Dict[str, Any]]:
+    """读封面区当前态 → ``{"no_cover": bool, "fingerprint": str}``;读不到返回 ``None``。
+
+    ``None`` 是"判不出现状",**绝不乐观当成没封面** —— 改封面是覆盖性动作,判不出就不动手。
+    """
+    try:
+        state = page.evaluate(_COVER_STATE_JS)
+    except Exception:  # noqa: BLE001 — 读不到就是不可确认,不是失败
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _cover_changed(before: Dict[str, Any], after: Optional[Dict[str, Any]]) -> bool:
+    """封面区真变了吗:``noCover`` 消失 或 缩略图指纹变了(任一即算)。"""
+    if not isinstance(after, dict):
+        return False
+    if before.get("no_cover") and not after.get("no_cover"):
+        return True
+    return bool(after.get("fingerprint")) and after.get("fingerprint") != before.get("fingerprint")
+
+
+def _find_cover_modal(page):
+    """按文案认领「设置封面」弹窗;没有返回 ``None``。
+
+    不逮着第一个 ``.d-modal`` 就用:这个页面上同时可能开着别的弹窗(合集移除确认、
+    原创声明协议),点错弹窗里的「确定」是不可逆的。
+    """
+    try:
+        modals = page.query_selector_all(_COVER_MODAL)
+    except Exception:  # noqa: BLE001
+        return None
+    for modal in modals:
+        try:
+            text = _norm(modal.inner_text())
+        except Exception:  # noqa: BLE001 — 读不到文案的一律不认领
+            continue
+        if any(mark in text for mark in _COVER_MODAL_MARKS):
+            return modal
+    return None
+
+
+def _poll_cover(page, probe, timeout_s: float):
+    """在窗口内轮询 ``probe()``,拿到非 ``None`` 就返回;超时返回 ``None``。"""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            value = probe()
+        except Exception:  # noqa: BLE001 — 单次探测失败只当这一跳没命中
+            value = None
+        if value is not None:
+            return value
+        if time.monotonic() >= deadline:
+            return None
+        page.wait_for_timeout(300)
+
+
+def _close_cover_modal(page, human: SyncHumanActions) -> None:
+    """把「设置封面」弹窗关掉(点「取消」)。
+
+    **每条失败路径都必须调它**:2026-08-02 引用弹窗没关、正好盖住发布按钮,兜底又点了
+    禁用态的按钮 —— 那次事故的同型风险在这里一模一样。
+    """
+    modal = _find_cover_modal(page)
+    if modal is None:
+        return
+    try:
+        cancel = modal.query_selector(_COVER_MODAL_CANCEL)
+    except Exception:  # noqa: BLE001
+        cancel = None
+    if cancel is None:
+        logger.error(
+            f"[note_components] 设置封面弹窗关不掉:没找到取消按钮 {_COVER_MODAL_CANCEL},"
+            "弹窗可能盖住发布按钮,**这一单不要再点发布**"
+        )
+        return
+    try:
+        human.click(cancel, reason="关掉「设置封面」弹窗(取消)")
+    except Exception as exc:  # noqa: BLE001 — 收尾失败只告警,别把原始失败原因盖掉
+        logger.error(f"[note_components] 点取消关设置封面弹窗失败: {exc}")
+
+
+def _cover_error(page, human, reason: str, *, close_modal: bool = True,
+                 **extra) -> Dict[str, Any]:
+    """封面步的失败回执:先关弹窗(不能留着盖发布按钮),再带当场取证交出去。"""
+    if close_modal:
+        _close_cover_modal(page, human)
+    observed = {**_cover_probe(page, with_html=True), **extra}
+    logger.error(f"[note_components] 改封面失败: {reason}")
+    return {"status": "error", "reason": reason, "observed": observed}
+
+
+def apply_cover_change(page, human: SyncHumanActions, cover_path: str) -> Dict[str, Any]:
+    """在**更新页**给一篇已发布笔记换自定义封面 → ``{"status": "done"|"skipped"|"error"}``。
+
+    链路(每一步都由真号取证钉过,见本段顶部):悬停缩略图唤出浮层 → 按矩形中心点
+    「修改封面」→ 弹窗里**先切「上传封面」tab** → 往 ``input.upload-input`` 灌文件 →
+    等「确定」解禁 → 点确定 → 等弹窗关 → **回读封面区真变了才算成功**。
+
+    三条红线:
+    - **幂等**:``.operator`` 没有 ``noCover`` = 已经是自定义封面 → ``skipped`` 且**零点击**;
+    - **绝不碰**「智能推荐封面」「PK封面」「优质封面示例」「遇到问题?」,也**绝不点**
+      「上传图片」按钮(原生文件框会卡死整条流程);
+    - 判据是**封面区变了**,不是"点了就成功";任何一步失败都先把弹窗关掉再报。
+
+    与破坏性编辑步(标题/正文/图片)的语义不同:本步失败**不阻断**其余组件,由调用方
+    按组件语义汇总(见 ``set_note_components`` ⑤ter)。
+    """
+    before = _read_cover_state(page)
+    if before is None:
+        try:
+            section_present = page.query_selector(_COVER_SECTION) is not None
+        except Exception:  # noqa: BLE001
+            section_present = False
+        if not section_present:
+            return _cover_error(
+                page, human,
+                f"cover_section_not_found: 更新页上没有封面区 {_COVER_SECTION}"
+                "(这篇多半不是视频笔记,或平台改版了),一次点击都没发",
+                close_modal=False,
+            )
+        return _cover_error(
+            page, human,
+            "cover_state_unreadable: 封面区在,但读不出当前是不是平台首帧"
+            "(.operator 的 noCover 判据取不到);改封面是覆盖性动作,判不出现状就不动手,"
+            "一次点击都没发",
+            close_modal=False,
+        )
+    if not before.get("no_cover"):
+        logger.info("[note_components] 这篇已经是自定义封面(.operator 无 noCover),跳过改封面")
+        return {"status": "skipped",
+                "reason": "cover_already_custom: 已经是自定义封面(不是平台自动首帧),"
+                          "零点击跳过 —— 再换一次等于白覆盖",
+                "fingerprint_before": before.get("fingerprint")}
+
+    # ① 悬停缩略图:``.operator`` 浮层是 hover 才显的,不悬停连入口都不存在
+    thumb, thumb_sel = _first_match(page, _COVER_THUMB_CANDIDATES)
+    if thumb is not None:
+        try:
+            human.hover(thumb, reason=f"悬停封面缩略图唤出操作浮层({thumb_sel})")
+        except Exception as exc:  # noqa: BLE001 — 悬停失败不致命,浮层也可能本就在
+            logger.info(f"[note_components] 悬停封面缩略图失败({exc}),继续找入口")
+
+    # ② 入口按**实测矩形中心**点:它与「遇到问题?」贴得极近且有 tooltip 覆盖区,
+    #    element.click() 的可点性判定会撞上去(真号两轮取证都靠坐标点才命中)
+    entry = _poll_cover(
+        page, lambda: page.query_selector(_COVER_OPERATOR_TEXT), _COVER_OPERATOR_TIMEOUT_S
+    )
+    if entry is None:
+        return _cover_error(
+            page, human,
+            f"cover_entry_not_found: 悬停缩略图后仍没找到「{_COVER_ENTRY_TEXT}」"
+            f"({_COVER_OPERATOR_TEXT});真实结构见 observed.cover_section_html",
+            close_modal=False,
+        )
+    try:
+        entry_text = _norm(entry.inner_text())
+        box = entry.bounding_box() or {}
+    except Exception as exc:  # noqa: BLE001
+        return _cover_error(page, human, f"cover_entry_unreadable: {exc}", close_modal=False)
+    if _COVER_ENTRY_TEXT not in entry_text or any(k in entry_text for k in _COVER_FORBIDDEN):
+        return _cover_error(
+            page, human,
+            f"cover_entry_text_mismatch: {_COVER_OPERATOR_TEXT} 的文案是 {entry_text[:30]!r},"
+            f"不是「{_COVER_ENTRY_TEXT}」——不敢点(旁边就是「遇到问题?」与推荐封面)",
+            close_modal=False,
+        )
+    if not (box.get("width") and box.get("height")):
+        return _cover_error(
+            page, human,
+            f"cover_entry_rect_unmeasurable: 「{_COVER_ENTRY_TEXT}」量不到矩形({box}),"
+            "按坐标点是躲开 tooltip 覆盖区的唯一办法,量不到就不点",
+            close_modal=False,
+        )
+    center = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    human.click(
+        entry, random_offset=False,
+        reason=f"点封面浮层「{_COVER_ENTRY_TEXT}」(矩形中心 {center[0]:.0f},{center[1]:.0f})",
+    )
+    human.wait(0.6, 1.2, context="等设置封面弹窗")
+
+    # ③ 弹窗
+    modal = _poll_cover(page, lambda: _find_cover_modal(page), _COVER_MODAL_OPEN_TIMEOUT_S)
+    if modal is None:
+        return _cover_error(
+            page, human,
+            f"cover_modal_not_opened: 点了「{_COVER_ENTRY_TEXT}」但 {_COVER_MODAL_OPEN_TIMEOUT_S}s "
+            "内没等到「设置封面」弹窗;**不猜别的路径**,一个文件都没灌",
+            close_modal=False,
+        )
+
+    # ④ 切「上传封面」tab —— 图片 file input 懒挂载在这个 tab 里,不切就永远找不到
+    tab = _find_upload_tab(modal)
+    if tab is None:
+        return _cover_error(
+            page, human,
+            f"cover_upload_tab_not_found: 弹窗里没有「{_COVER_UPLOAD_TAB_TEXT}」tab"
+            f"({_COVER_MODAL_TAB});图片 input 就挂在它下面,平台多半改版了",
+        )
+    human.click(tab, reason=f"切到弹窗的「{_COVER_UPLOAD_TAB_TEXT}」tab")
+    human.wait(0.5, 1.0, context="等上传 tab 挂载")
+
+    # ⑤ 灌文件:**绝不点**「上传图片」按钮(.btn-upload),真桌面上会弹原生 GTK 文件框
+    upload = _poll_cover(page, lambda: _cover_file_input(page), _COVER_INPUT_TIMEOUT_S)
+    if upload is None:
+        return _cover_error(
+            page, human,
+            f"cover_file_input_not_found: 切到「{_COVER_UPLOAD_TAB_TEXT}」tab 后 "
+            f"{_COVER_INPUT_TIMEOUT_S}s 内仍没挂出 {_COVER_MODAL_FILE_INPUT};"
+            "**不退回去点「上传图片」按钮**(原生文件框会卡死整条流程)",
+        )
+    try:
+        upload.set_input_files([cover_path])
+    except Exception as exc:  # noqa: BLE001
+        return _cover_error(page, human, f"cover_set_input_failed: {exc}")
+    human.wait(1.0, 2.0, context="等平台收下这张封面图")
+
+    # ⑥ 等「确定」解禁:class 带 disabled 或有 disabled 属性都算禁用(实测两处同时出现)
+    confirm = _poll_cover(page, lambda: _enabled_cover_confirm(page), _COVER_CONFIRM_TIMEOUT_S)
+    if confirm is None:
+        return _cover_error(
+            page, human,
+            f"cover_confirm_not_enabled: 灌了图但「确定」{_COVER_MODAL_CONFIRM} 在 "
+            f"{_COVER_CONFIRM_TIMEOUT_S}s 内一直是禁用态(平台没接受这张图);"
+            "**绝不硬点禁用按钮**",
+        )
+    human.click(confirm, reason="点「设置封面」弹窗的确定")
+    human.wait(0.8, 1.5, context="等弹窗关闭")
+
+    # ⑦ 弹窗必须走掉:它会盖住发布按钮(2026-08-02 引用弹窗同型事故)
+    closed = _poll_cover(
+        page, lambda: True if _find_cover_modal(page) is None else None,
+        _COVER_MODAL_CLOSE_TIMEOUT_S,
+    )
+    if closed is None:
+        return _cover_error(
+            page, human,
+            f"cover_modal_not_closed: 点了确定但弹窗 {_COVER_MODAL_CLOSE_TIMEOUT_S}s 内没关,"
+            "已强行点取消关掉(留着它会盖住发布按钮)",
+        )
+
+    # ⑧ 回读:封面区真变了才算成功(与"点了就当成功"划清界限)
+    def _changed_state():
+        state = _read_cover_state(page)
+        return state if _cover_changed(before, state) else None
+
+    after = _poll_cover(page, _changed_state, _COVER_PREVIEW_TIMEOUT_S)
+    if after is None:
+        return _cover_error(
+            page, human,
+            "cover_preview_unchanged: 弹窗关了但封面区没变"
+            f"(noCover 还在且缩略图指纹没动,原值 {before.get('fingerprint', '')[:60]!r});"
+            "**不当成功**",
+            close_modal=False,
+            fingerprint_before=before.get("fingerprint"),
+        )
+    logger.info("[note_components] 封面已在编辑器内换上(待提交生效)")
+    return {"status": "done", "cover_path": cover_path,
+            "fingerprint_before": before.get("fingerprint"),
+            "fingerprint_after": after.get("fingerprint")}
+
+
+def _find_upload_tab(modal):
+    """弹窗里那个「上传封面」tab;没有返回 ``None``(文案**全等**,别用包含)。"""
+    try:
+        tabs = modal.query_selector_all(_COVER_MODAL_TAB)
+    except Exception:  # noqa: BLE001
+        return None
+    for tab in tabs:
+        try:
+            if _norm(tab.inner_text()) == _COVER_UPLOAD_TAB_TEXT:
+                return tab
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _cover_file_input(page):
+    """「上传封面」tab 里那个图片 file input;还没挂载返回 ``None``。"""
+    modal = _find_cover_modal(page)
+    if modal is None:
+        return None
+    try:
+        return modal.query_selector(_COVER_MODAL_FILE_INPUT)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _enabled_cover_confirm(page):
+    """弹窗里**已解禁**的「确定」;还禁着(class 带 disabled 或有 disabled 属性)返回 ``None``。"""
+    modal = _find_cover_modal(page)
+    if modal is None:
+        return None
+    try:
+        confirm = modal.query_selector(_COVER_MODAL_CONFIRM)
+        if confirm is None:
+            return None
+        if confirm.get_attribute("disabled") is not None:
+            return None
+        if "disabled" in (confirm.get_attribute("class") or ""):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return confirm
 
 
 def _find_text_in_section(page, section_selector: str, text: str):
