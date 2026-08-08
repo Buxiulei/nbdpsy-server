@@ -3130,11 +3130,14 @@ _COVER_ENTRY_TEXT = "修改封面"
 # ``.d-modal``,所以还要按文案特征认领(见 _find_cover_modal),绝不逮着一个就用。
 _COVER_MODAL = ".d-modal"
 _COVER_MODAL_MARKS = ("设置封面", "上传封面")
-_COVER_MODAL_TAB = ".d-modal .d-tabs-header"
+# 下面四个都在**认领到的弹窗元素内**查询(modal.query_selector / _all),ElementHandle
+# 的查询限定在子树里求值 —— 根节点自己就是 .d-modal,不满足 `.d-modal X` 这种后代组合子,
+# 带前缀会实测命中 0。故一律用裸(相对)形态,与本仓元素内查询的既有约定一致。
+_COVER_MODAL_TAB = ".d-tabs-header"
 _COVER_UPLOAD_TAB_TEXT = "上传封面"
-_COVER_MODAL_FILE_INPUT = ".d-modal input.upload-input[type='file']"
-_COVER_MODAL_CONFIRM = ".d-modal .btn-confirm"
-_COVER_MODAL_CANCEL = ".d-modal .cancelBtn"
+_COVER_MODAL_FILE_INPUT = "input.upload-input[type='file']"
+_COVER_MODAL_CONFIRM = ".btn-confirm"
+_COVER_MODAL_CANCEL = ".cancelBtn"
 # 各段窗口(秒):都按"真页面最慢那一次"给,失败路径靠它们收敛而不是干等
 _COVER_OPERATOR_TIMEOUT_S = 4.0    # 悬停后等浮层渲染
 _COVER_MODAL_OPEN_TIMEOUT_S = 10.0  # 点入口后等弹窗

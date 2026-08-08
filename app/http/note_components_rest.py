@@ -42,6 +42,7 @@ from app.core.errors import NotFoundError
 from app.http.job_polling import QUEUE_MANIFEST_NOTE, base_view, load_job
 from app.models.published_note import PublishedNote
 from app.models.xhs_account import XhsAccount
+from app.publish.policy import XHS_COVER_EXTENSIONS, cover_ext_allowed
 from app.services import counselor_quote, note_components
 from app.services.quota import assert_operator_quota
 
@@ -60,8 +61,8 @@ _IMAGE_NOTE_TYPES = ("normal",)
 # 第一张图(与发布端点同口径),更新页上根本没有 .publish-page-content-cover 那一块。
 # NULL 同样不放行:理由与图文那条一致,类型不可确认就不做全量覆盖提交。
 _VIDEO_NOTE_TYPES = ("video",)
-# 封面图扩展名白名单(弹窗内 file input 实测 accept=image/png, image/jpeg, image/*)
-_COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+# 封面图扩展名白名单复用发布端同一真源(app.publish.policy):扩展名白名单三处同一套,
+# 弹窗内 file input 实测 accept=image/png, image/jpeg, image/*,与它一致。
 
 MANIFEST_ENTRIES = [
     {
@@ -160,7 +161,7 @@ MANIFEST_ENTRIES = [
             "expected_image_count": "body,int|None(你认为这篇现在有几张图;给了 add_images "
                                     "或 remove_image_indexes 时**必填**,1-18)",
             "cover": "body,str|None(**换自定义封面**,2026-08-08 上线。服务器侧本地图片路径,"
-                     f"扩展名限 {'/'.join(_COVER_EXTS)},文件不存在 → 422。"
+                     f"扩展名限 {'/'.join(XHS_COVER_EXTENSIONS)},文件不存在 → 422。"
                      "**只对视频笔记有效**:台账 note_type=video 才受理,**图文笔记传了直接 "
                      "422**(图文的封面就是第一张图,与发布端点同口径;真要换请用 "
                      "remove_image_indexes+add_images 换掉第一张),note_type 为 null 同样 422。"
@@ -472,7 +473,7 @@ class NoteComponentsRequest(BaseModel):
     cover: str | None = Field(
         default=None,
         description="给这篇换**自定义封面**的图片路径(服务器侧本地路径,"
-                    f"扩展名限 {'/'.join(_COVER_EXTS)},文件不存在直接 422)。"
+                    f"扩展名限 {'/'.join(XHS_COVER_EXTENSIONS)},文件不存在直接 422)。"
                     "**只对视频笔记有效**:图文笔记的封面就是第一张图(与发布端点同口径),"
                     "传了直接 422。**幂等**:这篇已经是自定义封面 → status='skipped'、"
                     "applied.cover=true 且**零点击**",
@@ -538,9 +539,9 @@ class NoteComponentsRequest(BaseModel):
         if self.cover is None:
             return self
         path = Path(self.cover)
-        if path.suffix.lower() not in _COVER_EXTS:
+        if not cover_ext_allowed(self.cover):
             raise ValueError(
-                f"cover 扩展名 {path.suffix!r} 不在白名单 {'/'.join(_COVER_EXTS)} 内"
+                f"cover 扩展名 {path.suffix!r} 不在白名单 {'/'.join(XHS_COVER_EXTENSIONS)} 内"
                 f"(平台封面上传 accept 的就是这几种图)"
             )
         if not path.is_file():
