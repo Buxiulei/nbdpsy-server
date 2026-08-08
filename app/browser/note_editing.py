@@ -27,8 +27,13 @@ import re
 
 from loguru import logger
 
-from app.browser.atomic_tasks import XHS_MAX_TITLE_DISPLAY
+from app.browser.atomic_tasks import (
+    XHS_MAX_TITLE_DISPLAY,
+    XHS_MAX_TOPICS,
+    topic_failure_detail,
+)
 from app.browser.text_formatter import get_display_length
+from app.browser.topic_dropdown import COLLECT_LAYERS_JS, select_topic_option
 
 # 正文里的话题实体形如 ``#身边的心理学[话题]#``。
 # 出处:``note_components._TOPIC_PATTERN``(私有名,不 import;拷贝理由见模块 docstring)。
@@ -532,3 +537,174 @@ def apply_content_edit(page, human, new_content: str) -> dict:
         "topics_dropped": topics_dropped,
         "body_read_back": read_back,
     }
+
+
+# ==================== 已发布笔记补挂话题(追加语义) ====================
+#
+# 需求 docs `2026-08-08 server需求-已发布笔记补挂话题`:存量视频笔记发布时话题 7/8 全空,
+# 发布链路已修但存量丢的话题救不回来,需要编辑侧**补挂**能力。语义是**追加**不是替换:
+# 传入话题追加到现有话题、去重、总数 >10 截断(全量替换在已有话题的笔记上太危险,一次
+# 手滑清空别人的话题)。话题输入复用发布链那套「输 #话题名 → 浮层 → 正向判据选精确匹配」
+# (``topic_dropdown.select_topic_option``,绝不走已定性有缺陷的旧「面积最小」近似)。
+
+
+def normalize_topic_names(topics: list[str] | None) -> list[str]:
+    """规整话题名:去前导 ``#``、去首尾空白、丢空串、按**首次出现**去重(保序)。
+
+    ``extract_topics`` 出来的既有话题本就没有 ``#`` 前缀,调用方传的可能带可能不带,
+    统一到"纯名字"这一种形态才比得了(追加语义的去重全靠它)。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in topics or []:
+        name = (t or "").lstrip("#").strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def plan_topic_appends(
+    existing: list[str] | None,
+    requested: list[str] | None,
+    cap: int = XHS_MAX_TOPICS,
+) -> dict:
+    """算出真正要补的话题**差集**(追加语义的纯逻辑,零 DOM 假设,单测直接覆盖)。
+
+    追加语义三步:
+    1. **去重**:``requested`` 规整成纯名字并去重;
+    2. **剔除已在**:已经挂在笔记上的(``existing``)不再补——这就是"原话题保留、不重复挂"
+       (验收:job278 已有 1 个,补 4 个后应是 5 个,原 1 个保留);
+    3. **总数封顶 cap**:``existing`` 占掉的名额先扣掉,``requested`` 里的新话题只补到把
+       总数填满 ``cap``(小红书单篇 ≤10)为止,补不下的进 ``truncated`` 如实回执。
+
+    Returns:
+        ``{"existing":[...规整后...], "to_add":[...要补且补得下的...],
+        "truncated":[...因超上限没补的...], "already":[...请求里本就已挂的...]}``。
+        ``to_add`` 保持 ``requested`` 的原始顺序(先来先补,截断截的是靠后的)。
+    """
+    existing_names = normalize_topic_names(existing)
+    existing_set = set(existing_names)
+    requested_names = normalize_topic_names(requested)
+    already = [t for t in requested_names if t in existing_set]
+    new = [t for t in requested_names if t not in existing_set]
+    available = max(0, cap - len(existing_names))
+    return {
+        "existing": existing_names,
+        "to_add": new[:available],
+        "truncated": new[available:],
+        "already": already,
+    }
+
+
+# 补话题:聚焦正文框的焦点判据(只读 ``document.activeElement``,与 atomic_tasks step6
+# 同款——不验焦点就打字 = 把话题打进虚空还以为是"下拉没匹配")。
+_BODY_FOCUS_JS = r"""() => {
+    const ae = document.activeElement;
+    if (!ae) return false;
+    if (ae.getAttribute && ae.getAttribute('contenteditable') === 'true') return true;
+    return !!(ae.closest && ae.closest("[contenteditable='true']"));
+}"""
+
+# 聚焦正文框的尝试次数(与 atomic_tasks step6 同为 2)
+_FOCUS_TRIES = 2
+
+
+def _focus_body_end(page, human) -> bool:
+    """拟人滚进视口 → 点击聚焦正文框 → **验焦点** → 光标移末尾。返回是否聚焦成功。
+
+    与 atomic_tasks step6 同款纪律(2026-08-03 文字版事故):正文框可能被上传预览顶出
+    视口,``getBoundingClientRect`` 中心落在顶栏,点击根本没进正文框,后续 ``#话题`` 打进
+    虚空、下拉永不弹。所以每次都重新滚 + 重新取坐标 + 点完只读验 ``activeElement``。
+    """
+    for _ in range(_FOCUS_TRIES):
+        box = _scroll_into_view(page, human, [_BODY_EDITOR], intent="正文框(补话题)")
+        if box is None:
+            continue
+        cx, cy = _click_point(box)
+        human.click((cx, cy), reason="聚焦正文框(补话题)")
+        human.wait(0.2, 0.5, context="聚焦后停顿")
+        try:
+            if bool(page.evaluate(_BODY_FOCUS_JS)):
+                human.press_key("Control+End", reason="光标移到正文末尾(补话题)")
+                return True
+        except Exception:  # noqa: BLE001 — 读焦点失败当没聚焦上,下一轮重滚重点
+            pass
+        logger.warning("[note_editing] 聚焦正文框后焦点不在编辑区,重滚动重点")
+    return False
+
+
+def append_topics(page, human, to_add: list[str]) -> dict:
+    """在已打开更新页的正文框**末尾追加**话题(逐个 输 #话题 → 等浮层 → 正向判据点选)。
+
+    ``to_add`` 是调用方(编排层)已经用 ``plan_topic_appends`` 算好的**追加差集**——本函数
+    不再去重不再截断,只负责把它们逐个真挂上去。逐个独立成败:
+
+    - 命中精确匹配 → 拟人点选,生成**真话题实体**(蓝色 chip,参与分发),记进
+      ``in_editor_added``;
+    - 没命中(下拉没弹 / 词不存在 / 抓错容器)→ **Escape + 回删**刚打进去的 ``#话题``,
+      **绝不留残缺文本**(残缺话题会撑爆 10 个上限拦发布,RCA 2026-05-18),失败进
+      ``failed`` 带当场证据(``topic_failure_detail``),**不连坐其余话题**。
+
+    话题是**追加**而非破坏性编辑:失败只是"这个没挂上",正文原内容无损,故本步失败**不弃
+    提交**(与标题/正文/图片那类破坏性编辑步的语义差异见编辑设计 4.4)。
+
+    Returns:
+        ``{"status": "done"|"partially_applied"|"error"|"skipped",
+        "in_editor_added": [...编辑器内点选成功的...], "failed": [{tag, reason, ...证据}]}``。
+        ``in_editor_added`` 是**编辑器内**的乐观结果(点选上了),**不等于**平台真挂上——
+        那要靠编排层提交后重进页面回读平台实况确认(这条产品线的失败是静默的)。
+    """
+    if not to_add:
+        return {"status": "skipped", "in_editor_added": [], "failed": []}
+    if not _focus_body_end(page, human):
+        # 聚焦不上 = 一个都打不进去,全体失败(但正文原样未动,可整体重试)
+        return {
+            "status": "error",
+            "in_editor_added": [],
+            "failed": [{"tag": t, "reason": "content_box_focus_failed"} for t in to_add],
+        }
+    added: list[str] = []
+    failed: list[dict] = []
+    for tag in to_add:
+        tag_name = str(tag).lstrip("#").strip()
+        tag_text = f"#{tag_name}"
+        human.type_text(None, tag_text, click_first=False)
+        human.wait(1.5, 2.5, context="等待话题下拉")
+        # 每次都重新取正文框矩形当几何锚(不持句柄:聚焦重渲染会让旧句柄脱离)
+        box = _locate(page, [_BODY_EDITOR]) or {}
+        editor_rect = (
+            {"x": box.get("x"), "width": box.get("w")} if box.get("x") is not None else None
+        )
+        option = select_topic_option(
+            page.evaluate(COLLECT_LAYERS_JS, tag_name), tag_name, editor_rect=editor_rect
+        )
+        if option and option.get("success"):
+            human.click(
+                (option["x"], option["y"]),
+                reason=f"点选话题: {option.get('matched', '')[:20]}",
+            )
+            logger.info(f"[note_editing] ✓ 补话题下拉点选成功: {option.get('matched')!r}")
+            added.append(tag_name)
+        else:
+            # 回删**之前**先取证(回删后正文框就看不出打进去过什么了)
+            detail = topic_failure_detail(tag_name, option, (read_body_value(page) or "")[-40:])
+            logger.info(
+                f"[note_editing] 补话题未选中({detail['reason']}),回删不插入 | "
+                f"候选 {detail.get('candidates')} | 正文末尾「{detail['editor_tail']}」"
+            )
+            failed.append(detail)
+            try:
+                page.keyboard.press("Escape")
+                for _ in range(len(tag_text)):
+                    page.keyboard.press("Backspace")
+            except Exception as exc:  # noqa: BLE001 — 回删失败只记一笔,不阻断其余话题
+                logger.info(f"[note_editing] 回删话题异常: {exc}")
+        human.wait(0.8, 1.5, context="话题处理")
+    if added and not failed:
+        status = "done"
+    elif added:
+        status = "partially_applied"
+    else:
+        status = "error"
+    return {"status": status, "in_editor_added": added, "failed": failed}

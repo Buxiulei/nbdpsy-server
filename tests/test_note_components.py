@@ -150,6 +150,7 @@ class Editor:
         cover_no_cover=True,
         cover_entry_absent=False,
         cover_persists_on_readback=True,
+        drop_topics_on_submit=(),
     ):
         self.permission = permission
         self.row_band_probes = []  # 防遮挡带探测记录(选择器)
@@ -205,6 +206,8 @@ class Editor:
         # persists_on_readback = 提交后重进页面还认不认(false 复刻"静默丢弃")。
         self.cover_entry_absent = cover_entry_absent
         self.cover_persists_on_readback = cover_persists_on_readback
+        # 补话题:提交后平台**静默丢弃**这些话题(复刻"点了却没真挂上",回读判据的试金石)
+        self.drop_topics_on_submit = tuple(drop_topics_on_submit)
         self.cover_declared_for_real = not cover_no_cover
         self.cover_no_cover = cover_no_cover
         self.cover_fingerprint = "cdn/frame-0"
@@ -265,6 +268,8 @@ class Editor:
     def submit(self):
         """点发布:服务端处理 —— 这里回放"合集被静默丢弃"与"权限被改"两种实测坏行为。"""
         self.submitted += 1
+        for name in self.drop_topics_on_submit:
+            self.body = self.body.replace(f"#{name}[话题]#", "").strip()
         if self.cover_chosen:
             self.cover_declared_for_real = True
         if self.drop_collection_on_submit:
@@ -2592,4 +2597,124 @@ def test_original_declaration_with_collection_submits_once(monkeypatch, wired):
 
     assert editor.submitted == 1, "提交次数就是风险次数"
     assert out["applied"] == {"collection": True, "original_declaration": True}
+    assert out["status"] == "done"
+
+
+# ---------------- 补挂话题(追加语义,2026-08-08)----------------
+#
+# 编排层测试:话题的 DOM 步骤(append_topics)由 test_note_topics.py 单独钉死,这里把它
+# 打桩成"往 editor.body 追加话题实体",专测 set_note_components 的编排——追加差集算得对、
+# 提交决策把补上话题算成要提交、回读取平台实况(非乐观态)、结果键汇总与 status 折算。
+
+
+def _stub_append_topics(monkeypatch, editor):
+    """把 bnc.append_topics 打桩:命中的话题写进 editor.body(#名字[话题]#),模拟点选成实体。
+
+    返回记录调用的 dict(seen["to_add"]),供断言"编排层只把差集喂进来"。
+    """
+    seen = {}
+
+    def fake_append(page, human, to_add):
+        seen["to_add"] = list(to_add)
+        for tag in to_add:
+            name = str(tag).lstrip("#").strip()
+            editor.body = f"{editor.body} #{name}[话题]#"
+        return {"status": "done", "in_editor_added": [str(t).lstrip("#").strip()
+                                                       for t in to_add], "failed": []}
+
+    monkeypatch.setattr(bnc, "append_topics", fake_append)
+    return seen
+
+
+def test_topics_appended_keeps_existing_and_reads_back_all(monkeypatch, wired):
+    """验收「追加语义」:已有 1 个话题,补 4 个 → 只补差集、提交后回读得 5 个、原 1 个保留。"""
+    editor = Editor(body="正文 #过度寻求保证[话题]#")
+    _wire(monkeypatch, editor, wired)
+    seen = _stub_append_topics(monkeypatch, editor)
+
+    out = _run(editor, topics=["投射性认同", "焦虑型依恋", "亲密关系", "心理科普"])
+
+    # 编排层只把"现有没有的"喂给补话题步骤(去重差集)
+    assert seen["to_add"] == ["投射性认同", "焦虑型依恋", "亲密关系", "心理科普"]
+    assert editor.submitted == 1
+    assert out["status"] == "done"
+    # applied.topics 是**平台实况全量话题列表**:5 个,原「过度寻求保证」保留
+    assert set(out["applied"]["topics"]) == {
+        "过度寻求保证", "投射性认同", "焦虑型依恋", "亲密关系", "心理科普"
+    }
+    assert len(out["applied"]["topics"]) == 5
+    assert set(out["topics_added"]) == {"投射性认同", "焦虑型依恋", "亲密关系", "心理科普"}
+    assert out["topics_existing"] == ["过度寻求保证"]
+    assert out["topics_truncated"] == []
+    assert out["topics_failed"] == []
+
+
+def test_topics_readback_reflects_platform_truth_not_optimistic(monkeypatch, wired):
+    """回读判据 = 平台实况:点选了 3 个但平台静默丢 1 个 → applied.topics 只认真挂上的。"""
+    editor = Editor(body="正文", drop_topics_on_submit=("被丢弃",))
+    _wire(monkeypatch, editor, wired)
+    _stub_append_topics(monkeypatch, editor)
+
+    out = _run(editor, topics=["投射性认同", "被丢弃", "亲密关系"])
+
+    assert editor.submitted == 1
+    # 乐观态会报 3 个全成;平台实况只有 2 个(被丢弃的没挂上)
+    assert set(out["applied"]["topics"]) == {"投射性认同", "亲密关系"}
+    assert set(out["topics_added"]) == {"投射性认同", "亲密关系"}
+    # 没挂上的进 topics_failed,原因是"回读没确认"(非连坐,其余两个照样成)
+    failed_tags = {f["component"] for f in out["topics_failed"]}
+    assert failed_tags == {"topic:被丢弃"}
+    assert "not_confirmed_on_readback" in out["topics_failed"][0]["reason"]
+    # 一个话题没挂上 → 整体部分生效,不谎报 done
+    assert out["status"] == "partially_applied"
+
+
+def test_topics_all_present_is_idempotent_zero_submit(monkeypatch, wired):
+    """请求的话题全已挂 → 差集为空、零点击零提交(幂等),applied.topics 仍给现有实况。"""
+    editor = Editor(body="正文 #复杂性创伤[话题]# #CPTSD[话题]#")
+    _wire(monkeypatch, editor, wired, publish=False)   # 不该点发布
+    seen = _stub_append_topics(monkeypatch, editor)
+
+    out = _run(editor, topics=["复杂性创伤", "#CPTSD"])
+
+    assert "to_add" not in seen              # 差集空 → append_topics 压根没被调用
+    assert editor.submitted == 0             # 幂等零提交
+    assert out["status"] == "done"
+    assert set(out["applied"]["topics"]) == {"复杂性创伤", "CPTSD"}
+    assert out["topics_added"] == []
+
+
+def test_topics_truncated_over_ten_reports_which_kept(monkeypatch, wired):
+    """验收「上限截断」:现有 8 + 补 4 → 只补 2、截 2,truncated 如实说明,整体部分生效。"""
+    existing = " ".join(f"#旧{i}[话题]#" for i in range(8))
+    editor = Editor(body=f"正文 {existing}")
+    _wire(monkeypatch, editor, wired)
+    seen = _stub_append_topics(monkeypatch, editor)
+
+    out = _run(editor, topics=["新A", "新B", "新C", "新D"])
+
+    assert seen["to_add"] == ["新A", "新B"]           # 只补补得下的 2 个
+    assert editor.submitted == 1
+    assert len(out["applied"]["topics"]) == 10        # 填满上限
+    assert set(out["topics_added"]) == {"新A", "新B"}
+    assert out["topics_truncated"] == ["新C", "新D"]
+    truncated_fail = {f["component"] for f in out["topics_failed"]}
+    assert truncated_fail == {"topic:新C", "topic:新D"}
+    assert all("truncated_over_cap" in f["reason"] for f in out["topics_failed"])
+    # 有补上的也有截掉的 → 部分生效
+    assert out["status"] == "partially_applied"
+
+
+def test_topics_combine_with_collection_single_submit(monkeypatch, wired):
+    """话题与合集混在一次请求:仍只一次提交,两者各自回读,applied 同时含 collection 与 topics。"""
+    editor = Editor(body="正文")
+    _wire(monkeypatch, editor, wired)
+    _stub_append_topics(monkeypatch, editor)
+
+    out = _run(editor, collection_id="c1", collection_name="咨询师简介",
+               topics=["心理科普"])
+
+    assert editor.submitted == 1, "话题+组件仍只一次全量覆盖提交"
+    assert out["applied"]["collection"] is True
+    assert out["applied"]["topics"] == ["心理科普"]
     assert out["status"] == "done"

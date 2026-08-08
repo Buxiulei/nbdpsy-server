@@ -156,7 +156,7 @@ async def test_start_202_and_payload(tmp_path, monkeypatch):
             "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": "n-quote", "activity_id": "43561",
             "related_counselor": None, "set_original_declaration": False,
-            "cover": None,
+            "cover": None, "topics": None,
         }
 
         poll = await c.get(
@@ -942,3 +942,84 @@ def test_polling_manifest_lists_original_declaration_in_applied():
         if e["method"] == "GET" and "{job_id}" in e["path"]
     )
     assert "original_declaration" in entry["returns"]
+
+
+# ---------------- 补挂话题(追加语义,2026-08-08)----------------
+
+
+async def test_topics_alone_is_a_valid_request_and_carried_in_payload(tmp_path, monkeypatch):
+    """只给 topics 就构成一次合法请求(存量视频笔记补话题的主用例),按同名落进 payload。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("补话题号", "uNcTopicOnly", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "6a75e8740000000005033256",
+            "topics": ["复杂性创伤", "#CPTSD", "创伤后应激"],
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 202, r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import select
+
+            row = await s.scalar(select(BrowserJob))
+        payload = json.loads(row.payload)
+        assert row.kind == "note_components"
+        assert payload["topics"] == ["复杂性创伤", "#CPTSD", "创伤后应激"]
+        # 只补话题就不该顺带挂上任何组件
+        assert payload["collection_id"] is None and payload["quoted_note_id"] is None
+
+
+async def test_topics_all_blank_is_422(tmp_path, monkeypatch):
+    """topics 给了却全是空白 → 422(表达了意图却给不出内容,静默忽略=假成功),不登记任务。"""
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("空白话题号", "uNcTopicBlank", _COOKIES)
+        r = await c.post(f"/api/accounts/{acc}/note-components", json={
+            "note_id": "n1", "topics": ["", "  ", "\t"],
+        }, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 422, r.text
+        assert "topics" in r.text
+
+        async with db_module.async_session() as s:
+            from sqlalchemy import func, select
+
+            assert await s.scalar(select(func.count()).select_from(BrowserJob)) == 0
+
+
+def test_service_passes_topics_to_browser_layer(monkeypatch):
+    """服务层 → 浏览器层的 topics 参数名不许漂:``_apply_sync`` 收到什么原样传下去。"""
+    seen = {}
+
+    def fake_set(page, account_id, note_id, **kwargs):
+        seen.update(kwargs)
+        return {"status": "done", "applied": {}}
+
+    class _Client:
+        def __init__(self, *_a, **_kw):
+            self.page = object()
+
+        def start(self):
+            return {"success": True}
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(note_components, "set_note_components", fake_set)
+    monkeypatch.setattr(note_components, "SyncClient", _Client)
+    note_components._apply_sync(
+        1, _COOKIES, "n1",
+        {"collection_id": None, "remove_collection_id": None,
+         "quoted_note_id": None, "activity_id": None},
+        None, None, None, False, None, ["投射性认同", "心理科普"],
+    )
+    assert seen["topics"] == ["投射性认同", "心理科普"]
+
+
+def test_manifest_documents_topics_param():
+    """防漂移:POST note-components 的 manifest 参数表里 topics 在场(与实现同 commit)。"""
+    from app.http.note_components_rest import MANIFEST_ENTRIES
+
+    post = next(e for e in MANIFEST_ENTRIES
+                if e["method"] == "POST" and e["path"].endswith("/note-components"))
+    assert "topics" in post["params"]
+    assert "追加" in post["params"]["topics"]

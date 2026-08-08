@@ -32,7 +32,11 @@ from sqlalchemy import select
 
 from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
-from app.browser.atomic_tasks import XHS_MAX_BODY_LENGTH, XHS_MAX_TITLE_DISPLAY
+from app.browser.atomic_tasks import (
+    XHS_MAX_BODY_LENGTH,
+    XHS_MAX_TITLE_DISPLAY,
+    XHS_MAX_TOPICS,
+)
 from app.browser.images import materialize_images
 from app.browser.note_components import DEFAULT_ACTIVITY_KEYWORDS, filter_activities
 from app.browser.text_formatter import get_display_length
@@ -169,13 +173,23 @@ MANIFEST_ENTRIES = [
                      "components.cover.status='skipped'、applied.cover=true、**零点击**;"
                      "若这次请求只有它一件事且落了 skipped,**一次发布都不点**,批量重跑安全。"
                      "单独给它就构成一次有效请求)",
+            "topics": "body,list[str]|None(**补挂话题**,2026-08-08 上线,为存量视频笔记补"
+                      "话题空置。**追加语义不是替换**:传入话题**追加**到现有话题、去重、"
+                      f"总数 >10 截断(小红书单篇 ≤{XHS_MAX_TOPICS};全量替换在已有话题的笔记上"
+                      "太危险,一次手滑清空别人的话题,故只做追加)。带 # 或不带都行,内部规整"
+                      "去重。回读判据是**平台实况**(applied.topics 反映真挂上的全量话题,不是"
+                      "点了就算);逐个话题独立成败,失败进 failed[](component=`topic:话题名`)"
+                      "带原因、**不连坐**其余话题;请求的全已挂 → 零点击零提交(幂等)。"
+                      "**任何 note_type 都受理**(视频/图文都靠正文编辑器输话题,与封面只对视频"
+                      "不同);单独给它就构成一次有效请求)",
         },
         "returns": '{job_id, status:"queued"}',
         "errors": "403=无该号授权;404=账号不存在,或**带编辑字段时**台账里查无此 note_id;"
-                  "422=note_id 为空,或十个字段一个都没给,或只给了 related_counselor 但"
+                  "422=note_id 为空,或所有可选字段一个都没给,或只给了 related_counselor 但"
                   "推导不出任何公开推介笔记(以上三种这次编辑都什么都不会改),"
                   "或 collection_id 与 remove_collection_id 同时给(加入与移出语义相反),"
                   "或 set_original_declaration 传了 false(只支持开启);"
+                  "或 topics 给了却全是空白(补话题至少要有一个非空话题名);"
                   "422 还包括编辑字段自身不合法:title 显示长度 >20 / content 为空串或 >900 / "
                   "给了图片操作却没给 expected_image_count / remove 下标重复或越界 / "
                   "删完原图剩 <1 / 改完总数 >18 / add_images 落盘失败 / "
@@ -240,6 +254,15 @@ MANIFEST_ENTRIES = [
                  "④ **绝不碰**「智能推荐封面」的候选图与「PK封面」开关(点它们=换成平台的图"
                  "而不是你给的封面,是比失败更难发现的静默错误);定位不到入口时带**当场取证**"
                  "(封面区 outerHTML)报 error,绝不静默假装换过。"
+                 "**补挂话题(topics)另有四条**(2026-08-08 上线,存量视频笔记补话题空置):"
+                 "① **追加不替换**——先读现有话题算差集,只补差集、去重、总数 >10 截断"
+                 "(截掉的进 topics_truncated 如实说明留了哪些);验收:已有 1 个补 4 个 → 结果 "
+                 "5 个、原 1 个保留;② **回读判据是平台实况**——提交后重进页面读正文里的话题实体,"
+                 "applied.topics 反映真挂上的全量话题(不是点了就算,发布链的话题正是乐观态踩的雷);"
+                 "③ **逐个独立不连坐**——某个话题平台没有/下拉没弹 → 它进 failed[] 带当场证据、"
+                 "被 Escape+回删绝不留残缺文本,其余话题照常挂上;④ **幂等零提交**——请求的话题"
+                 "全已挂 → 零点击零提交(存量批量补齐时对已达标的笔记跑这条是安全的)。"
+                 "话题是追加(非破坏性)**不弃提交**:某个没挂上不影响其余组件。"
                  "⚠️ **改封面这条链尚未跑过真号 e2e**(选择器由 2026-08-08 真号只读取证锁定,"
                  "但真上传+提交那一段没实跑过):**首批先跑 1-2 篇、到笔记里人工确认封面真的"
                  "换了再放量**,看到 false 别直接重跑(每次重跑都是一次真提交)。"
@@ -284,11 +307,12 @@ MANIFEST_ENTRIES = [
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, result_status?, applied?:{collection/collection_remove/quote/"
                    "activity/original_declaration/cover/title/content/image_add/image_remove: "
-                   "true|false|null}, "
+                   "true|false|null, **topics: [平台实况话题名] | null**}, "
                    "failed?:[{component,reason}], submitted?, permission_before?, "
                    "permission_after?, permission_preserved?, permission_restored?, "
-                   "body_appended?, topics_injected?, topics_dropped?, images_before?, "
-                   "images_after?, ledger_synced?, aborted_before_submit?, reason?}",
+                   "body_appended?, topics_injected?, topics_dropped?, "
+                   "topics_existing?, topics_added?, topics_truncated?, topics_failed?, "
+                   "images_before?, images_after?, ledger_synced?, aborted_before_submit?, reason?}",
         "errors": "403=无该号授权;404=job_id 不存在",
         "notes": "status 五态:queued / running / done / error(附 reason)/ "
                  "**unknown(执行进程中断,改没改成未知)**。"
@@ -323,7 +347,13 @@ MANIFEST_ENTRIES = [
                  "结果(false 只表示台账没同步上,平台侧改动照样是真的);"
                  "**aborted_before_submit=true 是特殊终态**:破坏性编辑步失败导致主动放弃"
                  "提交,**笔记原样未动,可直接安全重试**——与「提交了但只成一半」完全不同,"
-                 "别按同一套处理。",
+                 "别按同一套处理。"
+                 "── 补话题(topics)相关的键:**applied.topics 是列表不是三态 bool**——它是"
+                 "提交后回读到的**平台实况全量话题名**(null=没能回读,未确认);topics_existing="
+                 "补之前笔记已有的话题;topics_added=本次 to_add 里回读确认真挂上的;"
+                 "topics_truncated=因超 10 上限没补的;topics_failed=[{component:`topic:话题名`,"
+                 "reason}] 逐个失败原因(下拉没中/回读没确认/超上限截断),**不连坐**其余话题也"
+                 "不连坐其余组件。验收「补 4 个后结果 5 个、原 1 个保留」看的就是 applied.topics 的长度。",
     },
 ]
 
@@ -478,6 +508,16 @@ class NoteComponentsRequest(BaseModel):
                     "传了直接 422。**幂等**:这篇已经是自定义封面 → status='skipped'、"
                     "applied.cover=true 且**零点击**",
     )
+    topics: list[str] | None = Field(
+        default=None,
+        description="给这篇**补挂话题**(2026-08-08,存量视频笔记话题空置的补救)。语义是"
+                    "**追加**不是替换:传入话题**追加**到现有话题、去重、总数 >10 截断"
+                    f"(小红书单篇 ≤{XHS_MAX_TOPICS} 个)。全量替换在已有话题的笔记上太危险"
+                    "(一次手滑清空别人的话题),故只追加。回读判据是**平台实况**:提交后重进"
+                    "页面读正文里的话题实体,applied.topics 反映真挂上的全量话题(不是点了就算);"
+                    "逐个话题独立成败,失败进 topics_failed 带原因、不连坐其余。请求的全已挂 → "
+                    "零点击零提交(幂等)。带 # 或不带都行,内部规整去重",
+    )
 
     @model_validator(mode="after")
     def _original_declaration_is_open_only(self):
@@ -491,6 +531,21 @@ class NoteComponentsRequest(BaseModel):
             raise ValueError(
                 "set_original_declaration 只支持 true(开启):关闭原创声明的平台行为"
                 "未取证且是破坏性动作,本期不做;不想补声明就整个字段别传"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _topics_not_all_blank(self):
+        """``topics`` 给了就得至少有一个非空话题 —— 全空白/空列表是"表达了意图却给不出内容"。
+
+        静默忽略它就是这条产品线最忌讳的假成功(调用方以为补了话题,其实一个都没提交);
+        当场 422 打回,和请求体其它字段同样的失败语义。不去重不截断(那是追加语义的浏览器层
+        逻辑,``plan_topic_appends`` 按现有话题现算),这里只挡"整列都是空白"。
+        """
+        if self.topics is not None and not any((t or "").strip() for t in self.topics):
+            raise ValueError(
+                "topics 给了却全是空白 —— 补挂话题至少要有一个非空话题名;"
+                "不想补话题就整个字段别传"
             )
         return self
 
@@ -520,12 +575,13 @@ class NoteComponentsRequest(BaseModel):
                 self.add_images,
                 self.remove_image_indexes,
                 self.cover,
+                self.topics,
             )
         ):
             raise ValueError(
                 "collection_id / remove_collection_id / quoted_note_id / activity_id / "
                 "related_counselor / set_original_declaration / title / content / "
-                "add_images / remove_image_indexes / cover 至少要给一个"
+                "add_images / remove_image_indexes / cover / topics 至少要给一个"
             )
         return self
 
@@ -757,7 +813,8 @@ async def start_note_components_endpoint(
     # 那一关同样拦掉。
     if edits is None and not any(
         (payload.collection_id, payload.remove_collection_id, quoted_note_id,
-         payload.activity_id, payload.set_original_declaration, payload.cover)
+         payload.activity_id, payload.set_original_declaration, payload.cover,
+         payload.topics)
     ):
         # 用 422 而不是裸 ValueError(→400):与请求体校验那一关同样的失败语义,
         # 调用方不该因为"拦在哪一层"看到两种状态码。
@@ -784,6 +841,7 @@ async def start_note_components_endpoint(
         remove_collection_name=payload.remove_collection_name,
         set_original_declaration=bool(payload.set_original_declaration),
         cover=payload.cover,
+        topics=payload.topics,
         edits=edits,
     )
     return {"job_id": job_id, "status": "queued"}
@@ -818,6 +876,9 @@ async def get_note_components_endpoint(job_id: str) -> dict:
             # image_add / image_remove 走上面 applied 那一项原样透传,不必单列。
             "topics_dropped", "images_before", "images_after", "ledger_synced",
             "aborted_before_submit",
+            # 补话题(2026-08-08):applied.topics 走上面 applied 那一项透传;这里补它的
+            # 明细键。存量视频笔记补话题的回执靠它们(追加语义 + 平台实况 + 逐项失败)。
+            "topics_existing", "topics_added", "topics_truncated", "topics_failed",
         ):
             if key in result:
                 view[key] = result[key]

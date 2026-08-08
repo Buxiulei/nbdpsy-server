@@ -664,7 +664,7 @@ async def test_service_passes_cover_to_browser_layer(monkeypatch):
 
     def fake_apply(_aid, _cookies, _note, _components, edits=None, collection_name=None,
                    remove_collection_name=None, set_original_declaration=False,
-                   cover_path=None):
+                   cover_path=None, topics=None):
         seen["cover_path"] = cover_path
         return {"status": "done", "applied": {"cover": True}}
 

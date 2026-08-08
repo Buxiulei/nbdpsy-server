@@ -298,7 +298,7 @@ async def test_pure_component_request_skips_ledger_precheck(tmp_path, monkeypatc
             "note_id": "台账里没有这篇", "collection_id": "c1", "collection_name": None,
             "remove_collection_id": None, "remove_collection_name": None,
             "quoted_note_id": None, "activity_id": None, "related_counselor": None,
-            "set_original_declaration": False, "cover": None,
+            "set_original_declaration": False, "cover": None, "topics": None,
         }
 
 

@@ -52,16 +52,19 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from app.browser.atomic_tasks import XHS_MAX_TOPICS
 from app.browser.creator_export import _goto_creator
 # 已发布笔记编辑的两个实现模块(T4/T5)。**单向依赖**:它们绝不 import 本模块(会成环),
 # 编排点在本文件 —— 这正是设计第二节那条"结构性修正"(新逻辑不再堆进本已 1541 行的文件,
 # 但提交路径仍然只有这里一条)。``add_images`` / ``remove_images`` 改名 import:
 # ``set_note_components`` 的同名入参会在函数体里把模块级函数遮住。
 from app.browser.note_editing import (
+    append_topics,
     apply_content_edit,
     apply_title_edit,
     content_prefix_ok,
     image_count_equation,
+    plan_topic_appends,
     read_body_value,
     read_title_value,
 )
@@ -2208,6 +2211,93 @@ def _skipped_components(
 _IDEMPOTENT_NOOP_KEYS = ("collection_remove", "original_declaration", "cover")
 
 
+def _finalize_topics(
+    result: Dict[str, Any],
+    plan: Dict[str, Any],
+    step: Optional[Dict[str, Any]],
+    topics_after: Optional[List[str]],
+) -> Dict[str, Any]:
+    """把补话题的计划 / 编辑器结果 / 回读实况汇总进对外结果,并把话题成败折进整体 status。
+
+    补话题(2026-08-08 需求)语义是**追加**:``plan`` 由 ``plan_topic_appends`` 算好差集。
+    这条产品线的失败是静默的,所以话题也**只认回读的平台实况**,不是"点了就算":
+
+    - ``applied.topics`` = 回读到的平台实况**全量**话题列表(``None``=没能回读)——验收
+      「补 4 个后结果 5 个、原 1 个保留」看的就是它;
+    - ``topics_added`` = ``to_add`` 里回读确认真挂上的;``topics_truncated`` = 因超 10 上限
+      没补的;``topics_failed`` = 逐个失败原因(下拉没中 / 回读没确认 / 超上限截断),
+      **不连坐**其余话题也不连坐其余组件;
+    - status 折算:每个 ``to_add`` 是一个单元(回读确认才 True),``truncated`` 各算一个
+      失败单元;``to_add`` 与 ``truncated`` 都空(请求的全已挂)算一个成功单元(幂等成功)。
+    """
+    to_add = plan["to_add"]
+    truncated = plan["truncated"]
+    step_failed = {f["tag"]: f for f in (step or {}).get("failed", [])}
+    if topics_after is None:
+        confirmed: Optional[List[str]] = None
+        added: List[str] = []
+        missing = list(to_add)
+    else:
+        confirmed = list(topics_after)
+        after_set = set(topics_after)
+        added = [t for t in to_add if t in after_set]
+        missing = [t for t in to_add if t not in after_set]
+
+    result["applied"]["topics"] = confirmed
+    result["topics_existing"] = plan["existing"]
+    result["topics_added"] = added
+    result["topics_truncated"] = truncated
+
+    failed: List[Dict[str, Any]] = []
+    for tag in missing:
+        if tag in step_failed:
+            extra = {k: v for k, v in step_failed[tag].items() if k not in ("tag", "reason")}
+            failed.append({
+                "component": f"topic:{tag}",
+                "reason": step_failed[tag].get("reason", "topic_dropdown_miss"),
+                **extra,
+            })
+        else:
+            failed.append({
+                "component": f"topic:{tag}",
+                "reason": "topic_not_confirmed_on_readback: 编辑器内点选了但回读平台实况里"
+                          "没有(可能被静默丢弃)——先核对当前话题再决定,别盲目重跑",
+            })
+    for tag in truncated:
+        failed.append({
+            "component": f"topic:{tag}",
+            "reason": f"topic_truncated_over_cap: 现有话题够多,补上会超过 {XHS_MAX_TOPICS} "
+                      f"个上限,本个未补(追加语义:先来的先补)",
+        })
+    result["topics_failed"] = failed
+    result["failed"].extend(failed)
+
+    # 折算整体 status:非话题单元(applied 里除 topics 外的三态 bool)+ 话题单元
+    non_topic = [v for k, v in result["applied"].items() if k != "topics"]
+    topic_units: List[bool] = []
+    if to_add or truncated:
+        confirmed_set = set(confirmed or [])
+        topic_units.extend(tag in confirmed_set for tag in to_add)
+        topic_units.extend([False] * len(truncated))
+    else:
+        topic_units.append(True)  # 请求的全已挂 = 一个成功单元(幂等成功,零点击)
+    units = non_topic + topic_units
+    oks = sum(1 for v in units if v is True)
+    if units and oks == len(units):
+        result["status"] = "done"
+        result.pop("error", None)
+    elif oks:
+        result["status"] = "partially_applied"
+        result.pop("error", None)
+    else:
+        result["status"] = "failed"
+        result["error"] = (
+            "note_components_all_failed: 请求的组件/话题一项都没确认生效;"
+            f"逐项原因见 failed({[f['component'] for f in result['failed']]})"
+        )
+    return result
+
+
 # ---------------- 编辑已发布笔记:完整流程 ----------------
 
 
@@ -2229,8 +2319,9 @@ def set_note_components(
     expected_image_count: Optional[int] = None,
     set_original_declaration: bool = False,
     cover_path: Optional[str] = None,
+    topics: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片 / 换封面:进更新页 → 改 → 提交 → 回读。
+    """给一篇**已发布**笔记设组件 / 改标题正文 / 增删图片 / 换封面 / 补挂话题:进更新页 → 改 → 提交 → 回读。
 
     **全流程只有一次提交**(⑧那一次 ``click_publish``),这是方案 A 的立命之本:提交是
     全量覆盖语义,提交次数就是风险次数。文本 / 图片 / 组件混在一次请求里也只覆盖一次。
@@ -2258,6 +2349,13 @@ def set_note_components(
             封面就是第一张图,更新页上根本没有封面区)。走更新页「设置封面」弹窗
             (``apply_cover_change``),与发布页那条内联链是两个操作面。幂等:已经是
             自定义封面 → ``skipped`` 且**零点击**;失败**不阻断**其余组件。
+        topics: 给这篇**补挂话题**(2026-08-08,存量视频笔记话题空置的补救)。语义是
+            **追加**不是替换 —— 先读现有话题算差集(``plan_topic_appends``),只补差集、
+            去重、总数 >10 截断(全量替换在已有话题的笔记上太危险)。话题输入走发布链同一套
+            正向判据(``append_topics`` → ``topic_dropdown.select_topic_option``),逐个独立
+            成败、失败回删不留残缺、**不连坐**其余话题也不弃提交。回读判据是**平台实况**:
+            提交后重进页面读正文里的话题实体,``applied.topics`` 反映真挂上的全量话题
+            (不是"点了就算")。请求的全已挂 → 零点击零提交(幂等)。
 
     Returns:
         ``{"status": "done"|"partially_applied"|"failed", "applied": {...}, "failed": [...],
@@ -2372,7 +2470,36 @@ def set_note_components(
             )
 
         body_after = read_body_text(page)
-        # ⑥ 提交决策:组件 done/skipped 或**任一编辑步 done** 都算"有东西可提交"
+
+        # ⑤quater 补挂话题(2026-08-08,追加语义):**读现有话题 → 算差集 → 只补差集**。
+        # 现有话题以 body_after 为准(此刻正文已含活动可能注入的话题,一并去重免得重复挂)。
+        # 话题是追加(非破坏性):失败只是"没挂上",正文原内容无损,故**不阻断**其余组件、
+        # 也不弃提交。body_after 在**补话题之前**读定,故 topics_injected(活动注入)不会被
+        # 我补的话题污染。
+        topic_plan: Optional[Dict[str, Any]] = None
+        topic_step: Optional[Dict[str, Any]] = None
+        if topics:
+            topic_plan = plan_topic_appends(extract_topics(body_after), topics)
+            if topic_plan["to_add"]:
+                try:
+                    topic_step = append_topics(page, human, topic_plan["to_add"])
+                except Exception as exc:  # noqa: BLE001 — 辅助步绝不阻断其余组件
+                    topic_step = {
+                        "status": "error", "in_editor_added": [],
+                        "failed": [{"tag": t, "reason": f"topics_exception: {exc}"}
+                                   for t in topic_plan["to_add"]],
+                    }
+                logger.info(
+                    f"[note_components] 补话题: {topic_step.get('status')} "
+                    f"added={topic_step.get('in_editor_added')} "
+                    f"truncated={topic_plan['truncated']}"
+                )
+            else:
+                # 请求的全已挂 / 全被上限截掉:一个都不打字(零点击)
+                topic_step = {"status": "skipped", "in_editor_added": [], "failed": []}
+        topics_added_in_editor = bool(topic_step and topic_step.get("in_editor_added"))
+
+        # ⑥ 提交决策:组件 done/skipped 或**任一编辑步 done** 或**补上了话题**都算"有东西可提交"
         in_editor_ok = [k for k, v in outcomes.items() if v["status"] in ("done", "skipped")]
         edits_ok = [k for k, v in edits["outcomes"].items() if v.get("status") == "done"]
         # ⑥bis **幂等零点击不提交**:``collection_remove`` 落 skipped 表示"本就不在该合集",
@@ -2385,31 +2512,42 @@ def set_note_components(
             key for key in _IDEMPOTENT_NOOP_KEYS
             if (outcomes.get(key) or {}).get("status") == "skipped"
         ]
-        if noop_skipped and set(in_editor_ok) <= set(noop_skipped) and not edits_ok:
+        # 补话题不算"要提交的变更"仅当它零点击(全已挂/全截断);补上了话题就得提交。
+        if (noop_skipped and set(in_editor_ok) <= set(noop_skipped) and not edits_ok
+                and not topics_added_in_editor):
             logger.info(
                 f"[note_components] 账号{account_id} note_id={note_id}: "
                 f"{noop_skipped} 本就已是目标状态,零点击零提交(幂等)"
             )
-            return _compose(
+            result = _compose(
                 note_id, outcomes, {key: True for key in noop_skipped}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_after,
                 edit_outcomes=edits["outcomes"], images_before=images_before,
                 images_after=None, topics_dropped=edits["topics_dropped"],
             )
-        if not in_editor_ok and not edits_ok:
-            # 编辑器里一项都没设上 —— 提交毫无意义,而每次提交都是一次全量覆盖,不做
+            if topic_plan is not None:
+                # 没提交 → 平台实况就是编辑器现有话题(补话题没打任何字)
+                _finalize_topics(result, topic_plan, topic_step, topic_plan["existing"])
+            return result
+        if not in_editor_ok and not edits_ok and not topics_added_in_editor:
+            # 编辑器里一项都没设上 —— 提交毫无意义,而每次提交都是一次全量覆盖,不做。
+            # (补话题若全已挂 → topic_plan.to_add 空,幂等成功走这里;若请求的词全都下拉
+            #  没命中 → in_editor_added 空,也走这里,话题逐项失败原因由 _finalize_topics 给出。)
             logger.warning(
                 f"[note_components] 账号{account_id} note_id={note_id}: "
                 f"编辑器内一项都没设上,不点发布(避免无意义的全量覆盖提交)"
             )
-            return _compose(
+            result = _compose(
                 note_id, outcomes, {}, submitted=False,
                 permission_before=permission_before, permission_after=permission_before,
                 body_before=body_before, body_after=body_after,
                 edit_outcomes=edits["outcomes"], images_before=images_before,
                 images_after=None, topics_dropped=edits["topics_dropped"],
             )
+            if topic_plan is not None:
+                _finalize_topics(result, topic_plan, topic_step, topic_plan["existing"])
+            return result
 
         # ⑦ 点发布前再读一次权限:不符立刻中止,**不点** —— 这是硬约束,不是可选校验
         permission_now = read_permission_label(page)
@@ -2463,6 +2601,12 @@ def set_note_components(
         if readback["read_back"]:
             # 标题/正文的回读真值:服务层台账回写只认它(不拿请求值凑数,编辑设计 3.3)
             result["read_back"] = readback["read_back"]
+        # ⑨bis 补话题回读:_verify_after_submit 已重进更新页,此刻读正文里的话题实体就是
+        # **平台实况**(不是"点了就算")。读不出正文 → None(applied.topics=None,未确认)。
+        if topic_plan is not None:
+            topics_after = extract_topics(read_body_text(page)) if submitted is not None \
+                else topic_plan["existing"]
+            _finalize_topics(result, topic_plan, topic_step, topics_after)
         # ⑩ 权限被改动:大声告警 + 尝试改回(只有实测支持的两档能改回)
         if permission_after is not None and permission_after != permission_before:
             result["permission_restored"] = _restore_permission(
