@@ -9,3 +9,6 @@ __pycache__/
 # 本地环境变量(含 API 密钥/SECRET_KEY,绝不入库;样例见 .env.example)
 .env
 .gitnexus
+
+# 真号取证探针锁(scripts/probe_*.py 用 O_EXCL 创建,finally 必删;留仅防异常崩溃残留)
+.probe_lock_account*
