@@ -4102,6 +4102,11 @@ def _open_collection_popover(
     human.click(btn, reason="打开合集弹层")
     body = _wait_body(page, responses, _COLLECTION_API_MARK, _POPOVER_TIMEOUT_S, seen)
     if body is None:
+        # 列表可能在**页面加载时**就随编辑器预取了(号8图文载体首验实测:点「加入合集」只
+        # 渲染缓存、不再发新请求,等"新增响应"必然超时)。回落到已捕获的最近响应 ——
+        # 与 GET /collections 流程同源的"先认预取"语义(RCA 2026-08-09)。
+        body = responses.latest(_COLLECTION_API_MARK)
+    if body is None:
         return {"error": "collection_catalog_unavailable: 点开弹层后没收到合集列表响应,"
                          "建前查重做不了 —— 不查重就建会造出第二个同名合集(平台不去重"
                          "同名已实证),故整单中止"}

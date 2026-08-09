@@ -803,3 +803,25 @@ def test_account_worker_resolves_execute():
     from app import account_worker
 
     assert account_worker._resolve_execute(note_collection_create.KIND) is not None
+
+
+def test_preloaded_catalog_survives_render_only_popover(monkeypatch, fast):
+    """列表随页面加载**预取**、点「加入合集」只渲染缓存不发新请求 → 回落到已捕获的
+    预取响应,查重/创建照常走完。
+
+    号8 图文载体首验实测形态(RCA 2026-08-09):等"点击后的新增响应"必然超时,当时整单
+    误报 collection_catalog_unavailable;回落语义与 GET /collections 流程"先认预取"同源。
+    """
+    scene = Scene()
+    orig_reload = scene.reload
+
+    def reload_with_prefetch():
+        orig_reload()
+        scene.page.emit(_Response(_LIST_URL, _list_body(scene.collections)))
+
+    scene.reload = reload_with_prefetch
+    # 弹层只渲染,不发任何新请求(与真页面行为一致)
+    scene.open_popover = lambda: (setattr(scene, "popover_open", True), scene.render())
+    out = _run(monkeypatch, scene)
+    assert out["status"] == "done", out
+    assert scene.submit_clicked == 1

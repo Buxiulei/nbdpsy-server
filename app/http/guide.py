@@ -227,6 +227,17 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-09",
+        "title": "建笔记合集:弹层列表预取回落——图文载体点弹层不发新请求,误报 catalog_unavailable",
+        "kind": "fix",
+        "summary": "号8 首验实测:图文载体的编辑器在**页面加载时**就预取了合集列表,点「加入"
+                   "合集」只渲染缓存、不再发新请求,而查重那步只等\"点击后的新增响应\",必然"
+                   "超时、整单误报 collection_catalog_unavailable 中止。修:等不到新增响应时"
+                   "回落到已捕获的预取响应(与 GET /collections 流程\"先认预取\"同源),回落"
+                   "仍拿不到才如实中止。首验因此重跑,判据语义不变。",
+        "endpoints": ["/api/accounts/{account_id}/note-collections"],
+    },
+    {
+        "date": "2026-08-09",
         "title": "新能力:**建笔记合集**(图文笔记挂载用的那套合集,与播客合集是两套系统)",
         "kind": "feature",
         "summary": "此前只能建**播客合集**,而图文笔记挂载(``POST /note-components`` 的 "
