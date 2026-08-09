@@ -23,6 +23,15 @@
   以及**播客合集卡的真实文案是「加入播客合集」**(旧占位猜的「播客合集 / 选择合集 /
   加入合集」三个全部落空)。
 
+**08-09 补录(真号 7 单假绿的 observed 实录,判据据此重写、但修法尚未真号复验)**:
+- 「创建」按钮的**真实禁用形态**是 class 里一个**裸 token** ``disabled``(常与
+  ``d-button-primary-loading`` 同现),按钮**没有** disabled 属性、也**没有**
+  ``create-btn-disabled`` —— 旧判据两条全落空,详见 ``create_button_state``;
+- 合集创建**表单右侧渲染一张实时预览卡**,把刚打进输入框的名字原样回显
+  (「<合集名> / 播客 / 更新至0集 / 0人听过」)。所以"页面文本里有这个名字"在表单
+  开着时**是伪证**,详见 ``_read_create_result``;
+- 失败时**表单不会自己关**:表单收没收起,是目前最硬的那条成败分水岭。
+
 **仍未取证(占位值,fail-loud)**:
 - 合集卡点开之后的候选结构(下拉?二级弹窗?)—— 为控制真号操作范围没有再点;
 - 底部固定栏「暂存离开」+「发布」的精确选择器:取证只按 ``[class*=publish-btn]``
@@ -66,6 +75,13 @@ _COVER_INPUT = 'input.upload-input[type="file"]'
 # 也是「创建」,按纯文本找会抓到那个容器(点它不生效,且读不到 disabled)。
 _CREATE_BUTTON = "button.create-btn"
 _CREATE_DISABLED_CLASS = "create-btn-disabled"
+# 真号取到的**第二种**禁用形态(RCA 2026-08-09,7 单假绿):class 里挂一个**裸 token**
+# ``disabled``,按钮既没有 disabled 属性、也没有 ``create-btn-disabled``。
+# 必须按空白切分后**整词**比较:substring 判法会被 ``create-btn-disabled``(另有判据)、
+# 以及将来任何 ``xxx-disabled`` / ``disabled-y`` 类名带偏,把按钮永久判死。
+_CREATE_DISABLED_TOKEN = "disabled"
+# loading 态(同一单实测与裸 disabled 同时出现):封面多半还在上传/处理,点了也白点。
+_CREATE_LOADING_TOKEN = "d-button-primary-loading"
 # 选完封面文件会弹「封面裁剪」二次确认(重新上传 / 取消 / 确定),**不点确定封面就没提交**,
 # 「创建」按钮会一直保持禁用 —— 这是第二轮取证里最贵的一个发现(填全了按钮仍禁用)。
 _CROP_CONFIRM_TEXTS = ("确定", "确认")
@@ -89,7 +105,10 @@ _MAX_EXPOSED_WIDTH_RATIO = 0.5
 # 各步等待窗口(秒)
 _CREATE_PAGE_TIMEOUT_S = 15.0
 _CROP_MODAL_TIMEOUT_S = 20.0
-_CREATE_ENABLE_TIMEOUT_S = 20.0
+# 20 → 45:判据修对之前这一段其实**从没真等过**(裸 disabled token 判成可点、秒过),
+# 所以旧值 20s 是没被真实用过的数。假绿单实测按钮同时挂 loading 态,而这一步等的正是
+# 封面(≤5MB)上传完 + 平台处理完,45s 给它留够余量(RCA 2026-08-09)。
+_CREATE_ENABLE_TIMEOUT_S = 45.0
 _CREATE_RESULT_TIMEOUT_S = 30.0
 
 
@@ -431,18 +450,31 @@ def collection_probe(page) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001
             evidence[key] = False
     evidence["create_button"] = create_button_state(page)
-    try:
-        evidence["page_text"] = _norm(page.inner_text("body"))[:600]
-    except Exception:  # noqa: BLE001
-        evidence["page_text"] = ""
+    evidence["page_text"] = _page_text(page)[:600]
     return evidence
 
 
 def create_button_state(page) -> Dict[str, Any]:
     """读「创建」按钮的禁用态。
 
-    判据 = ``class`` 含 ``create-btn-disabled`` **或** 有 ``disabled`` 属性
-    (真号夹具里两者同时出现;取"或"是防御——平台只留其一时不至于误判成可点)。
+    判据**四路取或**,任一命中即不可点:① 有 ``disabled`` 属性;② ``class`` 含
+    ``create-btn-disabled``;③ ``class`` 按空白切分后含**独立 token** ``disabled``;
+    ④ 同法含 ``d-button-primary-loading``(loading 态点了也白点)。
+
+    ③④ 是 RCA 2026-08-09 补的,依据是真号 7 单假绿里按钮 class 的**原文**::
+
+        d-button d-button-large --size-icon-large --size-text-h6 disabled
+        --color-static bold d-button-primary-loading --color-bg-primary
+        --color-white create-btn
+
+    禁用只体现在裸 token ``disabled`` 上 —— 按钮**没有** disabled 属性、class 里也
+    **没有** ``create-btn-disabled``,①② 双双落空,``_wait_create_enabled`` 于是秒判
+    "可点"、点下一颗禁用按钮无事发生,7 单全部假绿(平台侧一个合集都没建出来)。
+
+    ③④ 坚持**整词**比较而不是 substring:``--color-static`` 这类类名里本来就不含
+    ``disabled``,但 substring 判法会被将来任何 ``xxx-disabled`` 命中,把按钮永久
+    判死(那是比假绿更难查的反向故障)。
+
     找不到按钮返回 ``{"found": False}``,调用方当作**不可点**处理:找不到是页面
     状态异常,不是"可以点了"。
     """
@@ -457,8 +489,68 @@ def create_button_state(page) -> Dict[str, Any]:
         return {"found": False}
     if not isinstance(got, dict) or not got.get("found"):
         return {"found": False}
-    disabled = bool(got.get("disabled_attr")) or _CREATE_DISABLED_CLASS in got.get("cls", "")
-    return {"found": True, "enabled": not disabled, "cls": got.get("cls", "")}
+    cls = got.get("cls") or ""
+    tokens = cls.split()
+    disabled = (
+        bool(got.get("disabled_attr"))
+        or _CREATE_DISABLED_CLASS in cls
+        or _CREATE_DISABLED_TOKEN in tokens
+        or _CREATE_LOADING_TOKEN in tokens
+    )
+    return {"found": True, "enabled": not disabled, "cls": cls}
+
+
+# 「创建」按钮**中心落点**的当场取证:cls 全文 + 矩形 + elementFromPoint 落点元素链。
+# 与 note_editing._FOCUS_FORENSICS_JS 同款纪律(单层 ≤60 字符、全链 ≤300):失败回执要能
+# 回答"下一单为什么还提交不出去"—— 按钮是禁用/loading,还是被别的层盖住了点不到。
+_CREATE_BUTTON_FORENSICS_JS = r"""() => {
+    const b = document.querySelector('button.create-btn');
+    if (!b) return {found: false};
+    const r = b.getBoundingClientRect();
+    const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+    let el = document.elementFromPoint(cx, cy);
+    const hits = !!(el && (el === b || b.contains(el)));
+    const parts = [];
+    for (let i = 0; i < 5 && el; i++) {   // 落点元素本身 + 最多 4 层祖先
+        const cls = typeof el.className === 'string' ? el.className.slice(0, 40) : '';
+        const tag = String(el.tagName || '').toLowerCase();
+        parts.push((cls ? tag + '.' + cls : tag).slice(0, 60));
+        el = el.parentElement;
+    }
+    return {
+        found: true,
+        cls: b.className || '',
+        disabled_attr: b.hasAttribute('disabled'),
+        rect: {x: Math.round(r.x), y: Math.round(r.y),
+               w: Math.round(r.width), h: Math.round(r.height)},
+        point: [Math.round(cx), Math.round(cy)],
+        // 落点在视口外时 elementFromPoint 返回 null:链留 null,好与"点上了但链读不出"区分
+        point_element_chain: parts.length ? parts.join(' < ').slice(0, 300) : null,
+        point_hits_button: hits,
+    };
+}"""
+
+
+def _create_button_forensics(page) -> Dict[str, Any]:
+    """按钮提交失败时抓一份当场证据;读不到只回最小骨架(取证绝不制造新异常)。"""
+    try:
+        got = page.evaluate(_CREATE_BUTTON_FORENSICS_JS)
+    except Exception as exc:  # noqa: BLE001
+        return {"probe_error": str(exc)[:120]}
+    return dict(got) if isinstance(got, dict) else {"probe_error": "non_dict"}
+
+
+def _page_text(page) -> str:
+    """整页可见文本(归一后);读不到返回空串。
+
+    与 ``collection_probe`` 里那份**刻意分开**:那份为了控制回执体积截到 600 字,
+    而"合集名出现在列表里没有"这个判据必须看**全文** —— 合集多起来之后名字很容易
+    落在 600 字以外,截断版会把成功读成失败。
+    """
+    try:
+        return _norm(page.inner_text("body"))
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _wait_selector(page, selector: str, timeout_s: float):
@@ -521,6 +613,9 @@ def create_collection(
         return {"status": "error",
                 "reason": f"collection_entry_not_found: 页面上没有「{_COLLECTION_ENTRY_TEXT}」入口",
                 "observed": collection_probe(page), "tooltip": tooltip}
+    # 进创建表单**之前**先看一眼列表里有没有同名的:号1 的「NBDpsy心理会客厅」创建前
+    # 就已经在列表里,收起表单后再看到这个名字对它**不构成新建证据**(见 _read_create_result)。
+    name_preexisted = name in _page_text(page)
     human.click(entry, reason="新建播客合集")
 
     name_input = _wait_selector(page, _NAME_INPUT, _CREATE_PAGE_TIMEOUT_S)
@@ -557,8 +652,10 @@ def create_collection(
     if not _wait_create_enabled(page):
         return {"status": "error",
                 "reason": "create_button_never_enabled: 三项都填了但「创建」按钮始终禁用"
-                          "(封面裁剪没确认完 / 平台又加了必填项),不点禁用按钮",
-                "observed": collection_probe(page), "cover_crop": crop}
+                          "(封面还在上传/处理 / 封面裁剪没确认完 / 平台又加了必填项),"
+                          "不点禁用按钮",
+                "observed": collection_probe(page), "cover_crop": crop,
+                "create_button_forensics": _create_button_forensics(page)}
 
     button = page.query_selector(_CREATE_BUTTON)
     if button is None:
@@ -566,7 +663,7 @@ def create_collection(
                 "observed": collection_probe(page)}
     human.click(button, reason="创建播客合集")
 
-    return _read_create_result(page, name, tooltip, crop)
+    return _read_create_result(page, name, tooltip, crop, name_preexisted)
 
 
 def _confirm_cover_crop(page, human: SyncHumanActions) -> Dict[str, Any]:
@@ -605,42 +702,83 @@ def _wait_create_enabled(page) -> bool:
     return False
 
 
-def _read_create_result(page, name: str, tooltip: dict, crop: dict) -> Dict[str, Any]:
-    """回读创建结果:创建页收起 + 合集区出现该名称 = done。
+def _read_create_result(
+    page, name: str, tooltip: dict, crop: dict, name_preexisted: bool
+) -> Dict[str, Any]:
+    """回读创建结果:**创建表单收起** ``且`` 收起后页面文本里出现该名称 = done。
 
-    ⚠️ **成功判据未经真号验证**(E5:创建成功的页面反馈形态没抓到,两轮取证都没能
-    真的点下「创建」)。所以这里取两个**互相独立**的信号,任一命中即算成功:
-    ① 创建页的名称输入框消失(页面回到合集列表);② 页面文本里出现了这个合集名。
-    两个都不命中就报 error 带当场取证 —— 宁可让调用方去核对,也不谎报成功。
+    ⚠️ 判据是 RCA 2026-08-09 重写的,起因是真号 7 单假绿。旧实现取两个"互相独立"的
+    信号**任一**命中即算成功,其中信号②「``name in page_text``」是伪证人:创建表单
+    右侧渲染一张**实时预览卡**,把刚打进输入框的合集名原样显示出来(假绿单的 page_text
+    实录:「创建播客合集 / 合集名称* / 11/20」表单文案与「NBDpsy心理会客厅 / 播客 /
+    更新至0集 / 0人听过」预览卡并存)。于是表单根本没提交、按钮压根没点动的那 7 单,
+    全部拿自己打的字当成"列表里有了"判成 done,平台侧一个合集都没建出来。
+
+    **铁律:表单还开着时,页面文本里出现合集名不构成任何成功证据。**取证显示失败时
+    表单不会自己关,所以"表单收起"才是那个便宜又硬的分水岭;名字检查退居第二道,
+    在收起**之后**才有意义。
+
+    三种终态:
+    - 表单收起 + 名字出现 → ``done``,``confirmed_by=create_page_closed``;
+    - 超时表单仍开着 → ``create_form_still_open``(带按钮 cls 全文 + 落点链 + 浮层现状,
+      回答"下一单为什么还提交不出去");
+    - 表单收起但名字没出现 → ``create_page_closed_name_missing``(做没做成未知,
+      **请人工核对,别自动重建**)。
+
+    ``name_preexisted``:创建**之前**列表里就有同名合集时(号1 的「NBDpsy心理会客厅」),
+    收起后的名字检查对它不构成新建证据 —— 照样判 done,但 ``confirmed_by`` 后缀
+    ``_name_preexisted``,提醒调用方核对合集数量/note_num 再认账。
 
     ``collection_id``:E4 未取证(平台侧 id 能不能回读不知道),这里只做一次
     **不抱期望**的 URL 抓取,抓不到给 None,不影响成功判定。
     """
     deadline = time.monotonic() + _CREATE_RESULT_TIMEOUT_S
     observed: Dict[str, Any] = {}
+    form_open = True
     while time.monotonic() < deadline:
         observed = collection_probe(page)
-        page_gone = not observed.get("name_input_present")
-        name_shown = name in (observed.get("page_text") or "")
-        if page_gone or name_shown:
+        form_open = bool(observed.get("name_input_present"))
+        # 名字检查只在表单收起**之后**做,而且读全文(collection_probe 的 page_text 截到 600 字)
+        if not form_open and name in _page_text(page):
+            confirmed_by = "create_page_closed"
+            if name_preexisted:
+                confirmed_by += "_name_preexisted"
             return {
                 "status": "done",
                 "name": name,
                 "collection_id": _extract_collection_id(page),
-                "confirmed_by": "create_page_closed" if page_gone else "name_in_list",
+                "confirmed_by": confirmed_by,
+                "name_shown_after_close": True,
+                "name_preexisted": name_preexisted,
                 "tooltip": tooltip,
                 "cover_crop": crop,
                 "observed": observed,
             }
         time.sleep(0.8)
-    return {
+
+    common = {
         "status": "error",
-        "reason": "create_result_unconfirmed: 点了「创建」但既没回到列表、列表里也没有"
-                  "这个合集名;**做没做成未知**,请人工到发播客页核对后再决定是否重建",
         "name": name,
+        "name_shown_after_close": False,
+        "name_preexisted": name_preexisted,
         "observed": observed,
         "tooltip": tooltip,
         "cover_crop": crop,
+    }
+    if form_open:
+        return {
+            **common,
+            "reason": "create_form_still_open: 点了「创建」但创建表单一直没收起 —— 真号 7 单"
+                      "假绿的形态正是它(按钮仍是禁用/loading 态,点下去无事发生)。"
+                      "**大概率没建成**,但做没做成仍以人工核对为准,别自动重建",
+            "create_button_forensics": _create_button_forensics(page),
+            "guide_tooltip_present": _find_guide_tooltip(page) is not None,
+        }
+    return {
+        **common,
+        "reason": "create_page_closed_name_missing: 创建表单收起了,但合集区里找不到这个"
+                  "合集名;**做没做成未知**,请人工到发播客页核对后再决定是否重建"
+                  "(**不要自动重建**,平台会不会去重同名未验证)",
     }
 
 

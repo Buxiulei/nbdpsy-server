@@ -68,24 +68,35 @@ MANIFEST_ENTRIES = [
         "summary": "轮询播客合集创建结果",
         "admin_only": False, "params": {"job_id": "path,str"},
         "returns": "{status, reason?, name?, collection_id?, confirmed_by?, "
-                   "cover_crop?, tooltip?, observed?}",
+                   "name_shown_after_close?, name_preexisted?, cover_crop?, tooltip?, "
+                   "observed?, create_button_forensics?, guide_tooltip_present?}",
         "errors": "403=无该号授权;404=job_id 不存在",
         "notes": "status 五态:queued / running / done / error(附 reason)/ "
                  "**unknown(执行进程中断,建没建成未知)**。"
-                 "done 时 `confirmed_by` 说明**凭什么判成功**:`create_page_closed`=创建页"
-                 "收起了;`name_in_list`=合集列表里出现了这个名字。"
-                 "⚠️ 成功判据本身未经真号验证(两轮取证都没能真的点下「创建」),所以 "
-                 "**done 之后建议顺手到发播客页看一眼**;判不出来时服务端宁可报 "
-                 "`create_result_unconfirmed` 也不谎报成功。"
+                 "done 时 `confirmed_by` 说明**凭什么判成功**,只剩一种:`create_page_closed`"
+                 "=创建表单收起了**且**收起后页面上出现了这个合集名(`name_shown_after_close`"
+                 "=true)。**`name_in_list` 已废除**——0.20.3 前它把创建表单右侧那张**实时"
+                 "预览卡**里自己刚打的名字当成了「列表里有了」,真号 7 单全部假绿(平台侧"
+                 "一个合集都没建出来)。"
+                 "`confirmed_by=create_page_closed_name_preexisted` 是同一判据的**带警告版**:"
+                 "创建**之前**列表里就有同名合集(`name_preexisted`=true),名字检查对它不构成"
+                 "新建证据 —— 收到这个后缀请核对合集数量再认账。"
+                 "⚠️ 判据重写后**尚未真号复验**,`done` 之后仍建议顺手到发播客页看一眼。"
                  "error 的 reason 前缀可自判:`podcast_tab_not_active`=切不到发播客 tab;"
                  "`collection_entry_not_found`=页面上没有「新建播客合集」入口;"
                  "`collection_create_page_not_loaded`=点了新建但创建页没出来;"
                  "`collection_cover_input_not_found` / `collection_cover_set_input_failed`="
                  "封面那一步;`create_button_never_enabled`=三项填完「创建」仍禁用"
-                 "(多半是封面裁剪没确认完,或平台又加了必填项);"
-                 "`create_result_unconfirmed`=点了创建但回读不到结果,**做没做成未知**。"
-                 "`observed` 是当场取证(各输入框在不在、按钮 class、页面文本片段),"
-                 "报障时请连它一起带上。",
+                 "(封面还在上传/处理,或裁剪没确认完,或平台又加了必填项);"
+                 "`create_form_still_open`=点了创建但表单一直没收起(**大概率没建成**,"
+                 "7 单假绿正是这个形态);`create_page_closed_name_missing`=表单收起了但"
+                 "合集区里没这个名字,**做没做成未知**。后两条都请人工核对后再决定是否重建,"
+                 "**别自动重建**。"
+                 "`observed` 是当场取证(各输入框在不在、按钮 class、页面文本片段);"
+                 "`create_button_forensics` 是按钮提交失败时的落点取证(cls 全文、矩形、"
+                 "按钮中心 `elementFromPoint` 的元素链 `point_element_chain`、"
+                 "`point_hits_button`),`guide_tooltip_present` 是同一时刻引导浮层在不在。"
+                 "报障时请连它们一起带上。",
     },
 ]
 
@@ -147,8 +158,9 @@ async def get_podcast_collection_endpoint(job_id: str) -> dict:
     view = await base_view(row)
     result = row.get("result") or {}
     if row["status"] in ("done", "error"):
-        for key in ("name", "collection_id", "confirmed_by", "cover_crop",
-                    "tooltip", "observed"):
+        for key in ("name", "collection_id", "confirmed_by", "name_shown_after_close",
+                    "name_preexisted", "cover_crop", "tooltip", "observed",
+                    "create_button_forensics", "guide_tooltip_present"):
             if key in result:
                 view[key] = result[key]
     return view

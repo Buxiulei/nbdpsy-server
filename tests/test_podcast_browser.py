@@ -260,6 +260,16 @@ def _create_btn_eval(cls, disabled_attr, found=True):
     return _fn
 
 
+# 真号 7 单假绿里「创建」按钮 class 的**原文**(job fbb12cb4 等,2026-08-09):
+# 禁用只体现在一个**裸 token** ``disabled`` 上 —— 没有 disabled 属性,也没有
+# ``create-btn-disabled``。旧判据两条都不命中 → 判成"可点" → 点了颗禁用按钮无事发生。
+_FAKE_GREEN_BTN_CLS = (
+    "d-button d-button-large --size-icon-large --size-text-h6 disabled "
+    "--color-static bold d-button-primary-loading --color-bg-primary "
+    "--color-white create-btn"
+)
+
+
 def test_create_button_disabled_by_class_or_attr():
     """class 含 create-btn-disabled **或**有 disabled 属性 → 判不可点(取"或",防御)。"""
     both = _Page(eval_fn=_create_btn_eval("d-button create-btn create-btn-disabled", True))
@@ -270,6 +280,37 @@ def test_create_button_disabled_by_class_or_attr():
     assert podcast_mod.create_button_state(only_cls)["enabled"] is False
     assert podcast_mod.create_button_state(only_attr)["enabled"] is False
     assert podcast_mod.create_button_state(enabled)["enabled"] is True
+
+
+def test_create_button_bare_disabled_token_is_not_enabled():
+    """真号假绿单的 class 原文 → 必须判**不可点**(裸 token ``disabled``,无属性无专用类)。
+
+    这是 7 单假绿的第一个缺陷:旧判据只认 disabled 属性和 ``create-btn-disabled``,
+    对这一形态全盲 → ``_wait_create_enabled`` 秒过 → 点了禁用按钮,合集一个都没建出来。
+    """
+    page = _Page(eval_fn=_create_btn_eval(_FAKE_GREEN_BTN_CLS, False))
+    assert podcast_mod.create_button_state(page)["enabled"] is False
+    # cls 原文要原样带出来,失败取证靠它
+    assert podcast_mod.create_button_state(page)["cls"] == _FAKE_GREEN_BTN_CLS
+
+
+def test_create_button_loading_token_is_not_enabled():
+    """只剩 ``d-button-primary-loading``(封面还在上传/处理)→ 也判不可点:点了也白点。"""
+    cls = "d-button d-button-large d-button-primary-loading --color-white create-btn"
+    page = _Page(eval_fn=_create_btn_eval(cls, False))
+    assert podcast_mod.create_button_state(page)["enabled"] is False
+
+
+def test_create_button_bare_token_is_whole_word_not_substring():
+    """裸 token 判定必须**整词**:粘连词不误伤,不然按钮永远"不可点"、流程直接死。"""
+    for cls in (
+        "d-button create-btn xdisabled",          # 前缀粘连
+        "d-button create-btn disabled-x",         # 后缀粘连
+        "d-button create-btn --color-static bold",  # 假绿单里同在的普通类名
+        "d-button create-btn is-loading",         # 与 loading token 不同的类名
+    ):
+        page = _Page(eval_fn=_create_btn_eval(cls, False))
+        assert podcast_mod.create_button_state(page)["enabled"] is True, cls
 
 
 def test_create_button_missing_is_not_enabled():
@@ -299,18 +340,25 @@ def _collection_page(*, crop_needed=True):
     state = {"stage": "list", "cropped": not crop_needed}
     page = _Page(elements=[entry], body_text="播客合集")
 
+    def _btn_cls():
+        filled = bool(name.attrs.get("value")) and cover.files and state["cropped"]
+        return "d-button create-btn" + ("" if filled else " create-btn-disabled"), not filled
+
     def _fn(script, *a):
         if "creator-tab" in script and "active" in script:
             return ["发播客"]
+        if "elementFromPoint" in script:   # 按钮落点链取证(失败路径才会读)
+            if state["stage"] != "create":
+                return {"found": False}
+            cls, disabled_attr = _btn_cls()
+            return {"found": True, "cls": cls, "disabled_attr": disabled_attr,
+                    "point_element_chain": "button.create-btn < div.footer-btn-area < body",
+                    "point_hits_button": True}
         if "button.create-btn" in script:
             if state["stage"] != "create":
                 return {"found": False}
-            filled = bool(name.attrs.get("value")) and cover.files and state["cropped"]
-            return {
-                "found": True,
-                "cls": "d-button create-btn" + ("" if filled else " create-btn-disabled"),
-                "disabled_attr": not filled,
-            }
+            cls, disabled_attr = _btn_cls()
+            return {"found": True, "cls": cls, "disabled_attr": disabled_attr}
         return None
 
     page.eval_fn = _fn
@@ -361,6 +409,10 @@ def test_create_collection_happy_path(monkeypatch):
     human = _wire(page, handlers)
     out = podcast_mod.create_collection(page, human, "心理急救包", "每周一集", "/tmp/c.png")
     assert out["status"] == "done", out
+    # 成功只有一种凭据:表单收起 **且** 收起后的页面文本里出现了这个名字
+    assert out["confirmed_by"] == "create_page_closed"
+    assert out["name_shown_after_close"] is True
+    assert out["name_preexisted"] is False
     assert els["cover"].files == ["/tmp/c.png"]
     assert any(t is els["button"] for t, _ in human.clicks), "必须点真正的 <button>"
     assert not any(getattr(t, "cls", "") == "footer-btn-area" for t, _ in human.clicks), \
@@ -395,17 +447,82 @@ def test_create_collection_entry_missing_fails_loud(monkeypatch):
     assert "observed" in out
 
 
-def test_create_collection_unconfirmed_result_is_error(monkeypatch):
-    """点了创建但既没回列表、列表里也没这个名字 → error(**做没做成未知**,不谎报成功)。"""
+def _submit_button(handlers):
+    """从 handlers 里挑出真正的「创建」<button>(外层同名 div 不算)。"""
+    return [k for k in handlers
+            if getattr(k, "tag", "") == "button" and k.cls.startswith("d-button")][0]
+
+
+def test_create_collection_form_still_open_is_error(monkeypatch):
+    """点了创建但表单一直没收起 → error(**做没做成未知**,不谎报成功)。"""
     monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
     monkeypatch.setattr(podcast_mod, "_CREATE_RESULT_TIMEOUT_S", 0.1)
     page, handlers, _ = _collection_page()
-    handlers[[k for k in handlers if getattr(k, "tag", "") == "button"
-              and k.cls.startswith("d-button")][0]] = lambda: None  # 点创建没反应
+    handlers[_submit_button(handlers)] = lambda: None  # 点创建没反应
     human = _wire(page, handlers)
     out = podcast_mod.create_collection(page, human, "心理急救包", None, "/tmp/c.png")
     assert out["status"] == "error"
-    assert out["reason"].startswith("create_result_unconfirmed")
+    assert out["reason"].startswith("create_form_still_open")
+
+
+def test_create_collection_preview_card_name_is_not_success(monkeypatch):
+    """**假绿回归锁**:表单还开着时,页面文本里出现合集名**不构成任何成功证据**。
+
+    复刻真号 7 单假绿的第二个缺陷:创建表单右侧渲染一张**实时预览卡**,把刚打进去的
+    合集名原样显示出来 —— 旧判据的信号②「name in page_text」于是拿自己打的字当证人,
+    在表单根本没提交的情况下判 done。这里必须 error,且取证要能回答"下一单为什么还
+    提交不出去"(按钮 cls 全文 + 落点链)。
+    """
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(podcast_mod, "_CREATE_RESULT_TIMEOUT_S", 0.1)
+    page, handlers, _ = _collection_page()
+
+    def _fake_green():
+        # 点的是禁用按钮:表单不收起,但预览卡里有名字
+        page.body_text = "创建播客合集 合集名称* 11/20 NBDpsy心理会客厅 播客 更新至0集 0人听过"
+
+    handlers[_submit_button(handlers)] = _fake_green
+    human = _wire(page, handlers)
+    out = podcast_mod.create_collection(page, human, "NBDpsy心理会客厅", None, "/tmp/c.png")
+    assert out["status"] == "error", "预览卡里的名字绝不能判成 done"
+    assert out["reason"].startswith("create_form_still_open")
+    assert out["observed"]["create_button"]["cls"], "取证要带按钮 cls 全文"
+    assert out["create_button_forensics"]["point_element_chain"], "取证要带落点链"
+    assert out["name_shown_after_close"] is False
+
+
+def test_create_collection_closed_but_name_missing_is_error(monkeypatch):
+    """表单收起了但合集区里没这个名字 → error(做没做成未知,别自动重建)。"""
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(podcast_mod, "_CREATE_RESULT_TIMEOUT_S", 0.1)
+    page, handlers, _ = _collection_page()
+
+    def _close_without_name():
+        page.elements = []
+        page.body_text = "播客合集"   # 收起了,但列表里没有这个名字
+
+    handlers[_submit_button(handlers)] = _close_without_name
+    human = _wire(page, handlers)
+    out = podcast_mod.create_collection(page, human, "心理急救包", None, "/tmp/c.png")
+    assert out["status"] == "error"
+    assert out["reason"].startswith("create_page_closed_name_missing")
+    assert out["name_shown_after_close"] is False
+
+
+def test_create_collection_preexisting_name_marks_confirmed_by(monkeypatch):
+    """创建前列表里就有同名合集 → 成功也要在 confirmed_by 后缀提醒调用方核对。
+
+    号1 的真实处境:「NBDpsy心理会客厅」创建前就在列表里,收起后的名字检查对它
+    **不构成新建证据**(名字本来就在)。
+    """
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    page, handlers, _ = _collection_page()
+    page.body_text = "播客合集 NBDpsy心理会客厅"   # 进创建页之前就有同名
+    human = _wire(page, handlers)
+    out = podcast_mod.create_collection(page, human, "NBDpsy心理会客厅", None, "/tmp/c.png")
+    assert out["status"] == "done", out
+    assert out["name_preexisted"] is True
+    assert out["confirmed_by"] == "create_page_closed_name_preexisted"
 
 
 # ---------------- 「去发布」禁用判据 ----------------

@@ -224,6 +224,54 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-09",
+        "title": "播客合集创建**双判据修复**:禁用态补裸 ``disabled`` token + 成功判据杜绝"
+                 "预览卡伪证(7 单历史假绿,**待真号复验**)",
+        "kind": "fix",
+        "summary": "真号 7 单创建播客合集**全部报 done、平台侧一个都没建出来**(事后 "
+                   "GET /collections 实测新合集一个不存在)。取证里两个缺陷叠在一起:"
+                   "①**禁用判据漏了一种形态** —— 假绿单的按钮 class 原文是 "
+                   "``d-button d-button-large … disabled --color-static bold "
+                   "d-button-primary-loading … create-btn``,禁用只体现在一个**裸 token** "
+                   "``disabled`` 上,按钮既没有 disabled 属性、也没有 ``create-btn-disabled``;"
+                   "旧判据两条都不命中 → ``_wait_create_enabled`` 秒判「可点」→ 点下一颗禁用"
+                   "按钮无事发生。②**成功判据里藏着伪证人** —— 创建表单右侧渲染一张**实时"
+                   "预览卡**,把刚打进输入框的合集名原样显示出来(假绿单 page_text 实录:"
+                   "表单文案「创建播客合集 / 合集名称* / 11/20」与预览卡「NBDpsy心理会客厅 / "
+                   "播客 / 更新至0集 / 0人听过」并存);旧实现「表单收起 **或** 页面文本里有"
+                   "这个名字」任一命中即算成功,于是表单根本没提交的那 7 单,全部拿自己打的字"
+                   "当证人判了 done。"
+                   "**改法**:①禁用判据从两路加到四路取或,新增 class 按空白切分后的**整词** "
+                   "``disabled`` 与 ``d-button-primary-loading``(loading 态点了也白点);整词"
+                   "比较不用 substring,是防将来任何 ``xxx-disabled`` 类名把按钮永久判死。"
+                   "②成功判据改成**与**:``表单收起`` 且 ``收起后页面文本里出现该合集名``,"
+                   "**表单还开着时页面里出现合集名不构成任何成功证据**;失败细分成 "
+                   "``create_form_still_open``(带按钮 cls 全文 + 按钮中心 elementFromPoint "
+                   "落点链 + 引导浮层现状,回答「下一单为什么还提交不出去」)与 "
+                   "``create_page_closed_name_missing``(做没做成未知,请人工核对);新增 "
+                   "``name_preexisted``(创建**前**列表里就有同名 → confirmed_by 后缀 "
+                   "``_name_preexisted``,名字检查对它不构成新建证据)。③``创建`` 按钮的等待"
+                   "窗口 20s → 45s:判据修对之前这一步**从没真等过**,而它等的是封面(≤5MB)"
+                   "上传完 + 平台处理完(假绿单实测按钮同时挂 loading 态)。"
+                   "**如实说明:两条修法都对症于假绿单的 observed 实录,但尚未经真号复验**"
+                   "——不要当作「建播客合集已经修好了」,done 之后仍请到发播客页看一眼。",
+        "endpoints": [
+            "/api/accounts/{account_id}/podcast-collections",
+            "/api/podcast-collections/{job_id}",
+        ],
+        "notes": "⚠️ **``confirmed_by=name_in_list`` 已废除**(它就是假绿的直接凭据),"
+                 "done 只剩 ``create_page_closed`` 与 ``create_page_closed_name_preexisted``;"
+                 "调用方若按 ``name_in_list`` 做过分支,直接删掉那条。"
+                 "轮询回执新增 ``name_shown_after_close`` / ``name_preexisted``(布尔,常驻)"
+                 "与 ``create_button_forensics`` + ``guide_tooltip_present``(仅提交类失败时带:"
+                 "按钮 cls 全文、矩形、``point_element_chain``、``point_hits_button``、"
+                 "同一时刻引导浮层在不在)。"
+                 "**这两个取证字段是临时诊断字段**,与 ``point_element_chain`` "
+                 "同一条保质期纪律:真号复验坐实/排除「按钮点不动」这个候选即撤,勿建硬依赖。"
+                 "历史影响:0.20.3 之前拿到的 ``done`` **不可信**(尤其 "
+                 "``confirmed_by=name_in_list`` 的),按合集列表实况为准。",
+    },
+    {
+        "date": "2026-08-09",
         "title": "补挂话题锚定判据放宽:浮层「中心在正文栏内」改「与正文栏相交」(**待真号复验**)",
         "kind": "fix",
         "summary": "上一条(0.20.1)上线的条件轮询**没有把失败清零**:真号三单复验里追加的词"

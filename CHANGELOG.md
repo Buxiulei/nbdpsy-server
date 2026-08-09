@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.20.3 (2026-08-09)
+
+**播客合集创建的两个判据各修一处:禁用态补「裸 `disabled` token」,成功判据杜绝预览卡伪证。
+真号 7 单历史假绿的两个成因都在这里,但修法**尚未真号复验**。**
+
+### 7 单全绿,平台上一个合集都没有
+
+真号连跑 7 单创建播客合集,`status` 全是 `done`;事后 `GET /collections` 实测——新合集
+**一个都不存在**(列表活性用 `note_num` 增量自证过,不是接口没刷新)。回执里的 `observed`
+把作案现场原样留下了(job `fbb12cb4` 等):
+
+- `create_button`:`{found: true, enabled: false, cls: "d-button d-button-large
+  --size-icon-large --size-text-h6 disabled --color-static bold d-button-primary-loading
+  --color-bg-primary --color-white create-btn"}`;
+- `page_text`:创建**表单还开着**(「创建播客合集 / 合集名称* / 11/20」),右侧还渲染着一张
+  **实时预览卡**——「NBDpsy心理会客厅 / 播客 / 更新至0集 / 0人听过」,那个名字正是这一单
+  刚打进输入框的;
+- 终态却是 `done`、`confirmed_by=name_in_list`。
+
+两个独立缺陷叠出这个结果,少任何一个都不会假绿。
+
+### 缺陷① 禁用判据漏了真实形态,于是点了一颗禁用按钮
+
+`create_button_state` 判禁用只认两条:`disabled` **属性**、class 含 `create-btn-disabled`。
+而真实的禁用形态是 class 里挂一个**裸 token** `disabled`(按钮**没有** disabled 属性)。
+两条都不命中 → `_wait_create_enabled` 第一次轮询就判「可点」直接返回 → `human.click` 点在
+一颗禁用按钮上,什么也没发生。
+
+改法:判据四路取或,新增 class 按空白切分后的**整词** `disabled`,以及同法的
+`d-button-primary-loading`(loading 态点了也白点)。整词比较而不是 substring,是防将来任何
+`xxx-disabled` 类名把按钮**永久判死**——那是比假绿更难查的反向故障;`xdisabled` /
+`disabled-x` 这类粘连词单测双向钉住。
+
+### 缺陷② 成功判据把预览卡当成了证人
+
+`_read_create_result` 取两个"互相独立"的信号**任一**命中即算成功:①表单收起;
+②`name in page_text`。信号②在**表单还开着**的时候同样成立——因为预览卡就在页面上,
+把刚打的字回显给了自己。**自己打的字不能当证人。**
+
+改法:成功判据改成**与**,并规定次序——
+
+- 成功 = `name_input_present` 变 False(**表单收起**;取证显示失败时表单不会自己关)
+  **且**收起后的页面文本里出现该合集名。`confirmed_by` 固定 `create_page_closed`,
+  新增 `name_shown_after_close: bool`;
+- 超时表单仍开着 → `create_form_still_open`,取证带按钮 cls 全文、按钮中心
+  `elementFromPoint` 的**落点元素链**、引导浮层现状——回答"下一单为什么还提交不出去";
+- 表单收起但名字没出现 → `create_page_closed_name_missing`(做没做成未知,**别自动重建**);
+- 新增 `name_preexisted`:进创建表单**之前**先读一次页面文本。号1 的「NBDpsy心理会客厅」
+  创建前就在列表里,收起后的名字检查对它**不构成新建证据**——照样判 done,但 `confirmed_by`
+  后缀 `_name_preexisted`,提醒调用方核对合集数量再认账。
+
+`confirmed_by=name_in_list` **就此废除**。
+
+### 顺带:`_CREATE_ENABLE_TIMEOUT_S` 20s → 45s
+
+判据修对之前,这一步**从没真等过**(裸 token 判成可点、秒过),所以 20s 是个没被真实用过的
+数。它等的是封面(≤5MB)上传完 + 平台处理完,而假绿单实测按钮同时挂着 loading 态——给到 45s。
+
+**如实说明**:两处修法都对症于假绿单的 `observed` 实录,但**尚未经真号复验**。不要当作
+"建播客合集已经修好了";`done` 之后仍请到发播客页看一眼。0.20.3 之前拿到的 `done`
+**一律不可信**(尤其 `confirmed_by=name_in_list` 的那些)。
+
 ## 0.20.2 (2026-08-09)
 
 **补挂话题几何锚定判据从「中心在正文栏内」放宽到「与正文栏相交」,并给"被拒的层"补取证。
