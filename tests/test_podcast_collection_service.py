@@ -36,7 +36,7 @@ def no_browser(monkeypatch):
 async def test_execute_success_passes_through(no_browser):
     """浏览器层 done → 原样返回(含 collection_id 为 None 的情形)。"""
     no_browser["result"] = {"status": "done", "name": "心理急救包",
-                            "collection_id": None, "confirmed_by": "name_in_list"}
+                            "collection_id": None, "confirmed_by": "create_page_closed"}
     out = await podcast_collection.execute(
         7, {"name": "心理急救包", "description": "每周一集", "cover": "/tmp/c.png"}
     )

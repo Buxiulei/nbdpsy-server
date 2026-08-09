@@ -83,7 +83,8 @@ CAPABILITY_GROUPS = [
         "key": "published_notes",
         "title": "已发布笔记管理",
         "summary": "对**已经发出去**的笔记做事:台账与数据读取、正文/图片/三组件编辑、"
-                   "可见性切换、删除、合集清理。写类操作会真起浏览器改动线上内容。",
+                   "可见性切换、删除、笔记合集的创建与清理。"
+                   "写类操作会真起浏览器改动线上内容。",
         "paths": [
             "/api/accounts/{account_id}/note-exports",
             "/api/note-exports/{export_id}",
@@ -104,6 +105,8 @@ CAPABILITY_GROUPS = [
             "/api/accounts/{account_id}/note-components",
             "/api/note-components/{job_id}",
             "/api/accounts/{account_id}/collections",
+            "/api/accounts/{account_id}/note-collections",
+            "/api/note-collections/{job_id}",
             "/api/accounts/{account_id}/collection-batches",
             "/api/collection-batches/{job_id}",
         ],
@@ -222,6 +225,44 @@ CHANGELOG_KINDS = frozenset({"feature", "fix", "breaking", "deprecation"})
 CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 
 CHANGELOG_ENTRIES = [
+    {
+        "date": "2026-08-09",
+        "title": "新能力:**建笔记合集**(图文笔记挂载用的那套合集,与播客合集是两套系统)",
+        "kind": "feature",
+        "summary": "此前只能建**播客合集**,而图文笔记挂载(``POST /note-components`` 的 "
+                   "``collection_id``)认的是**笔记合集** —— 也就是 "
+                   "``GET /api/accounts/{id}/collections`` 读的那套 picker 系统,它一直只能"
+                   "读不能建,存量笔记归拢全卡在「需要的合集不存在」上。现在补齐:"
+                   "``POST /api/accounts/{id}/note-collections``。"
+                   "**入口不在笔记管理页**(实拍确认那里根本没有合集 tab),在**笔记编辑器"
+                   "「加入合集」弹层的底栏**「创建合集」——所以必须传一篇 ``carrier_note_id`` "
+                   "载体笔记来打开编辑器,而平台的提交按钮是**「创建并加入」**:这篇载体会被"
+                   "加进新合集,请传一篇本来就该挂进去的笔记。表单只有名称(≤20)与简介"
+                   "(**≤50**,与播客合集的 100 不同)两项,**没有封面字段**,故传 ``cover`` "
+                   "一律 422 而不是静默忽略。"
+                   "判据直接继承播客合集 7 单假绿的教训,**双信号缺一不可**:创建表单收起 "
+                   "**且** **重进更新页之后**的干净合集列表里出现这个名字(重进会丢弃一切"
+                   "未提交的编辑器状态,所以这一条同时证明合集真落库了);页面文本里出现"
+                   "合集名一律不算证据。禁用判定同样四路取或(disabled 属性 / 整词 "
+                   "``disabled`` / ``-disabled`` 结尾类名 / loading 类名),等不到翻转就"
+                   "如实报错、**绝不点禁用按钮**。"
+                   "另有**建前查重**:该号已有同名合集时**一个字都不建**,直接报 "
+                   "``collection_name_already_exists`` 并把现有那条的 id / note_num 回给你"
+                   "——平台不去重同名,重建只会多出一个空合集要人工删。",
+        "endpoints": [
+            "/api/accounts/{account_id}/note-collections",
+            "/api/note-collections/{job_id}",
+        ],
+        "notes": "⚠️ **两件事尚未真号取证,首验靠回执分辨**:①创建是即时落地还是随笔记提交"
+                 "才生效 —— 看 ``joined_carrier``(重进后该合集的 note_num)与 "
+                 "``created_api_capture``(点「创建并加入」后新增的 POST 响应取证,已排除"
+                 "弹层列表接口 list_v2);②创建 API 的形态与回不回 id —— 同样看 "
+                 "``created_api_capture``。``created_api_capture`` 与 ``modal_html`` 都是"
+                 "**临时诊断字段**,首验钉死之后即撤,勿建硬依赖。"
+                 "另:载体笔记**不能是已在某个合集里的笔记**(已选态下「加入合集」入口本身"
+                 "不渲染,会报 ``collection_entry_not_found``);本能力**全程零提交**,"
+                 "不点发布。",
+    },
     {
         "date": "2026-08-09",
         "title": "播客合集创建**双判据修复**:禁用态补裸 ``disabled`` token + 成功判据杜绝"

@@ -168,7 +168,8 @@ async def test_poll_returns_result_fields(tmp_path, monkeypatch):
         await browser_jobs_repo.finish_job(
             job_id, "done",
             {"status": "done", "name": "心理急救包", "collection_id": None,
-             "confirmed_by": "name_in_list"},
+             "confirmed_by": "create_page_closed",
+             "name_shown_after_close": True, "name_preexisted": False},
         )
         got = await c.get(f"/api/podcast-collections/{job_id}",
                           headers=bearer("op-coll-poll"))
@@ -177,7 +178,11 @@ async def test_poll_returns_result_fields(tmp_path, monkeypatch):
         assert body["status"] == "done"
         assert body["name"] == "心理急救包"
         assert body["collection_id"] is None
-        assert body["confirmed_by"] == "name_in_list"
+        assert body["confirmed_by"] == "create_page_closed"
+        # 透传是**白名单**制:新字段没进名单就静默丢掉,而 manifest 已经把它们写进 returns
+        # —— 字段级漂移没有端点级测试兜得住,只能在这里逐个钉死。
+        assert body["name_shown_after_close"] is True
+        assert body["name_preexisted"] is False
 
 
 async def test_poll_error_carries_evidence(tmp_path, monkeypatch):

@@ -45,6 +45,7 @@
   监听器一个都不会触发,见 ``creator_note_list`` 模块 docstring)。
 """
 
+import json
 import re
 import time
 from io import BytesIO
@@ -3722,3 +3723,690 @@ def _find_text_in_section(page, section_selector: str, text: str):
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+# ══════════════════ 建笔记合集(2026-08-09 号8 三段只读探针实拍)══════════════════
+#
+# **创建入口不在笔记管理页**:实拍确认笔记管理页上根本没有"合集"tab,唯一的创建入口在
+# 笔记编辑器「加入合集」弹层的**底栏** ``.collection-plugin-popover .popover-footer-content``
+# (文案「创建合集」)。所以建合集必须借一篇**载体笔记**打开编辑器 —— 调用方传的
+# ``carrier_note_id`` 应当就是本来就该挂进这个合集的那一篇("创建并加入"会把它加进去)。
+#
+# 创建表单是个极简 modal(实拍):合集名称(≤20 字,带 0/20 计数)/ 合集简介(≤50 字,
+# 带 0/50 计数)/ [取消][创建并加入]。**没有封面字段** —— 与播客合集(封面必填 + 裁剪
+# 二次确认)完全不同,故 REST 层对 ``cover`` 参数显式 422 而不是静默忽略。
+#
+# **两件未取证的事,首验要靠本实现的回执分辨**:
+#   ① 创建是**即时落地**(点完就有独立 API 落库)还是**随笔记提交才生效**;
+#   ② 创建 API 的 URL 特征 / 响应形态 / 回不回 id。
+# 做法:点「创建并加入」**前**挂一层创建 API 拦截(``_CreateApiCapture``),点完之后
+# **重进更新页**再从干净列表回读 —— 重进会丢弃一切未提交的编辑器状态(仓内既有结论),
+# 所以"重进后列表里仍有这个名字"就是①的「即时落地」证据,"没有"就是「要随提交才生效」。
+# 两种都如实回报,绝不替平台圆场。
+#
+# 判据是**双信号**(播客合集 7 单假绿的直接教训):modal 收起 **且** 干净列表里出现该名。
+# 单看页面文本一律不算数 —— 那正是预览卡伪证栽过的地方。
+
+# 弹层底栏的「创建合集」(实拍选择器 + 实拍文案,两路都用:class 变了还有文案兜底)
+_COLLECTION_CREATE_FOOTER = ".collection-plugin-popover .popover-footer-content"
+_COLLECTION_POPOVER = ".collection-plugin-popover"
+# 创建 modal:容器 class **未取证**,只能按"可见 + 含实拍标志文案"认领,再取最内层
+# (祖先容器的 innerText 是子孙的超集,故按文本最短挑)。**绝不逮着第一个 .d-modal 就用**。
+_CREATE_MODAL_SCOPES = (".d-modal", "[class*='modal']")
+_CREATE_SUBMIT_TEXT = "创建并加入"
+_CREATE_MODAL_MARKS = (_CREATE_SUBMIT_TEXT, "合集名称")
+# 名称 / 简介输入框:placeholder 文案**未取证**(实拍只看到了字段标签),故按由细到粗
+# 的候选找,全落空时**带 modal 的 HTML 一起 fail-loud**,绝不退回全页找 input ——
+# 全页找会摸到笔记**标题框**,那一下就是对载体笔记的真实改动。
+_CREATE_NAME_HINTS = ("合集名", "名称")
+_CREATE_DESC_HINTS = ("简介", "描述")
+# modal 里的字段一律只在 modal 容器内找(同名陷阱与"别在全页找"的红线都在这一条上)
+_CREATE_FIELD_SCOPE = "input, textarea"
+# 未知结构时留的取证:modal 的 HTML(硬上限)。**保质期字段** —— 首验把 placeholder /
+# class 钉死之后即撤,别让临时 dump 变成永久债。
+_CREATE_MODAL_HTML_CHARS = 1500
+
+# 创建 API 拦截:URL 特征未取证,只能宽松匹配。三道过滤缺一不可(见 _CreateApiCapture)。
+_CREATE_API_HINT = "collection"
+_CREATE_API_MAX_ENTRIES = 5
+_CREATE_API_BODY_CHARS = 800
+# 创建响应里 id 的候选键(**未取证**,取到就当线索,取不到不影响判定)
+_CREATE_ID_KEYS = ("id", "collection_id", "collectionId")
+
+_CREATE_MODAL_TIMEOUT_S = 12.0
+# 没有封面上传要等,名称一填按钮就该翻转;给 20s 是留够平台自己的防抖/校验
+_CREATE_ENABLE_TIMEOUT_S = 20.0
+_CREATE_CLOSE_TIMEOUT_S = 20.0
+
+
+class _CreateApiCapture:
+    """点「创建并加入」之后新增的 **POST** 响应取证(创建 API 的 URL/形态未取证)。
+
+    与 ``ComponentResponses`` 分开而不是往它的 ``_MARKS`` 里加一条:那一族是**已取证**
+    的接口特征,这里是"还不知道要抓什么"的探路取证,混在一起会让人以为创建 API 也已实证。
+
+    三道过滤(**第二道是重点**,回答"宽松匹配会不会误抓 list_v2"):
+
+    1. URL 含 ``collection``(宽松,创建 API 的路径未取证);
+    2. URL **不含** ``note/collection/pc/list_v2`` —— 弹层列表接口自己就带 ``collection``
+       字样,只靠第 1 道必然把它抓进来,那样取证里全是列表响应、真正的创建响应反而被
+       ``_CREATE_API_MAX_ENTRIES`` 挤掉;
+    3. 请求方法必须是 ``POST`` —— 写操作才可能是创建;列表是读接口(即便它哪天改成 POST,
+       第 2 道也已经把它挡在门外,两道各自独立生效)。
+
+    ``entries`` 有硬上限,body 截断;响应体必须在回调里当场读(导航之后取不到)。
+    """
+
+    def __init__(self) -> None:
+        self.entries: List[Dict[str, Any]] = []
+        self._page = None
+
+    def handle(self, response) -> None:
+        try:
+            url = response.url or ""
+        except Exception:  # noqa: BLE001 — 响应对象已失效,读 url 都会炸
+            return
+        if _CREATE_API_HINT not in url.lower():
+            return
+        if _COLLECTION_API_MARK in url:
+            return  # 弹层列表接口,不是创建(见 docstring 第 2 道)
+        try:
+            method = (response.request.method or "").upper()
+        except Exception:  # noqa: BLE001 — 读不到方法就不认领,取证宁缺毋滥
+            return
+        if method != "POST":
+            return
+        if len(self.entries) >= _CREATE_API_MAX_ENTRIES:
+            return
+        try:
+            status = response.status
+        except Exception:  # noqa: BLE001
+            status = None
+        try:
+            body = response.text() or ""
+        except Exception as exc:  # noqa: BLE001 — 读不到体也要留下这一条的存在
+            body = f"<响应体读取失败: {exc}>"
+        self.entries.append({
+            "url": url[:300],
+            "method": method,
+            "status": status,
+            "body": body[:_CREATE_API_BODY_CHARS],
+        })
+
+    def attach(self, page) -> None:
+        """挂监听(幂等:同一实例只挂一次,换 page 时先摘旧的)。"""
+        if self._page is page:
+            return
+        self.detach()
+        page.on("response", self.handle)
+        self._page = page
+
+    def detach(self) -> None:
+        """摘监听:同一个 page 会被后续任务复用,留着会继续吃响应体。"""
+        if self._page is None:
+            return
+        try:
+            self._page.remove_listener("response", self.handle)
+        except Exception:  # noqa: BLE001
+            logger.warning("[note_components] 摘除创建 API 监听失败(忽略)")
+        self._page = None
+
+    def count(self) -> int:
+        return len(self.entries)
+
+    def since(self, seen: int) -> List[Dict[str, Any]]:
+        """基线之后新增的那些(基线必须在点击**之前**取)。"""
+        return self.entries[seen:]
+
+
+def parse_created_collection_id(entries: Optional[List[dict]]) -> Optional[str]:
+    """尽力从创建 API 响应体里抠出合集 id;抠不到返回 None(纯函数,**未取证不抱期望**)。
+
+    只在 ``data`` 下与顶层各看一眼 ``_CREATE_ID_KEYS``,**不做深度递归搜索** —— 递归会
+    在响应里随便捞到一个别的 id(用户 id / trace id),给出一个看着像真的假 id 比给 None
+    坏得多:调用方会拿它去挂笔记,然后收获一个静默失败。
+    """
+    for entry in reversed(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            body = json.loads(entry.get("body") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(body, dict):
+            continue
+        for scope in (body.get("data"), body):
+            if not isinstance(scope, dict):
+                continue
+            for key in _CREATE_ID_KEYS:
+                value = scope.get(key)
+                if isinstance(value, (str, int)) and str(value).strip():
+                    return str(value).strip()
+    return None
+
+
+def create_join_enabled(cls: Optional[str], disabled_attr: bool) -> bool:
+    """「创建并加入」按钮可不可点(纯函数,**四路取或**,任一命中即不可点)。
+
+    ① 有 ``disabled`` 属性;② class 里有整词 ``disabled``;③ 有以 ``-disabled`` 结尾的
+    类名(如 ``create-btn-disabled`` / ``d-button-disabled``,同一套设计系统的常见形态);
+    ④ loading 态(``d-button-primary-loading`` 或任何 ``-primary-loading`` 结尾的类名)。
+
+    ②③④ 一律**按空白切分后整词比较**,不是 substring:``--color-static`` 这类类名里本就
+    不含 ``disabled``,但 substring 判法会被将来任何带 disabled 字样的类名命中,把按钮
+    **永久判死** —— 那是比假绿更难查的反向故障(0.20.3 播客合集 RCA 的原话)。
+
+    本函数与 ``app.browser.podcast.create_button_state`` **同源不共用**:那颗按钮有实拍
+    class(``button.create-btn``)、读法走 JS 选择器;这颗按钮的 class 未取证,只能从元素
+    句柄上读属性。判据逻辑抄的是同一条 RCA 结论,谁先拿到真号 class 谁再收口成一份。
+    """
+    if disabled_attr:
+        return False
+    tokens = (cls or "").split()
+    for token in tokens:
+        if token == "disabled" or token.endswith("-disabled"):
+            return False
+        if token == "d-button-primary-loading" or token.endswith("-primary-loading"):
+            return False
+    return True
+
+
+def read_create_join_state(element) -> Dict[str, Any]:
+    """从按钮**元素句柄**读禁用态 → ``{"found", "enabled", "cls"}``。
+
+    ``disabled`` 属性必须用 ``is not None`` 判:``<button disabled>`` 读回来是**空串**,
+    ``bool("")`` 是 False —— 拿真值判断会把一颗明确禁用的按钮判成可点(与 0.20.3 那条
+    "禁用形态漏了一种"是同一类错误,只是换了个读法)。
+
+    读不到 / 元素为 None 一律 ``{"found": False}``,调用方当**不可点**处理。
+    """
+    if element is None:
+        return {"found": False}
+    try:
+        cls = element.get_attribute("class") or ""
+        disabled_attr = element.get_attribute("disabled") is not None
+    except Exception:  # noqa: BLE001 — 句柄失效
+        return {"found": False}
+    return {"found": True, "enabled": create_join_enabled(cls, disabled_attr), "cls": cls}
+
+
+def _find_create_modal(page):
+    """认领创建合集的 modal:**可见 + 含实拍标志文案 + 文本最短**;没有返回 None。
+
+    "文本最短"是取最内层的代理判据:祖先容器的 ``innerText`` 必然是子孙的超集,所以同样
+    命中标志文案时,文本最短的那个就是最贴近 modal 本体的。不用面积/位置启发式 ——
+    浮层用面积猜层级在这条产品线上栽过(点中了祖先容器)。
+    """
+    best = None
+    best_len = None
+    for scope in _CREATE_MODAL_SCOPES:
+        try:
+            nodes = page.query_selector_all(scope)
+        except Exception:  # noqa: BLE001
+            continue
+        for node in nodes:
+            try:
+                if not node.is_visible():
+                    continue
+                text = _norm(node.inner_text())
+            except Exception:  # noqa: BLE001 — 读不出的一律不认领
+                continue
+            if not any(mark in text for mark in _CREATE_MODAL_MARKS):
+                continue
+            if best_len is None or len(text) < best_len:
+                best, best_len = node, len(text)
+    return best
+
+
+def _modal_fields(modal) -> List[Any]:
+    """modal 内的全部输入控件(input / textarea),读不到返回 []。"""
+    try:
+        return list(modal.query_selector_all(_CREATE_FIELD_SCOPE))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _pick_field(fields: List[Any], hints, *, fallback_index: Optional[int]):
+    """从 modal 的输入控件里挑一个:先按 placeholder 命中提示词,再退位置兜底。
+
+    位置兜底只在"控件数量正好对得上表单形状"时才用(``fallback_index`` 由调用方按实拍的
+    两字段形状给),挑不出就返回 None 让调用方 fail-loud —— **绝不扩大到 modal 之外找**:
+    页面上还有笔记标题框,摸错一下就是对载体笔记的真实改动。
+    """
+    for field in fields:
+        try:
+            placeholder = field.get_attribute("placeholder") or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if any(hint in placeholder for hint in hints):
+            return field
+    if fallback_index is not None and 0 <= fallback_index < len(fields):
+        return fields[fallback_index]
+    return None
+
+
+def _find_in_modal_by_text(modal, text: str):
+    """在 modal 内按文案精确找可点元素,取**最内层**;找不到返回 None。
+
+    最内层判据:候选自身的子树里没有同样精确命中该文案的元素。整卡/整容器点击在这条
+    产品线上反复咬人(点容器中点会命中错误子元素),所以宁可找不到 fail-loud,也不点
+    一个"文案对得上但不知道是不是它"的大容器。
+    """
+    target = _norm(text)
+    scope = "button, div, span, a"
+    try:
+        candidates = [
+            el for el in modal.query_selector_all(scope)
+            if _norm(el.inner_text()) == target
+        ]
+    except Exception:  # noqa: BLE001
+        return None
+    for el in candidates:
+        try:
+            inner = [c for c in el.query_selector_all(scope)
+                     if _norm(c.inner_text()) == target]
+        except Exception:  # noqa: BLE001
+            inner = []
+        if not inner:
+            return el
+    return None
+
+
+def _find_create_submit(page, modal):
+    """定位「创建并加入」:先在 modal 内找最内层,再退回按钮文案全页精确匹配。"""
+    found = _find_in_modal_by_text(modal, _CREATE_SUBMIT_TEXT) if modal is not None else None
+    return found if found is not None else _find_button_by_text(page, _CREATE_SUBMIT_TEXT)
+
+
+def _modal_html(page) -> str:
+    """**当场**认领 modal 再取它的 HTML(硬上限截断);读不到返回空串。
+
+    每次现找而不是吃调用方手上那个句柄:表单一重渲染,旧句柄指向的就是已经脱离文档的
+    旧节点,拿它取证会交出一份**过期的现场**——比没有取证更误导人。
+    **保质期字段**,首验把表单结构钉死之后即撤。
+    """
+    modal = _find_create_modal(page)
+    if modal is None:
+        return ""
+    try:
+        return (modal.inner_html() or "")[:_CREATE_MODAL_HTML_CHARS]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def collection_create_probe(page) -> Dict[str, Any]:
+    """建合集流程的当场取证(任何一步失败都随 error 一起交出去)。
+
+    modal **每次现找**,不收调用方手上的句柄:表单一重渲染旧句柄就指向脱离文档的旧节点,
+    读它等于交出一份过期现场(尤其是按钮的禁用态,那正是最要紧的一格)。
+    """
+    evidence: Dict[str, Any] = {}
+    for key, selector in (
+        ("popover_present", _COLLECTION_POPOVER),
+        ("create_footer_present", _COLLECTION_CREATE_FOOTER),
+        ("collection_button_present", _COLLECTION_BUTTON),
+    ):
+        try:
+            evidence[key] = page.query_selector(selector) is not None
+        except Exception:  # noqa: BLE001 — 取证本身绝不制造新异常
+            evidence[key] = False
+    modal = _find_create_modal(page)
+    evidence["create_modal_present"] = modal is not None
+    if modal is not None:
+        evidence["create_modal_text"] = _norm_safe_text(modal)[:300]
+        evidence["create_modal_fields"] = len(_modal_fields(modal))
+        evidence["create_submit"] = read_create_join_state(
+            _find_in_modal_by_text(modal, _CREATE_SUBMIT_TEXT)
+        )
+    try:
+        evidence["collection_label"] = read_collection_label(page)
+    except Exception:  # noqa: BLE001
+        evidence["collection_label"] = None
+    # 页面文本兜一段:modal 容器认不出来时(class 与实拍不同),上面几格全是 False,
+    # 光看它们说不清"表单到底弹没弹"。**只作取证,绝不参与成败判定** —— 页面文本里出现
+    # 合集名不构成任何证据(播客合集预览卡伪证的教训)。
+    try:
+        evidence["page_text"] = _norm(page.inner_text("body"))[:600]
+    except Exception:  # noqa: BLE001
+        evidence["page_text"] = ""
+    return evidence
+
+
+def _norm_safe_text(element) -> str:
+    """元素文案(归一);读不到返回空串(取证读数绝不制造异常)。"""
+    try:
+        return _norm(element.inner_text())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _open_collection_popover(
+    page, human: SyncHumanActions, responses: ComponentResponses
+) -> Dict[str, Any]:
+    """点「加入合集」开弹层并等 ``list_v2`` → ``{"catalog": [...]}`` 或 ``{"error": ...}``。
+
+    与 ``_set_collection`` 开弹层那几行同源(含防遮挡滚动):底部悬浮发布钮的透明命中区
+    会把设置行上的点击静默吞掉,不先滚进中带就是看运气。
+
+    **空列表不是错误**:新号本来就一个合集都没有。判"读没读到"只认有没有收到响应体,
+    不看列表长不长 —— 拿"列表为空"当失败会让第一次建合集永远建不成。
+    """
+    btn = page.query_selector(_COLLECTION_BUTTON)
+    if btn is None:
+        return {"error": "collection_entry_not_found: 载体笔记的编辑页上没有「加入合集」"
+                         "入口(该笔记可能已在某个合集里 —— 已选态下入口本就不渲染;"
+                         "换一篇不在任何合集里的笔记当载体)"}
+    seen = responses.count(_COLLECTION_API_MARK)  # 基线必须在点击**之前**取
+    _scroll_row_to_mid_viewport(page, human, _COLLECTION_BUTTON)
+    btn = page.query_selector(_COLLECTION_BUTTON) or btn
+    human.click(btn, reason="打开合集弹层")
+    body = _wait_body(page, responses, _COLLECTION_API_MARK, _POPOVER_TIMEOUT_S, seen)
+    if body is None:
+        return {"error": "collection_catalog_unavailable: 点开弹层后没收到合集列表响应,"
+                         "建前查重做不了 —— 不查重就建会造出第二个同名合集(平台不去重"
+                         "同名已实证),故整单中止"}
+    return {"catalog": parse_collections(body)}
+
+
+def create_note_collection(
+    page,
+    account_id: int,
+    carrier_note_id: str,
+    name: str,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """借载体笔记的编辑器新建一个**笔记合集** → ``{"status": "done"|"error", ...}``。
+
+    流程(每步失败都当场取证 fail-loud):进载体笔记更新页 → 开合集弹层拿列表 →
+    **建前查重**(同名即停,不重建)→ 点弹层底栏「创建合集」→ 填名称/简介 →
+    等「创建并加入」翻转(四路禁用判定)→ 挂创建 API 拦截并点击 →
+    **双信号判定**(modal 收起 **且** 重进更新页后的干净列表里有这个名字)。
+
+    **不提交载体笔记**:全程零发布点击,收尾靠导航离开 —— 未提交的编辑器状态不落库,
+    所以载体笔记本身零改动(「并加入」若已由平台独立落库,那是平台侧行为,回执里的
+    ``joined_carrier`` 如实报出来)。
+
+    Raises:
+        NoteComponentsError: 载体笔记的更新页进不去(前置硬失败,由服务层翻译成 error)。
+    """
+    name = _norm(name)
+    description = _norm(description or "") or None
+    if not name:
+        return {"status": "error", "reason": "collection_name_empty: 合集名称是必填项"}
+
+    human = SyncHumanActions(page)
+    responses = ComponentResponses()
+    capture = _CreateApiCapture()
+    responses.attach(page)
+    capture.attach(page)
+    try:
+        open_update_page(page, account_id, carrier_note_id)
+
+        opened = _open_collection_popover(page, human, responses)
+        if "error" in opened:
+            return {"status": "error", "reason": opened["error"],
+                    "observed": collection_create_probe(page)}
+        catalog = opened["catalog"]
+
+        # 建前查重:平台**不去重同名**(播客合集实证),重建只会造出第二个同名合集,
+        # 而"多一个空合集"要人工去平台删。有同名就把现有那条的 id 交回去,调用方直接用。
+        existing = next((c for c in catalog if _norm(c["name"]) == name), None)
+        if existing is not None:
+            return {
+                "status": "error",
+                "reason": f"collection_name_already_exists: 该号已有同名合集「{name}」"
+                          f"(id={existing['id']},note_num={existing.get('note_num')});"
+                          f"平台不去重同名,重建只会多出一个空合集 —— **没有创建任何东西**,"
+                          f"请直接用回执里的 collection_id 挂笔记",
+                "collection_id": existing["id"],
+                "name": name,
+                "note_num": existing.get("note_num"),
+                "name_preexisted": True,
+            }
+
+        entry = page.query_selector(_COLLECTION_CREATE_FOOTER)
+        if entry is None or _COLLECTION_CREATE_TEXT not in _norm_safe_text(entry):
+            # class 变了还有文案兜底,但仍**收口在弹层容器内**(全页找「创建合集」会咬到别处)
+            entry = _find_text_in_section(
+                page, _COLLECTION_POPOVER, _COLLECTION_CREATE_TEXT
+            )
+        if entry is None:
+            return {"status": "error",
+                    "reason": f"collection_create_entry_not_found: 弹层底栏没有"
+                              f"「{_COLLECTION_CREATE_TEXT}」入口"
+                              f"({_COLLECTION_CREATE_FOOTER} 与文案兜底均未命中)",
+                    "observed": collection_create_probe(page)}
+        human.click(entry, reason=f"{_COLLECTION_CREATE_TEXT}(打开创建表单)")
+
+        modal = _wait_create_modal(page)
+        if modal is None:
+            return {"status": "error",
+                    "reason": "collection_create_modal_not_shown: 点了「创建合集」但创建"
+                              "表单没出来",
+                    "observed": collection_create_probe(page)}
+
+        filled = _fill_create_form(page, human, modal, name, description)
+        if "error" in filled:
+            return {"status": "error", "reason": filled["error"],
+                    "observed": collection_create_probe(page),
+                    "modal_html": _modal_html(page)}
+
+        submit, state = _wait_create_submit_enabled(page, modal)
+        if submit is None:
+            return {"status": "error",
+                    "reason": "create_join_never_enabled: 名称已填但「创建并加入」按钮"
+                              "始终禁用/loading,**绝不点禁用按钮**(平台可能又加了必填项,"
+                              "或名称被判不合法)",
+                    "observed": collection_create_probe(page),
+                    "create_submit_state": state,
+                    "modal_html": _modal_html(page)}
+
+        seen_api = capture.count()  # 基线必须在点击**之前**取
+        human.click(submit, reason=f"{_CREATE_SUBMIT_TEXT}「{name}」")
+
+        return _verify_created(
+            page, human, responses, capture, account_id, carrier_note_id, name,
+            description, seen_api,
+        )
+    finally:
+        responses.detach()
+        capture.detach()
+
+
+def _wait_create_modal(page):
+    """轮询等创建 modal 渲染出来(要求它已经能被认领**且**里面有输入控件);超时 None。"""
+    deadline = time.monotonic() + _CREATE_MODAL_TIMEOUT_S
+    while time.monotonic() < deadline:
+        modal = _find_create_modal(page)
+        if modal is not None and _modal_fields(modal):
+            return modal
+        page.wait_for_timeout(300)
+    return None
+
+
+def _fill_create_form(
+    page, human: SyncHumanActions, modal, name: str, description: Optional[str]
+) -> Dict[str, Any]:
+    """在 modal 内填名称(必填)与简介(可选)→ ``{}`` 或 ``{"error": ...}``。
+
+    两个框都**只在 modal 容器内**找(见 ``_pick_field``)。请求了简介却找不到简介框时
+    **报错而不是跳过**:静默丢掉调用方给的字段,是这条产品线最讨厌的那种失败。
+
+    填完名称之后**重新认领一次 modal 再找简介框**:名称一进去就会触发重渲染(字数计数器
+    要更新),此时打字前抓的那个简介句柄可能已经脱离文档 —— 往脱离文档的节点里打字**不会
+    报错**,简介就这么没了,而回执还是绿的。宁可多找一次。
+    """
+    fields = _modal_fields(modal)
+    # 位置兜底只认实拍的两字段形状:名称在前、简介在后
+    name_field = _pick_field(fields, _CREATE_NAME_HINTS,
+                             fallback_index=0 if len(fields) in (1, 2) else None)
+    if name_field is None:
+        return {"error": "collection_name_input_not_found: 创建表单里认不出合集名称输入框"
+                         f"(placeholder 未命中 {list(_CREATE_NAME_HINTS)},控件数 "
+                         f"{len(fields)} 也对不上实拍的两字段形状);**一个字都没填**——"
+                         "绝不退到 modal 之外找输入框(页面上还有笔记标题框)"}
+    human.type_text(name_field, name)
+
+    if description:
+        live = _find_create_modal(page) or modal
+        fields = _modal_fields(live) or fields
+        name_field = _pick_field(fields, _CREATE_NAME_HINTS,
+                                 fallback_index=0 if len(fields) in (1, 2) else None)
+        desc_field = _pick_field(fields, _CREATE_DESC_HINTS,
+                                 fallback_index=1 if len(fields) == 2 else None)
+        if desc_field is None:
+            return {"error": "collection_desc_input_not_found: 传了简介但创建表单里认不出"
+                             "简介输入框;不静默丢掉调用方给的字段"}
+        if desc_field is name_field:
+            return {"error": "collection_desc_input_ambiguous: 简介框与名称框认成了同一个"
+                             "控件,拒绝把简介打进名称里"}
+        human.type_text(desc_field, description)
+    return {}
+
+
+def _wait_create_submit_enabled(page, modal):
+    """等「创建并加入」从禁用翻转成可点 → ``(元素, state)``;超时给 ``(None, state)``。
+
+    每一跳都**连 modal 带按钮重新定位**:填完名称那一下会触发重渲染,此时手上的 modal
+    句柄指向的已是脱离文档的旧节点,在它的子树里找按钮只会一路读到**旧的禁用 class**,
+    一直读到超时(看着像"平台永远不给我解禁",实际是我们在读一份已经过期的 DOM)。
+    传进来的 ``modal`` 只当兜底。**绝不点禁用按钮**。
+    """
+    deadline = time.monotonic() + _CREATE_ENABLE_TIMEOUT_S
+    state: Dict[str, Any] = {"found": False}
+    while time.monotonic() < deadline:
+        button = _find_create_submit(page, _find_create_modal(page) or modal)
+        state = read_create_join_state(button)
+        if state.get("enabled"):
+            return button, state
+        page.wait_for_timeout(300)
+    return None, state
+
+
+def _create_modal_open(page) -> bool:
+    """创建表单还开着没有:认领得到 modal **且**里面还有输入控件(名称框没消失)。"""
+    modal = _find_create_modal(page)
+    return modal is not None and bool(_modal_fields(modal))
+
+
+def _wait_create_modal_closed(page) -> bool:
+    """轮询等创建表单收起;超时返回 False(**表单不收起 = 大概率没提交出去**)。"""
+    deadline = time.monotonic() + _CREATE_CLOSE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not _create_modal_open(page):
+            return True
+        page.wait_for_timeout(400)
+    return not _create_modal_open(page)
+
+
+def _verify_created(
+    page,
+    human: SyncHumanActions,
+    responses: ComponentResponses,
+    capture: "_CreateApiCapture",
+    account_id: int,
+    carrier_note_id: str,
+    name: str,
+    description: Optional[str],
+    seen_api: int,
+) -> Dict[str, Any]:
+    """点完「创建并加入」之后的**双信号**判定:表单收起 ``且`` 干净列表里有这个名字。
+
+    第二个信号刻意做成"**重进更新页**再开弹层读 ``list_v2``",而不是在原页面上就地回读:
+
+    - 重进会丢弃一切未提交的编辑器状态,所以重进后列表里还有这个名字 = 平台侧**已经独立
+      落库**(创建是即时的);读不到 = 这次创建**要随笔记提交才生效**(而我们不提交)。
+      这正是首验要分辨的那两种可能,判据本身就把答案带出来了;
+    - 原页面就地回读会重蹈播客合集的覆辙 —— 表单/预览区里出现自己刚打的字不构成任何证据。
+
+    载体笔记若真被"并加入"了,重进后合集区会是**已选态**、「加入合集」入口不渲染,弹层就
+    开不了 —— 这不是失败,是最强的落库证据,故单独收一支(``confirmed_by=carrier_chip``)。
+    """
+    modal_closed = _wait_create_modal_closed(page)
+    created_api = capture.since(seen_api)
+    api_id = parse_created_collection_id(created_api)
+    common: Dict[str, Any] = {
+        "name": name,
+        "description": description,
+        # 查重挡在创建之前,走到这里必然没有同名(留成常驻字段,回执形状不随分支变)
+        "name_preexisted": False,
+        "created_api_capture": created_api,
+        "modal_closed": modal_closed,
+    }
+    if not modal_closed:
+        modal = _find_create_modal(page)
+        return {
+            **common,
+            "status": "error",
+            "reason": "create_modal_still_open: 点了「创建并加入」但表单一直没收起 ——"
+                      "**大概率没提交出去**(播客合集 7 单假绿正是这个形态)。做没做成"
+                      "以人工核对为准,**别自动重建**(平台不去重同名)",
+            "observed": collection_create_probe(page),
+            "create_submit_state": read_create_join_state(_find_create_submit(page, modal)),
+            "modal_html": _modal_html(page),
+        }
+
+    # 重进更新页 = 丢弃一切未提交状态,拿到的才是"干净列表"
+    try:
+        open_update_page(page, account_id, carrier_note_id)
+    except NoteComponentsError as exc:
+        return {
+            **common,
+            "status": "error",
+            "reason": f"verify_reload_failed: 表单已收起,但重进载体笔记更新页失败"
+                      f"({exc.reason}),干净列表回读做不了 —— **建没建成未知**,"
+                      f"请人工核对(创建 API 取证已随回执带出)",
+            "collection_id": api_id,
+        }
+
+    opened = _open_collection_popover(page, human, responses)
+    if "error" in opened:
+        label = read_collection_label(page)
+        if opened["error"].startswith("collection_entry_not_found") and _norm(label or "") == name:
+            # 重进之后载体笔记已经在这个合集里 —— 未提交状态早被重进丢掉了,还能读到,
+            # 只可能是平台侧已独立落库。这是比列表回读更强的证据,照样算成功。
+            return {
+                **common,
+                "status": "done",
+                "confirmed_by": "modal_closed_and_carrier_chip",
+                "collection_id": api_id,
+                "joined_carrier": None,
+                "carrier_collection_label": label,
+                "note": "载体笔记重进后已处于该合集的已选态,弹层入口因此不渲染、列表读不到,"
+                        "故 collection_id 只能取自创建 API 取证(可能为 null)。要拿 id 请对"
+                        "**另一篇不在任何合集里**的笔记调 GET /api/accounts/{id}/collections",
+            }
+        return {
+            **common,
+            "status": "error",
+            "reason": f"verify_list_unreadable: 表单已收起,但干净列表回读失败"
+                      f"({opened['error']}) —— **建没建成未知**,请人工核对,别自动重建",
+            "collection_id": api_id,
+            "carrier_collection_label": label,
+        }
+
+    catalog = opened["catalog"]
+    hit = next((c for c in catalog if _norm(c["name"]) == name), None)
+    label = read_collection_label(page)
+    if hit is None:
+        return {
+            **common,
+            "status": "error",
+            "reason": "collection_absent_from_fresh_list: 表单收起了,但**重进更新页后的"
+                      "干净列表里没有这个合集**。两种可能:①创建根本没落库;②这次创建要"
+                      "随笔记提交才生效,而本能力刻意不提交载体笔记。看 created_api_capture "
+                      "有没有抓到创建请求即可分辨 —— 请人工核对后再决定,**别自动重建**",
+            "collection_id": api_id,
+            "collections_seen": [c["name"] for c in catalog][:20],
+            "carrier_collection_label": label,
+        }
+    return {
+        **common,
+        "status": "done",
+        "confirmed_by": "modal_closed_and_in_fresh_list",
+        "collection_id": hit["id"],
+        # 「并加入」到底随不随笔记提交生效:重进后这个合集的 note_num >0 即已独立落库
+        "joined_carrier": hit.get("note_num"),
+        "carrier_collection_label": label,
+        "created_api_id": api_id,
+    }
