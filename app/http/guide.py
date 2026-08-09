@@ -227,6 +227,21 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-09",
+        "title": "播客合集判据盲点修+建前查重升级为拦截,podcast-collections 解冻(P1)",
+        "kind": "fix",
+        "summary": "两处:①判据盲点——创建表单收起后页面常落在「上传视频」tab(号6播客首验"
+                   "实拍),而合集区在发播客 tab,不切回去验名,真建成也只能报"
+                   "create_page_closed_name_missing;现在收起后先切回发播客 tab 再验名。"
+                   "②建前查重从「记录 name_preexisted 继续建」升级为「同名即拦截」"
+                   "(collection_name_already_exists),对齐笔记合集语义——平台不去重同名"
+                   "(号5 双会客厅实证),纯新建场景下记录性字段等于放行重复。"
+                   "confirmed_by 的 _name_preexisted 后缀因此不再出现。**端点解冻**,"
+                   "薛定谔提交(loading 态提交可能延迟落地)教训:建前必查列表,本升级把它"
+                   "编码进了流程。",
+        "endpoints": ["/api/accounts/{account_id}/podcast-collections"],
+    },
+    {
+        "date": "2026-08-09",
         "title": "建笔记合集:弹层列表预取回落——图文载体点弹层不发新请求,误报 catalog_unavailable",
         "kind": "fix",
         "summary": "号8 首验实测:图文载体的编辑器在**页面加载时**就预取了合集列表,点「加入"

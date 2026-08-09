@@ -509,20 +509,66 @@ def test_create_collection_closed_but_name_missing_is_error(monkeypatch):
     assert out["name_shown_after_close"] is False
 
 
-def test_create_collection_preexisting_name_marks_confirmed_by(monkeypatch):
-    """创建前列表里就有同名合集 → 成功也要在 confirmed_by 后缀提醒调用方核对。
+def test_create_collection_preexisting_name_aborts(monkeypatch):
+    """建前查重(P1 升级):发播客页合集区已有同名 → already_exists,**一个字都不建**。
 
-    号1 的真实处境:「NBDpsy心理会客厅」创建前就在列表里,收起后的名字检查对它
-    **不构成新建证据**(名字本来就在)。
+    旧语义是"记录 name_preexisted 继续建、confirmed_by 加后缀"——纯新建场景下等于放行
+    重复(平台不去重同名,号5 双会客厅实证),P1 起升级为拦截,对齐笔记合集 create。
     """
     monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
-    page, handlers, _ = _collection_page()
+    page, handlers, els = _collection_page()
     page.body_text = "播客合集 NBDpsy心理会客厅"   # 进创建页之前就有同名
     human = _wire(page, handlers)
     out = podcast_mod.create_collection(page, human, "NBDpsy心理会客厅", None, "/tmp/c.png")
+    assert out["status"] == "error", out
+    assert out["reason"].startswith("collection_name_already_exists")
+    # 一个字都没建:没进创建页、没碰提交按钮
+    assert not any(t is els["button"] for t, _ in human.clicks)
+    assert not els["name"].attrs.get("value")
+
+
+def test_judge_returns_to_podcast_tab_after_close(monkeypatch):
+    """P1 盲点修复回归:表单收起后页面落在「上传视频」tab,判据必须切回发播客 tab 再验名。
+
+    号6播客首验实拍:收起后 active_tab="上传视频"、合集区不可见 —— 不切回去,真建成也
+    只能报"未知"(create_page_closed_name_missing)。
+    """
+    monkeypatch.setattr(podcast_mod.time, "sleep", lambda *_: None)
+    page, handlers, els = _collection_page()
+    tab = _El("div", "发播客", cls="creator-tab")
+    state_tab = {"active": "发播客"}
+
+    orig_eval = page.eval_fn
+
+    def _eval(script, *a):
+        if "creator-tab" in script and "active" in script:
+            return [state_tab["active"]]
+        return orig_eval(script, *a)
+
+    page.eval_fn = _eval
+
+    # 提交成功但落在「上传视频」tab:合集名此刻**不可见**
+    orig_submit = handlers[els["button"]]
+
+    def _submit_landing_wrong_tab():
+        orig_submit()
+        created_text = page.body_text          # "播客合集 <名>"(发播客 tab 下才可见)
+        state_tab["active"] = "上传视频"
+        page.body_text = "上传视频 拖拽视频到此或点击上传"
+        page.elements = page.elements + [tab]
+
+        def _back_to_podcast_tab():
+            state_tab["active"] = "发播客"
+            page.body_text = created_text
+
+        handlers[tab] = _back_to_podcast_tab
+
+    handlers[els["button"]] = _submit_landing_wrong_tab
+    human = _wire(page, handlers)
+    out = podcast_mod.create_collection(page, human, "心理急救包", None, "/tmp/c.png")
     assert out["status"] == "done", out
-    assert out["name_preexisted"] is True
-    assert out["confirmed_by"] == "create_page_closed_name_preexisted"
+    assert out["confirmed_by"] == "create_page_closed"
+    assert any(t is tab for t, _ in human.clicks), "判据必须点回发播客 tab"
 
 
 # ---------------- 「去发布」禁用判据 ----------------

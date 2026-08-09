@@ -613,9 +613,16 @@ def create_collection(
         return {"status": "error",
                 "reason": f"collection_entry_not_found: 页面上没有「{_COLLECTION_ENTRY_TEXT}」入口",
                 "observed": collection_probe(page), "tooltip": tooltip}
-    # 进创建表单**之前**先看一眼列表里有没有同名的:号1 的「NBDpsy心理会客厅」创建前
-    # 就已经在列表里,收起表单后再看到这个名字对它**不构成新建证据**(见 _read_create_result)。
-    name_preexisted = name in _page_text(page)
+    # 建前查重(P1 升级,2026-08-09):发播客页的合集区就是该号播客合集的完整列表,同名已在
+    # → **一个字都不建**。平台不去重同名(号5 双会客厅实证),旧的"记录性 name_preexisted"
+    # 在纯新建场景等于放行重复;语义对齐笔记合集 create 的 already_exists。
+    if name in _page_text(page):
+        return {"status": "error",
+                "reason": f"collection_name_already_exists: 发播客页合集区已有「{name}」,"
+                          "不重建(平台不去重同名,号5 双会客厅实证);要重建请先人工删除旧的",
+                "observed": collection_probe(page), "tooltip": tooltip}
+    # 查重挡在前面,走到这里必然没有同名(字段保留,回执形状不变)
+    name_preexisted = False
     human.click(entry, reason="新建播客合集")
 
     name_input = _wait_selector(page, _NAME_INPUT, _CREATE_PAGE_TIMEOUT_S)
@@ -663,7 +670,7 @@ def create_collection(
                 "observed": collection_probe(page)}
     human.click(button, reason="创建播客合集")
 
-    return _read_create_result(page, name, tooltip, crop, name_preexisted)
+    return _read_create_result(page, human, name, tooltip, crop, name_preexisted)
 
 
 def _confirm_cover_crop(page, human: SyncHumanActions) -> Dict[str, Any]:
@@ -703,7 +710,8 @@ def _wait_create_enabled(page) -> bool:
 
 
 def _read_create_result(
-    page, name: str, tooltip: dict, crop: dict, name_preexisted: bool
+    page, human: SyncHumanActions, name: str, tooltip: dict, crop: dict,
+    name_preexisted: bool
 ) -> Dict[str, Any]:
     """回读创建结果:**创建表单收起** ``且`` 收起后页面文本里出现该名称 = done。
 
@@ -738,7 +746,15 @@ def _read_create_result(
     while time.monotonic() < deadline:
         observed = collection_probe(page)
         form_open = bool(observed.get("name_input_present"))
-        # 名字检查只在表单收起**之后**做,而且读全文(collection_probe 的 page_text 截到 600 字)
+        # 名字检查只在表单收起**之后**做,而且读全文(collection_probe 的 page_text 截到 600 字)。
+        # 收起后页面常落在「上传视频」tab(号6播客首验实拍:active_tab="上传视频"),而合集区
+        # 在发播客 tab —— 不切回去就是在错的页面上找名字,真建成也只能报"未知"(P1 盲点修,
+        # RCA 2026-08-09)。切换失败不抛错:留在原地让名字检查如实落空,走保守 error 分支。
+        if not form_open and not is_podcast_tab_active(page):
+            try:
+                ensure_podcast_tab(page, human)
+            except Exception:  # noqa: BLE001 — 切 tab 失败当没切成,判据保守方向不变
+                pass
         if not form_open and name in _page_text(page):
             confirmed_by = "create_page_closed"
             if name_preexisted:
