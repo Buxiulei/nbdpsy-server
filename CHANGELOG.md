@@ -63,7 +63,7 @@
 
 ### 保质期
 
-`rejected_with_items` 与 `with_items` 都是**临时诊断字段**,与 `poll_timeline` /
+`rejected_with_items`、`with_items`、`caret_rect` 都是**临时诊断字段**,与 `poll_timeline` /
 `point_element_chain` 同一条纪律:锚定判据这个候选一坐实或排除,就该撤掉,别让它们变成永久
 字段(manifest 的 note-components 条目里已如实标注)。
 
