@@ -133,6 +133,8 @@ class _TopicPage:
     """
 
     RECT = {"x": 10.0, "y": 200.0, "w": 300.0, "h": 120.0, "ih": 900.0}
+    # 光标矩形(采集 JS 从 getSelection().getRangeAt(0) 读):落在正文框内
+    CARET = {"x": 120, "y": 230}
 
     def __init__(self, *, body="原有正文", available=None, focus_ok=True):
         self.body = body
@@ -146,6 +148,10 @@ class _TopicPage:
         self.forensics_points = []   # 取证 JS 收到的落点参数(每次失败取证一条)
 
     # ---- 被 note_editing 调用的页面接口 ----
+
+    def _payload(self, layers):
+        """采集 JS 的返回形态:层 + 光标矩形。光标挂在正文框内(真页面同理)。"""
+        return {"layers": layers, "caret": self.CARET}
 
     def evaluate(self, js, arg=None):
         if "primary_matched" in js:          # _FOCUS_FORENSICS_JS(聚焦失败取证)
@@ -161,13 +167,13 @@ class _TopicPage:
         if "getComputedStyle" in js:         # COLLECT_LAYERS_JS:回放话题下拉浮层
             tag = arg
             if self._dropdown_suppressed:    # # 粘连前一个话题实体:编辑器没弹联想浮层
-                return {"layers": []}
+                return self._payload([])
             if tag in self.available:
                 # 一层"像下拉"的浮层,含精确匹配那一行;坐标挂在正文框那一列(几何锚放行)、
                 # 纵向贴着框内上方(正文框可能探出视口,挂框底会把浮层放到视口外去)
                 lx = self.RECT["x"] + 10.0
                 ly = self.RECT["y"] + 40.0
-                return {"layers": [{
+                return self._payload([{
                     "cls": "topic-dropdown",
                     "rect": {"x": lx, "y": ly, "width": 200.0, "height": 120.0},
                     "has_tag": True,
@@ -175,8 +181,8 @@ class _TopicPage:
                         {"text": f"#{tag}", "x": lx + 40.0, "y": ly + 20.0},
                         {"text": f"#{tag}的近似词", "x": lx + 40.0, "y": ly + 50.0},
                     ],
-                }]}
-            return {"layers": []}            # 没这个词 → 空浮层 → topic_dropdown_not_shown
+                }])
+            return self._payload([])         # 没这个词 → 空浮层 → topic_dropdown_not_shown
         if "getBoundingClientRect" in js and "sels" in js:  # _BOX_JS(_locate)
             return {**self.RECT, "sel": arg[0]}
         if "contenteditable" in js:          # 正文只读(read_body_value)
@@ -237,7 +243,30 @@ class _LateDropdownPage(_TopicPage):
         if "getComputedStyle" in js:
             self.collect_calls += 1
             if self.late_ticks is None or self.collect_calls <= self.late_ticks:
-                return {"layers": []}     # 浮层还没挂上(或永远不挂)
+                return self._payload([])  # 浮层还没挂上(或永远不挂)
+        return super().evaluate(js, arg)
+
+
+class _OutOfColumnLayerPage(_TopicPage):
+    """浮层**带着话题选项、却落在正文栏之外**的假页面(真因候选 b 的回放)。
+
+    正文栏是 ``RECT`` 的 [10, 310],这一层挂在 x=900 —— 与栏零相交,判据拒它、reason 是
+    ``topic_dropdown_not_found``。它存在的意义是给轮询时间线的 ``with_items`` 装牙:
+    "浮层压根不来"(恒 0)与"来了被拒"(非 0)必须在回执里分得开,否则真因还是猜。
+    """
+
+    def evaluate(self, js, arg=None):
+        if "getComputedStyle" in js:
+            tag = arg
+            return self._payload([{
+                "cls": "topic-dropdown",
+                "rect": {"x": 900.0, "y": 240.0, "width": 250.0, "height": 120.0},
+                "has_tag": True,
+                "items": [
+                    {"text": f"#{tag}", "x": 940.0, "y": 260.0},
+                    {"text": f"#{tag} 1.2万次浏览", "x": 940.0, "y": 290.0},
+                ],
+            }])
         return super().evaluate(js, arg)
 
 
@@ -440,7 +469,7 @@ def test_fake_models_glued_hash_suppresses_dropdown():
     page = _TopicPage(body="正文 #复杂性创伤[话题]#", available={"失眠"})
     # 无分隔(旧代码 f"#{tag}"):夹具约定抑制浮层(探针行为,非生产根因)
     page.type_into_body("#失眠")
-    assert page.evaluate(COLLECT_LAYERS_JS, "失眠") == {"layers": []}
+    assert page.evaluate(COLLECT_LAYERS_JS, "失眠")["layers"] == []
     # 有分隔(新代码 f" #{tag}"):浮层弹出、含精确匹配
     page.type_into_body(" #失眠")
     assert page.evaluate(COLLECT_LAYERS_JS, "失眠")["layers"], "补空格分隔就该弹浮层"
@@ -534,6 +563,43 @@ def test_append_topics_records_poll_timeline_when_dropdown_never_shows():
     # 轮询不改回删语义:失败照样 Escape + 连分隔空格删净
     assert page.escapes == 1 and page.backspaces == len(" #失眠")
     assert ne.extract_topics(page.body) == []
+
+
+def test_poll_timeline_with_items_splits_never_came_from_came_and_rejected():
+    """时间线的 ``with_items``:本 tick 页面上有几层带话题选项(不分收下还是拒掉)。
+
+    它是"浮层没来"与"浮层来了被判据拒掉"之间唯一的分水岭 —— 两者的 reason 可以一样、
+    ``layers_seen`` 也可能都非 0(页面上常年浮着一堆无关的 absolute 层),只有"带选项的
+    层数"能定性。两条断言互为对照,少一条都是假绿。
+    """
+    # 浮层压根不来:恒 0 → 真凶在"联想内容没回来"那一支
+    never = _LateDropdownPage(late_ticks=None, available={"失眠"})
+    human, never = _run(never)
+    never_timeline = ne.append_topics(never, human, ["失眠"])["failed"][0]["poll_timeline"]
+    assert never_timeline and all(t["with_items"] == 0 for t in never_timeline)
+
+    # 浮层带着选项来了、被几何锚拒掉:恒 1 → 真凶是判据不是时序
+    rejected = _OutOfColumnLayerPage(available={"失眠"})
+    human, rejected = _run(rejected)
+    detail = ne.append_topics(rejected, human, ["失眠"])["failed"][0]
+    assert detail["reason"] == "topic_dropdown_not_found"
+    timeline = detail["poll_timeline"]
+    assert timeline and all(t["layers_seen"] == 1 for t in timeline)
+    assert all(t["with_items"] == 1 for t in timeline), "带选项的层被拒了却没在时间线里现形"
+
+
+def test_topic_failure_detail_carries_caret_rect():
+    """失败回执带光标矩形:有它 + 浮层 rect + 正文栏 rect,水平错锚与垂直问题才分得开。
+
+    白名单式取键的老坑(``topic_failure_detail`` 不显式列出的键到不了回执),所以这条钉的是
+    **端到端**:假页面的采集返回 → 判据 → 回执条目,一路不掉。
+    """
+    page = _LateDropdownPage(late_ticks=None, available={"失眠"})
+    human, page = _run(page)
+
+    detail = ne.append_topics(page, human, ["失眠"])["failed"][0]
+
+    assert detail["caret_rect"] == _TopicPage.CARET
 
 
 def test_append_topics_poll_budget_is_per_topic_not_shared():

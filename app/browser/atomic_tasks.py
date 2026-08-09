@@ -133,6 +133,11 @@ def topic_failure_detail(tag_name: str, option_pos: Optional[Dict[str, Any]],
         detail["layer_class"] = str(option_pos.get("layer_class") or "")[:80]
         detail["layers_seen"] = option_pos.get("layers_seen", 0)
         detail["rejected_classes"] = list(option_pos.get("rejected_classes") or [])[:5]
+        # 被拒但**带话题选项**的层:锚定判据拒错时真凶就在这里(rejected_classes 只有类名、
+        # 看不出哪层有内容)。白名单式取键,不显式列出就到不了回执。**临时诊断字段**。
+        detail["rejected_with_items"] = list(option_pos.get("rejected_with_items") or [])[:3]
+        # 光标矩形:浮层挂在光标上,它是"浮层该出现在哪"的地面真值。None = 页面没取到。
+        detail["caret_rect"] = option_pos.get("caret_rect")
     return detail
 
 

@@ -354,8 +354,10 @@ MANIFEST_ENTRIES = [
                  "topics_truncated=因超 10 上限没补的;topics_failed=[{component:`topic:话题名`,"
                  "reason}] 逐个失败原因(下拉没中/回读没确认/超上限截断),**不连坐**其余话题也"
                  "不连坐其余组件。验收「补 4 个后结果 5 个、原 1 个保留」看的就是 applied.topics 的长度。"
-                 "topics_failed 条目在浮层类失败时可含 poll_timeline(逐 tick 轮询取证,**临时诊断"
-                 "字段**,浮层缺陷排除后会撤,勿建硬依赖)。",
+                 "topics_failed 条目在浮层类失败时可含 poll_timeline(逐 tick 轮询取证,每 tick 带"
+                 "with_items=本 tick 带话题选项的层数)、rejected_with_items(被判据拒掉却带话题"
+                 "选项的层,最多 3 层)与 caret_rect(光标矩形 {x,y},取不到为 null)"
+                 "——**这几个都是临时诊断字段**,浮层缺陷排除后会撤,勿建硬依赖。",
     },
 ]
 

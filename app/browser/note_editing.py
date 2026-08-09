@@ -34,7 +34,11 @@ from app.browser.atomic_tasks import (
     topic_failure_detail,
 )
 from app.browser.text_formatter import get_display_length
-from app.browser.topic_dropdown import COLLECT_LAYERS_JS, select_topic_option
+from app.browser.topic_dropdown import (
+    COLLECT_LAYERS_JS,
+    select_topic_option,
+    topic_option_count,
+)
 
 # 正文里的话题实体形如 ``#身边的心理学[话题]#``。
 # 出处:``note_components._TOPIC_PATTERN``(私有名,不 import;拷贝理由见模块 docstring)。
@@ -759,10 +763,12 @@ def _poll_topic_dropdown(page, human, tag_name: str) -> tuple[dict, list[dict]]:
 
     - ``option`` 是 ``select_topic_option`` 的原样结果(命中时 ``success=True``,超预算时
       是**最后一 tick** 的失败判定,带它那一刻的取证字段);
-    - ``poll_timeline`` 是每个失败 tick 的 ``{tick, elapsed_s, layers_seen, reason}``,
-      失败时挂进回执 —— 它既是修复也是取证:真因两个候选(浮层异步渲染晚到 / chip 累积后
-      光标几何变化把浮层挤出锚定区间)轮询对前者直接治愈,对后者能靠时间线钉死
-      ("8 tick 全程 layers_seen 稳定非 0 但 reason 恒为 not_found" = 几何锚拒错了)。
+    - ``poll_timeline`` 是每个失败 tick 的
+      ``{tick, elapsed_s, layers_seen, with_items, reason}``,失败时挂进回执 —— 它既是修复
+      也是取证:真因两个候选(浮层异步渲染晚到 / chip 累积后光标几何变化把浮层挤出锚定
+      区间)轮询对前者直接治愈,对后者靠时间线钉死 —— 2026-08-09 真号三单正是这么定的案
+      (layers_seen 稳定 14-19 层、8 秒恒定 = 浮层不是晚到)。``with_items`` 是补上的最后
+      一格:带话题选项的层数恒 0 = 联想内容压根没回来,非 0 = 浮层来了被判据拒掉。
 
     等待一律走 ``human.wait`` 保持拟人节奏(裸 sleep 是风控特征,本仓禁);每 tick 都
     **重新取**正文框矩形当几何锚,不持旧句柄(理由同 ``_focus_body_end``:重渲染会让旧
@@ -779,15 +785,20 @@ def _poll_topic_dropdown(page, human, tag_name: str) -> tuple[dict, list[dict]]:
         editor_rect = (
             {"x": box.get("x"), "width": box.get("w")} if box.get("x") is not None else None
         )
-        option = select_topic_option(
-            page.evaluate(COLLECT_LAYERS_JS, tag_name), tag_name, editor_rect=editor_rect
-        )
+        payload = page.evaluate(COLLECT_LAYERS_JS, tag_name)
+        option = select_topic_option(payload, tag_name, editor_rect=editor_rect)
         if option and option.get("success"):
             return option, timeline
         timeline.append({
             "tick": tick,
             "elapsed_s": round(time.monotonic() - started, 1),
             "layers_seen": (option or {}).get("layers_seen", 0),
+            # 本 tick 页面上有几层带话题选项(**不分收下还是拒掉**)。一个整数就把
+            # "浮层压根不来"(恒 0)与"来了被判据拒掉"(非 0)分开 —— 两者的 reason 可以
+            # 一样、layers_seen 也可能都非 0(页面常年浮着一堆无关 absolute 层)。
+            "with_items": sum(
+                1 for ly in (payload or {}).get("layers") or [] if topic_option_count(ly) > 0
+            ),
             "reason": (option or {}).get("reason", "error"),
         })
         if time.monotonic() >= deadline:

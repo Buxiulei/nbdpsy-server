@@ -16,8 +16,9 @@
 
 **主判据是几何锚定**:下拉是挂在正文框光标上的,必然落在正文栏那一列;而预览面板在页面
 右侧,与正文栏**水平不相交**。两种页型的生产截图都实证了这一点(视频页正文栏右缘 ~1096 /
-预览面板左缘 ~1145;图文页 ~1580 / ~1645)。所以"浮层水平中心落在正文框的 x 区间内"既能
-放行真下拉,又能一刀切掉预览面板,且不依赖任何 class 名。
+预览面板左缘 ~1145;图文页 ~1580 / ~1645)。所以"浮层与正文框的 x 区间相交"既能放行真
+下拉,又能一刀切掉预览面板,且不依赖任何 class 名。判据一度收得更紧("水平**中心**落在
+区间内"),把跟着光标右移、探出栏缘的真下拉也拒了 —— 详见 ``is_anchored_to_editor``。
 
 **结构判据**(多数子项长得像话题选项:``#`` 开头或带浏览量统计文案)作两用:拿不到正文框
 几何时兜底放行,以及给失败分类定性。
@@ -46,9 +47,10 @@ from typing import Any, Dict, List, Optional
 # 一层浮层最多回传多少个子项 / 一页最多回传多少层:回执要塞进 job 台账,不能无界
 MAX_LAYERS = 24
 MAX_ITEMS_PER_LAYER = 60
-# 取证里带回多少候选文案 / 多少个被拒层的 class
+# 取证里带回多少候选文案 / 多少个被拒层的 class / 多少个"被拒但带选项"的层
 MAX_CANDIDATES = 10
 MAX_REJECTED_CLASSES = 5
+MAX_REJECTED_WITH_ITEMS = 3
 
 # 单条选项文案长于它就不是话题行(和旧实现同阈值,别动)
 MAX_ITEM_TEXT = 50
@@ -95,7 +97,19 @@ COLLECT_LAYERS_JS = r"""
     // 超量时先保含话题文案的、再按面积小的:截断不能把真下拉截掉
     layers.sort((a, b) => (b.has_tag - a.has_tag)
         || (a.rect.width * a.rect.height - b.rect.width * b.rect.height));
-    return {layers: layers.slice(0, MAX_LAYERS)};
+    // 光标矩形:联想浮层挂在光标上,所以"光标在哪"是判据的地面真值。取不到留 null,
+    // 绝不让取证把整次采集带崩(异常会让这一 tick 什么层都拿不到)。
+    let caret = null;
+    try {
+        const sel = document.getSelection();
+        if (sel && sel.rangeCount > 0) {
+            const cr = sel.getRangeAt(0).getBoundingClientRect();
+            caret = {x: Math.round(cr.x), y: Math.round(cr.y)};
+        }
+    } catch (e) {
+        caret = null;
+    }
+    return {layers: layers.slice(0, MAX_LAYERS), caret: caret};
 }
 """.replace("MAX_ITEMS", str(MAX_ITEMS_PER_LAYER)).replace("MAX_LAYERS", str(MAX_LAYERS))
 
@@ -125,10 +139,20 @@ def is_mirror_layer(layer: Dict[str, Any]) -> bool:
 
 
 def is_anchored_to_editor(layer: Dict[str, Any], editor_rect: Optional[Dict[str, Any]]) -> bool:
-    """主判据:浮层水平中心落在正文框那一列里。
+    """主判据:浮层与正文框那一列**水平相交**。
 
-    下拉挂在正文框的光标上,必然与正文栏同列;右侧手机预览面板与正文栏水平不相交
-    (视频页 / 图文页生产截图双实证)。拿不到正文框几何时返回 False,由调用方退回结构判据。
+    判别性质自始至终是同一条:下拉挂在正文框的光标上,必然压在正文栏这一列;右侧手机预览
+    面板与正文栏**水平不相交**(视频页正文栏右缘 ~1096 / 预览面板左缘 ~1145;图文页
+    ~1580 / ~1645,两种页型生产截图双实证)。
+
+    早先用"浮层水平中心在栏内"代理这条性质,它比性质本身**紧**:浮层跟着光标走,正文里
+    话题 chip 一多、光标被顶到行尾,浮层就半个身子探出正文栏右缘 —— 中心出栏了,与栏
+    仍相交,判据却把这个真下拉拒了(RCA 2026-08-09 真号三单:追加词全报
+    ``topic_dropdown_not_shown``,poll_timeline 里 layers_seen 稳定 14-19 层 / 8 秒恒定,
+    浮层不是晚到;号6 播客同一单前 2 个词成功、第 3 个起连败 = 位置败不是词败)。改判相交
+    后紧回性质本身:预览面板与正文栏零相交,照拒不误。
+
+    拿不到正文框几何时返回 False,由调用方退回结构判据。
     """
     if not editor_rect:
         return False
@@ -140,8 +164,8 @@ def is_anchored_to_editor(layer: Dict[str, Any], editor_rect: Optional[Dict[str,
     lx, lw = rect.get("x"), rect.get("width")
     if lx is None or lw is None:
         return False
-    center = lx + lw / 2.0
-    return ex <= center <= ex + ew
+    # 区间相交(边缘相切不算相交:贴着栏缘的层属于旁边那一列)
+    return lx < ex + ew and lx + lw > ex
 
 
 def _match_in_layer(layer: Dict[str, Any], tag_name: str, exact: bool) -> Optional[Dict[str, Any]]:
@@ -175,12 +199,26 @@ def _forensics(layer: Optional[Dict[str, Any]], layers: List[Dict[str, Any]],
             seen.append(t)
         if len(seen) >= MAX_CANDIDATES:
             break
+    # 被拒的层里**带话题选项**的那些:判据拒错时,真下拉就藏在这里。``rejected_classes``
+    # 只记前 5 个类名、也不说那层有没有选项,真凶被它挡住过一整轮(RCA 2026-08-09)。
+    # **临时诊断字段**,锚定判据的候选一坐实/排除就该撤。
+    rejected_with_items = [
+        {
+            "cls": str(r.get("cls") or "")[:40],
+            "items": topic_option_count(r),
+            "x": (r.get("rect") or {}).get("x"),
+            "y": (r.get("rect") or {}).get("y"),
+            "w": (r.get("rect") or {}).get("width"),
+        }
+        for r in rejected if topic_option_count(r) > 0
+    ][:MAX_REJECTED_WITH_ITEMS]
     return {
         "candidates": seen,
         "item_count": len((layer or {}).get("items") or []),
         "layer_class": str((layer or {}).get("cls") or "")[:80],
         "layers_seen": len(layers),
         "rejected_classes": [str(r.get("cls") or "")[:40] for r in rejected[:MAX_REJECTED_CLASSES]],
+        "rejected_with_items": rejected_with_items,
     }
 
 
@@ -235,4 +273,8 @@ def select_topic_option(payload: Optional[Dict[str, Any]], tag_name: str,
 
     out: Dict[str, Any] = {"success": False, "reason": reason}
     out.update(_forensics(focus, layers, rejected))
+    # 光标矩形原样透传(采集 JS 取不到时是 None)。判据只看水平,垂直是靠推断的 ——
+    # 有了 光标 + 浮层 rect + 正文栏 rect 三者,下一次真号回执一测就知道是水平错锚
+    # 还是垂直方向的事。**临时诊断字段**,同 rejected_with_items 的保质期纪律。
+    out["caret_rect"] = (payload or {}).get("caret")
     return out

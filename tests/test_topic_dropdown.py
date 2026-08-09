@@ -339,6 +339,126 @@ def test_missing_payload_does_not_blow_up():
     assert select_topic_option(None, "心理科普")["reason"] == "topic_dropdown_not_shown"
 
 
+# ── 光标右移:浮层中心出栏、但与栏仍相交(RCA 2026-08-09 真号三单) ──
+
+# 号1 那种"chip 积多了"的几何:正文栏 x=442 w=632(右缘 1074)。联想浮层挂在光标上,
+# 光标被前面的话题 chip 顶到行尾,浮层左缘到了 1000、宽 250 —— 中心 1125 已经出栏,
+# 但 [1000, 1074] 这 74px 仍压在正文栏里。中心测试判它出局,相交测试放它进来。
+NOTE1_EDITOR_RECT = {"x": 442.0, "y": 300.0, "width": 632.0, "height": 300.0}
+
+
+def cursor_shifted_dropdown_layer(tag="失眠"):
+    """跟着光标右移、半个身子探出正文栏右缘的**真**下拉。"""
+    return {
+        "cls": "topic-container",
+        "rect": {"x": 1000.0, "y": 620.0, "width": 250.0, "height": 200.0},
+        "has_tag": True,
+        "items": [
+            _item(f"#{tag}", 1100.0, 650.0),
+            _item(f"#{tag}自救指南 1.2万次浏览", 1100.0, 690.0),
+        ],
+    }
+
+
+def test_dropdown_overhanging_editor_right_edge_is_anchored():
+    """判别性质是"与正文栏水平相交",不是"中心在栏内" —— 后者是过紧的代理。
+
+    牙口:把相交测试改回中心测试(``ex <= lx + lw / 2 <= ex + ew``),这条必红 ——
+    浮层中心 1125 在正文栏右缘 1074 之外,而它正是真下拉。
+    """
+    layer = cursor_shifted_dropdown_layer()
+    assert is_anchored_to_editor(layer, NOTE1_EDITOR_RECT) is True
+
+    out = select_topic_option({"layers": [layer]}, "失眠", editor_rect=NOTE1_EDITOR_RECT)
+
+    assert out["success"] is True
+    assert out["matched"] == "#失眠"
+    assert (out["x"], out["y"]) == (layer["items"][0]["x"], layer["items"][0]["y"])
+
+
+def test_preview_panel_stays_rejected_under_the_same_geometry():
+    """放宽到相交**没有**把预览面板放进来:它与正文栏零相交(1100 > 1074)。
+
+    这是本次放宽的守门条件 —— 判别性质(预览面板与正文栏水平不相交)不变,变的只是
+    别再拿"中心在栏内"去代理它。
+    """
+    panel = video_preview_layer("失眠")
+    panel["rect"] = {"x": 1100.0, "y": 340.0, "width": 300.0, "height": 60.0}
+    panel["cls"] = "note-author-8f3a2c"          # 连黑名单也不给它,只留几何判据
+
+    assert is_anchored_to_editor(panel, NOTE1_EDITOR_RECT) is False
+
+    out = select_topic_option({"layers": [panel]}, "失眠", editor_rect=NOTE1_EDITOR_RECT)
+
+    assert out["reason"] == "topic_dropdown_not_found"
+
+
+def test_layer_entirely_left_of_the_editor_column_is_rejected():
+    """相交测试的另一翼:整层落在正文栏**左侧**外(右缘贴着栏左缘)也拒。
+
+    左侧是侧边导航栏那一列,同样不该被当成挂在光标上的下拉。
+    """
+    layer = real_dropdown_layer("失眠")
+    layer["rect"] = {"x": 100.0, "y": 620.0, "width": 342.0, "height": 200.0}   # 右缘 = 442
+
+    assert is_anchored_to_editor(layer, NOTE1_EDITOR_RECT) is False
+
+    layer["rect"]["width"] = 200.0                                             # 右缘 300,更远
+    assert is_anchored_to_editor(layer, NOTE1_EDITOR_RECT) is False
+
+
+# ── 取证:被拒的层里有没有带选项的(候选 b 的直接证据) ──
+
+def test_rejected_with_items_names_a_rejected_layer_that_had_options():
+    """被判据拒掉、却**带话题选项**的层要在回执里现形 —— 修对了它恒空,没修对它指名真凶。
+
+    ``rejected_classes`` 只记前 5 个类名、也不说那层有没有选项,真浮层被拒时就藏在里面
+    看不见(RCA 2026-08-09:三单全败却认不出被拒的是谁)。
+    """
+    panel = video_preview_layer("失眠")
+    panel["rect"] = {"x": 1100.0, "y": 340.0, "width": 300.0, "height": 60.0}
+    panel["items"].append(_item("#失眠 1.2万次浏览", 1250.0, 360.0))   # 镜像出的话题行
+
+    out = select_topic_option({"layers": [panel]}, "查无此词", editor_rect=NOTE1_EDITOR_RECT)
+
+    assert out["reason"] == "topic_dropdown_not_found"
+    assert out["rejected_with_items"] == [
+        {"cls": "base-info", "items": 1, "x": 1100.0, "y": 340.0, "w": 300.0}
+    ]
+
+
+def test_rejected_with_items_is_empty_when_no_rejected_layer_had_options():
+    """被拒的层里一条话题行都没有(预览面板的原样子)→ 空列表,别拿噪声占位。"""
+    out = select_topic_option(
+        {"layers": [video_preview_layer()]}, "投射性认同", editor_rect=VIDEO_EDITOR_RECT
+    )
+
+    assert out["rejected_with_items"] == []
+
+
+# ── 取证:光标矩形(分辨水平错锚 vs 垂直裁剪) ──
+
+def test_caret_rect_is_passed_through_to_forensics():
+    """采集 JS 读到的光标矩形要原样进失败取证。
+
+    有了 光标 + 浮层 rect + 正文栏 rect 三者,下一次真号回执一测就知道是水平错锚
+    (光标 x 顶到栏右缘)还是垂直方向的事(光标 y 与浮层 y 对不上)—— 目前的判据只看
+    水平,垂直是靠推断,这个字段把推断变成测量。
+    """
+    payload = {"layers": [video_preview_layer()], "caret": {"x": 1042, "y": 618}}
+
+    out = select_topic_option(payload, "投射性认同", editor_rect=VIDEO_EDITOR_RECT)
+
+    assert out["caret_rect"] == {"x": 1042, "y": 618}
+
+
+def test_caret_rect_is_null_when_page_gave_none():
+    """页面没 selection / 取不到 range → null,字段仍在(缺键与"没取到"不能糊成一回事)。"""
+    out = select_topic_option({"layers": []}, "失眠", editor_rect=VIDEO_EDITOR_RECT)
+
+    assert "caret_rect" in out and out["caret_rect"] is None
+
+
 # ── 拿不到正文框几何时的兜底 ──
 
 def test_without_editor_rect_structure_judgement_takes_over():
@@ -380,7 +500,7 @@ def test_is_dropdown_like_needs_two_topic_rows():
 
 
 def test_is_anchored_to_editor_uses_horizontal_column():
-    """锚定判据看的是"浮层水平中心在不在正文栏这一列"。"""
+    """锚定判据看的是"浮层与正文栏这一列水平相不相交"。"""
     assert is_anchored_to_editor(real_dropdown_layer(), VIDEO_EDITOR_RECT) is True
     assert is_anchored_to_editor(video_preview_layer(), VIDEO_EDITOR_RECT) is False
     assert is_anchored_to_editor(real_dropdown_layer(), None) is False
