@@ -259,6 +259,81 @@ def test_no_layers_at_all_is_topic_dropdown_not_shown():
     assert out["candidates"] == [] and out["item_count"] == 0
 
 
+# ── 空壳浮层:通过判据但一个选项都没有 ──
+
+def empty_shell_layer(cls="suffix", editor_rect=IMAGE_EDITOR_RECT, size=(120.0, 40.0)):
+    """通过几何锚定、但**一个子项都没有**的空壳浮层 —— 真号回执实拍的那一层。
+
+    2026-08-09 补话题回执样本:``reason=no_exact_match candidates=[] item_count=0
+    layer_class="suffix" layers_seen=14``。平台的下拉外壳先挂进 DOM、选项内容异步填,
+    内容还没到就是这副样子;它被判据放行(几何上确实在正文栏那一列),旧代码于是把它
+    当 ``accepted[0]`` 收下,报出一个"平台没这词"—— 实际是**浮层还没弹**。
+    """
+    return {
+        "cls": cls,
+        "rect": {"x": editor_rect["x"] + 40.0, "y": editor_rect["y"] + 300.0,
+                 "width": size[0], "height": size[1]},
+        "has_tag": False,
+        "items": [],
+    }
+
+
+def test_empty_accepted_layer_is_dropdown_not_shown():
+    """候选层全是 0 选项的空壳 → topic_dropdown_not_shown(浮层没弹),**绝不是**没这词。
+
+    牙口:把这条新分支拿掉,reason 立刻退回 no_exact_match —— 调用方会据此换词,
+    而真正该做的是反馈"浮层没弹"让我们修。
+    """
+    out = select_topic_option(
+        {"layers": [empty_shell_layer()]}, "失眠", editor_rect=IMAGE_EDITOR_RECT
+    )
+
+    assert out["success"] is False
+    assert out["reason"] == "topic_dropdown_not_shown"
+    assert out["candidates"] == [] and out["item_count"] == 0
+
+
+def test_empty_accepted_layer_still_reports_which_shell_we_saw():
+    """空壳照样进取证:layer_class / layers_seen 得带回来,否则下次仍是黑箱。
+
+    生产样本正是靠 ``layer_class="suffix"`` 才认出"抓到的是个空外壳"。
+    """
+    out = select_topic_option(
+        {"layers": [empty_shell_layer(), empty_shell_layer(cls="suffix-2", size=(300.0, 90.0))]},
+        "失眠", editor_rect=IMAGE_EDITOR_RECT,
+    )
+
+    assert out["reason"] == "topic_dropdown_not_shown"
+    assert out["layer_class"] == "suffix"       # 排最前那个空壳
+    assert out["layers_seen"] == 2
+
+
+def test_forensics_come_from_the_layer_that_has_options():
+    """空壳与带选项的层并存、词又没匹配上 → no_exact_match,取证必须取**带选项**那层。
+
+    夹具刻意让空壳排在候选序列**前面**(两层的话题行数都是 0 时按面积排,空壳更小),
+    这正是生产那次 candidates 空的成因:取 ``accepted[0]`` 抓到空壳,回执等于什么都没说。
+    """
+    shell = empty_shell_layer()
+    options = {
+        "cls": "topic-list",
+        "rect": {"x": IMAGE_EDITOR_RECT["x"] + 40.0, "y": 900.0, "width": 320.0, "height": 240.0},
+        "has_tag": False,
+        "items": [_item("创建话题", 800.0, 940.0), _item("试试其他关键词", 800.0, 980.0)],
+    }
+    assert (shell["rect"]["width"] * shell["rect"]["height"]
+            < options["rect"]["width"] * options["rect"]["height"]), "夹具没还原'空壳排更前'"
+
+    out = select_topic_option(
+        {"layers": [shell, options]}, "查无此词", editor_rect=IMAGE_EDITOR_RECT
+    )
+
+    assert out["reason"] == "no_exact_match", "有选项在,这才是真·没这词"
+    assert out["layer_class"] == "topic-list"
+    assert out["item_count"] == 2
+    assert "创建话题" in out["candidates"], "取证取到空壳上去了,回执里什么都没说"
+
+
 def test_missing_payload_does_not_blow_up():
     """采集 JS 没回东西时,判据交明确失败,不抛异常打断整条发布。"""
     assert select_topic_option(None, "心理科普")["reason"] == "topic_dropdown_not_shown"

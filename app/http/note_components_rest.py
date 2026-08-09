@@ -353,7 +353,9 @@ MANIFEST_ENTRIES = [
                  "补之前笔记已有的话题;topics_added=本次 to_add 里回读确认真挂上的;"
                  "topics_truncated=因超 10 上限没补的;topics_failed=[{component:`topic:话题名`,"
                  "reason}] 逐个失败原因(下拉没中/回读没确认/超上限截断),**不连坐**其余话题也"
-                 "不连坐其余组件。验收「补 4 个后结果 5 个、原 1 个保留」看的就是 applied.topics 的长度。",
+                 "不连坐其余组件。验收「补 4 个后结果 5 个、原 1 个保留」看的就是 applied.topics 的长度。"
+                 "topics_failed 条目在浮层类失败时可含 poll_timeline(逐 tick 轮询取证,**临时诊断"
+                 "字段**,浮层缺陷排除后会撤,勿建硬依赖)。",
     },
 ]
 

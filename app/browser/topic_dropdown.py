@@ -28,13 +28,16 @@
 
 "抓错容器"和"词不存在"是两种完全不同的处置,旧代码都糊成 ``no_exact_match``:
 
-- ``topic_dropdown_not_shown``:页面上压根没有候选浮层(``candidates`` 为空)—— 追加场景
-  最常见的失败,``#`` 紧贴前一个话题实体粘连、编辑器没弹联想浮层(RCA 2026-08-09)。这是
-  **定位/输入问题**,调用方该反馈我们修,**绝不能换词**;
+- ``topic_dropdown_not_shown``:**话题联想浮层没弹出来**。两种形态都算:页面上压根没有
+  候选浮层(``layers`` 为空),以及有通过判据的浮层容器但它**一个选项都没有**(``items``
+  全空 —— 平台的下拉外壳先挂上、内容异步填,内容没到就是这副样子;真号回执样本
+  ``layer_class="suffix" item_count=0 layers_seen=14``)。这是**时序/输入问题**,调用方该
+  反馈我们修,**绝不能换词**;
 - ``topic_dropdown_not_found``:有浮层,但没有一个通过判据 —— 我们**没找到真下拉**(抓到的
   多半是右侧预览面板的镜像容器),同属"别拿'这词平台没有'糊弄自己",也**不该换词**;
-- ``no_exact_match``:真下拉在(``candidates`` 非空),里面确实没有这个词 —— **这一个才是
-  真·平台没这词**,调用方据此换词才有意义。
+- ``no_exact_match``:**浮层弹了、里面有选项、真没这个词** —— 只有这一个是真·平台没这词,
+  调用方据此换词才有意义。空壳浮层曾被算进这一类(取 ``accepted[0]`` 时不看它有没有选项),
+  于是"浮层没弹"被报成"平台没这词"、调用方白烧会话换词(RCA 2026-08-09 真号复验)。
 """
 
 import re
@@ -210,15 +213,25 @@ def select_topic_option(payload: Optional[Dict[str, Any]], tag_name: str,
             if hit:
                 return hit
 
+    # 带选项的候选层:``no_exact_match`` 只有它们才配得上——一个 0 选项的空壳容器
+    # 不构成"平台没这词"的证据(RCA 2026-08-09)。
+    with_items = [ly for ly in accepted if (ly.get("items") or [])]
+
     if not layers:
-        # 浮层根本没弹(candidates 空):追加场景 # 粘连前一个话题实体的典型征状,
-        # 是定位/输入问题不是"词不存在",调用方绝不能据此换词(RCA 2026-08-09)。
+        # 浮层根本没弹:是时序/输入问题不是"词不存在",调用方绝不能据此换词
         reason, focus = "topic_dropdown_not_shown", None
     elif not accepted:
         # 有浮层但没一个是下拉:抓错容器,和"词不存在"必须分开记
         reason, focus = "topic_dropdown_not_found", (rejected[0] if rejected else None)
+    elif not with_items:
+        # 通过判据的层全是 0 选项的空壳(平台下拉外壳先挂、内容异步填,内容还没到)——
+        # 这仍然是"浮层没弹",和"平台没这词"天差地别。focus 取 accepted[0],让
+        # layer_class / item_count=0 照样进取证,下一次一眼看得出抓到的是哪个空壳。
+        reason, focus = "topic_dropdown_not_shown", accepted[0]
     else:
-        reason, focus = "no_exact_match", accepted[0]
+        # focus 必须取**第一个带选项**的层:accepted[0] 可能是个空壳,拿它取证
+        # candidates 就是空的,回执里等于什么都没说
+        reason, focus = "no_exact_match", with_items[0]
 
     out: Dict[str, Any] = {"success": False, "reason": reason}
     out.update(_forensics(focus, layers, rejected))

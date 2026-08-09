@@ -24,6 +24,7 @@
 """
 
 import re
+import time
 
 from loguru import logger
 
@@ -615,12 +616,35 @@ _FOCUS_TRIES = 2
 # 还是**命中了但点完焦点没落进去**(时序太早/被顶出视口)——两者处置天差地别。同期号1/号8
 # 播客同选择器成功,故这不是播客页选择器普遍不同,是该笔记特异,不硬猜、只把当场证据带回:
 # 主选择器是否命中、页面上有几个 contenteditable、命中框的矩形与视口高、以及是否滚进过视口。
-_FOCUS_FORENSICS_JS = r"""() => {
+#
+# 首轮取证把范围收窄到"矩形命中了、也滚进了视口,焦点还是留在 body",于是加**落点反查**
+# (``pt`` = 最后一次真点下去的坐标):``elementFromPoint`` 那一下究竟点在了谁身上、是不是
+# 编辑器内部。这两个字段是**临时诊断字段**,底栏吞点击这个候选一旦被真号数据坐实/排除就该
+# 撤掉(保质期挂在 guide 的 KNOWN_LIMITATIONS 里,别靠人记)。
+# 链长度双闸(单层 ≤60 / 全链 ≤300)是临时取证的硬上限纪律:证据要够用,不许把整页 DOM
+# 拖进回执。
+_FOCUS_FORENSICS_JS = r"""(pt) => {
     const sel = "div.tiptap.ProseMirror[contenteditable='true']";
     const primary = document.querySelector(sel);
     const anyCe = document.querySelectorAll("[contenteditable='true']");
     const rect = primary ? primary.getBoundingClientRect() : null;
     const ae = document.activeElement;
+    let chain = null;
+    let inside = null;
+    if (Array.isArray(pt) && pt.length === 2) {
+        let el = document.elementFromPoint(pt[0], pt[1]);
+        inside = !!(primary && el && primary.contains(el));
+        const parts = [];
+        for (let i = 0; i < 5 && el; i++) {   // 落点元素本身 + 最多 4 层祖先
+            const cls = typeof el.className === 'string' ? el.className.slice(0, 40) : '';
+            const tag = String(el.tagName || '').toLowerCase();
+            parts.push((cls ? tag + '.' + cls : tag).slice(0, 60));
+            el = el.parentElement;
+        }
+        // 落点在视口外时 elementFromPoint 返回 null:链留 null 而不是空串,
+        // 好与"点上了元素但链读不出"区分开
+        chain = parts.length ? parts.join(' < ').slice(0, 300) : null;
+    }
     return {
         primary_matched: !!primary,
         contenteditable_count: anyCe.length,
@@ -628,17 +652,49 @@ _FOCUS_FORENSICS_JS = r"""() => {
                               w: Math.round(rect.width), h: Math.round(rect.height)} : null,
         viewport_h: window.innerHeight,
         active_tag: ae ? String(ae.tagName || '').toLowerCase() : null,
+        point_element_chain: chain,
+        point_inside_editor: inside,
     };
 }"""
 
 
-def _focus_forensics(page) -> dict:
-    """聚焦失败时抓一份当场证据;读不到只回最小骨架(取证绝不制造新异常)。"""
+def _focus_forensics(page, point: tuple[float, float] | None) -> dict:
+    """聚焦失败时抓一份当场证据;读不到只回最小骨架(取证绝不制造新异常)。
+
+    ``point`` 是**最后一次真点下去的坐标**,页面据它反查落点身上是谁
+    (``point_element_chain`` / ``point_inside_editor``)——没有它,"矩形命中了、焦点却
+    没进去"只能靠猜。一次都没点成(定位不到框)时传 ``None``,这两个字段留空。
+    """
     try:
-        data = page.evaluate(_FOCUS_FORENSICS_JS)
+        data = page.evaluate(_FOCUS_FORENSICS_JS, list(point) if point is not None else None)
         return dict(data) if isinstance(data, dict) else {"probe_error": "non_dict"}
     except Exception as exc:  # noqa: BLE001
         return {"probe_error": str(exc)[:120]}
+
+
+# 聚焦落点在正文框**可见区带**里的相对高度:0.33 = 偏上三分之一(见 ``_focus_click_point``)
+_FOCUS_BAND_RATIO = 0.33
+
+
+def _focus_click_point(box: dict) -> tuple[float, float]:
+    """正文框矩形 → 聚焦点击落点(**可见区带内偏上**,不是矩形死中心)。
+
+    RCA 2026-08-09(号6播客 note 6a75fa99,三次复现):取证 ``primary_matched=true``、
+    ``primary_rect={x:442, y:592, w:632, h:260}``、``viewport_h=794``、滚进视口也为真 ——
+    框底 852 探出视口,死中心落点 (758, 722) 离视口底只剩 72px,正好压在编辑更新页底部那条
+    固定操作栏上,点击被它吞掉、焦点留在 body(与 ``note_components.click_publish`` 加
+    ``elementFromPoint`` 复核时踩过的是同一片透明区)。笔记级绑定也对得上:该笔记正文全场
+    最长(182 字符 / 9 行)把编辑器矩形撑得最靠下,而拟人滚动的判据是"落点一进视口就停",
+    于是唯独这篇的中心停进了底栏区;其余 7 篇正文短、落点高,全绿。
+
+    改法:落点收进**可见区带**(矩形与视口的交集)并取偏上 ``_FOCUS_BAND_RATIO`` 处,
+    水平仍走中心。落点在框内哪个位置**没有语义** —— 聚焦成功后紧跟 ``Control+End`` 把光标
+    移到正文末尾,点可见区内任意一处等效,所以这里可以自由挑一个几何上更安全的点。
+    """
+    visible_top = max(box["y"], 0)
+    visible_bottom = min(box["y"] + box["h"], box["ih"])
+    cy = visible_top + (visible_bottom - visible_top) * _FOCUS_BAND_RATIO
+    return box["x"] + box["w"] * 0.5, cy
 
 
 def _focus_body_end(page, human) -> tuple[bool, dict]:
@@ -653,12 +709,14 @@ def _focus_body_end(page, human) -> tuple[bool, dict]:
     虚空、下拉永不弹。所以每次都重新滚 + 重新取坐标 + 点完只读验 ``activeElement``。
     """
     scrolled_into_view = False
+    last_click: tuple[float, float] | None = None
     for _ in range(_FOCUS_TRIES):
         box = _scroll_into_view(page, human, [_BODY_EDITOR], intent="正文框(补话题)")
         if box is None:
             continue
         scrolled_into_view = True
-        cx, cy = _click_point(box)
+        cx, cy = _focus_click_point(box)
+        last_click = (cx, cy)
         human.click((cx, cy), reason="聚焦正文框(补话题)")
         human.wait(0.2, 0.5, context="聚焦后停顿")
         try:
@@ -668,15 +726,73 @@ def _focus_body_end(page, human) -> tuple[bool, dict]:
         except Exception:  # noqa: BLE001 — 读焦点失败当没聚焦上,下一轮重滚重点
             pass
         logger.warning("[note_editing] 聚焦正文框后焦点不在编辑区,重滚动重点")
-    forensic = _focus_forensics(page)
+    forensic = _focus_forensics(page, last_click)
     forensic["scrolled_into_view"] = scrolled_into_view
     logger.warning(
         f"[note_editing] 补话题聚焦正文框失败 | 选择器命中={forensic.get('primary_matched')} "
         f"contenteditable数={forensic.get('contenteditable_count')} "
         f"矩形={forensic.get('primary_rect')} 视口高={forensic.get('viewport_h')} "
-        f"滚进视口={scrolled_into_view}"
+        f"滚进视口={scrolled_into_view} 落点={last_click} "
+        f"落点在编辑器内={forensic.get('point_inside_editor')} "
+        f"落点元素链={forensic.get('point_element_chain')}"
     )
     return False, forensic
+
+
+# ── 补话题:等联想浮层的条件轮询预算(RCA 2026-08-09)──
+# 旧实现是"打完字 → 定长等 1.5~2.5s → 只看一眼"。真号复验实证这一眼会漏:同一个词在
+# 第 2 位补得上、在第 5 位补不上(位置败,不是词败),说明浮层是**晚到**而不是不来。
+# 定长单次快照对晚到的浮层零容错,轮询才是对症的。
+# 预算 8s / 最多 8 tick 两道闸都在:预算防"页面卡住时干等",tick 数防"每 tick 都被
+# 拟人 wait 抽成 0 秒时空转"(测试里 human.wait 是空操作,没有 tick 闸就是死循环)。
+_TOPIC_POLL_BUDGET_S = 8.0
+_TOPIC_POLL_MAX_TICKS = 8
+# 首 tick 等久一点(浮层通常很快就到,先给它一次从容的机会),之后短间隔快速复查
+_TOPIC_POLL_FIRST_WAIT = (1.4, 1.8)
+_TOPIC_POLL_NEXT_WAIT = (0.8, 1.2)
+
+
+def _poll_topic_dropdown(page, human, tag_name: str) -> tuple[dict, list[dict]]:
+    """输完 ``#话题`` 后**条件轮询**等话题联想浮层,弹出并命中即返回,不再只看一眼。
+
+    返回 ``(option, poll_timeline)``:
+
+    - ``option`` 是 ``select_topic_option`` 的原样结果(命中时 ``success=True``,超预算时
+      是**最后一 tick** 的失败判定,带它那一刻的取证字段);
+    - ``poll_timeline`` 是每个失败 tick 的 ``{tick, elapsed_s, layers_seen, reason}``,
+      失败时挂进回执 —— 它既是修复也是取证:真因两个候选(浮层异步渲染晚到 / chip 累积后
+      光标几何变化把浮层挤出锚定区间)轮询对前者直接治愈,对后者能靠时间线钉死
+      ("8 tick 全程 layers_seen 稳定非 0 但 reason 恒为 not_found" = 几何锚拒错了)。
+
+    等待一律走 ``human.wait`` 保持拟人节奏(裸 sleep 是风控特征,本仓禁);每 tick 都
+    **重新取**正文框矩形当几何锚,不持旧句柄(理由同 ``_focus_body_end``:重渲染会让旧
+    句柄脱离)。
+    """
+    started = time.monotonic()
+    deadline = started + _TOPIC_POLL_BUDGET_S
+    timeline: list[dict] = []
+    option: dict = {}
+    for tick in range(1, _TOPIC_POLL_MAX_TICKS + 1):
+        low, high = _TOPIC_POLL_FIRST_WAIT if tick == 1 else _TOPIC_POLL_NEXT_WAIT
+        human.wait(low, high, context="等待话题下拉")
+        box = _locate(page, [_BODY_EDITOR]) or {}
+        editor_rect = (
+            {"x": box.get("x"), "width": box.get("w")} if box.get("x") is not None else None
+        )
+        option = select_topic_option(
+            page.evaluate(COLLECT_LAYERS_JS, tag_name), tag_name, editor_rect=editor_rect
+        )
+        if option and option.get("success"):
+            return option, timeline
+        timeline.append({
+            "tick": tick,
+            "elapsed_s": round(time.monotonic() - started, 1),
+            "layers_seen": (option or {}).get("layers_seen", 0),
+            "reason": (option or {}).get("reason", "error"),
+        })
+        if time.monotonic() >= deadline:
+            break
+    return option, timeline
 
 
 def append_topics(page, human, to_add: list[str]) -> dict:
@@ -718,21 +834,17 @@ def append_topics(page, human, to_add: list[str]) -> dict:
     failed: list[dict] = []
     for tag in to_add:
         tag_name = str(tag).lstrip("#").strip()
-        # 追加场景光标紧贴前一个话题实体(蓝色 chip),``#`` 直接粘在 chip 边界上编辑器**不弹**
-        # 话题联想浮层(RCA 2026-08-09:失败样本 tail 见 ``[话题]##失眠``,浮层空被误判
-        # ``no_exact_match``)。每个话题输入前先补一个空格分隔,``#`` 与前一个实体/正文分开,
-        # 浮层才触发。从零场景前面是正文/空,多一个空格无害(小红书吞多余空格)。
+        # 每个话题输入前补一个空格分隔(``#`` 与前一个话题实体/正文分开)。这是**保留的
+        # 卫生措施,不是根因修复**:它曾被当成追加场景失败的根因("``#`` 粘在 chip 边界上
+        # 编辑器不弹浮层"),但 RCA 2026-08-09 真号复验推翻了——加空格后 tail 确实变成
+        # ``[话题]# #失眠``,浮层照样不弹。空格本身无害(从零场景多一个空格小红书会吞),
+        # 且让回删长度语义清晰,故留着。
+        # 真因是**浮层时序/锚定**:同一个词第 2 位成功、第 5 位失败 = 位置败不是词败。
+        # 下面的条件轮询既是对"浮层晚到"的修复,也是对"chip 累积后光标几何变化"这个
+        # 另一候选的取证(poll_timeline 会把每 tick 看到的层数与判定摊开)。
         typed_text = f" #{tag_name}"
         human.type_text(None, typed_text, click_first=False)
-        human.wait(1.5, 2.5, context="等待话题下拉")
-        # 每次都重新取正文框矩形当几何锚(不持句柄:聚焦重渲染会让旧句柄脱离)
-        box = _locate(page, [_BODY_EDITOR]) or {}
-        editor_rect = (
-            {"x": box.get("x"), "width": box.get("w")} if box.get("x") is not None else None
-        )
-        option = select_topic_option(
-            page.evaluate(COLLECT_LAYERS_JS, tag_name), tag_name, editor_rect=editor_rect
-        )
+        option, poll_timeline = _poll_topic_dropdown(page, human, tag_name)
         if option and option.get("success"):
             human.click(
                 (option["x"], option["y"]),
@@ -743,8 +855,11 @@ def append_topics(page, human, to_add: list[str]) -> dict:
         else:
             # 回删**之前**先取证(回删后正文框就看不出打进去过什么了)
             detail = topic_failure_detail(tag_name, option, (read_body_value(page) or "")[-40:])
+            # topic_failure_detail 是白名单式取键,轮询时间线得显式挂上去
+            detail["poll_timeline"] = poll_timeline
             logger.info(
-                f"[note_editing] 补话题未选中({detail['reason']}),回删不插入 | "
+                f"[note_editing] 补话题未选中({detail['reason']}),等满 "
+                f"{len(poll_timeline)} 轮仍未弹/未命中,回删不插入 | "
                 f"候选 {detail.get('candidates')} | 正文末尾「{detail['editor_tail']}」"
             )
             failed.append(detail)
