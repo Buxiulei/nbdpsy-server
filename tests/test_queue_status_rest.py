@@ -29,6 +29,7 @@ _POLLING_PATHS = {
     "/api/note-component-reads/{job_id}",
     "/api/note-components/{job_id}",
     "/api/collection-batches/{job_id}",
+    "/api/note-collections/{job_id}",
     "/api/note-extracts/{job_id}",
     "/api/interaction-backfills/{job_id}",
     "/api/podcast-collections/{job_id}",
