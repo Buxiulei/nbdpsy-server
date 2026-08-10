@@ -226,6 +226,18 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 
 CHANGELOG_ENTRIES = [
     {
+        "date": "2026-08-10",
+        "title": "挂载失败取证:items_seen 当场条目清单 + failed 条目步骤字段通用透传",
+        "kind": "fix",
+        "summary": "①collection_item_not_found 失败时回执新增 items_seen(弹层当场渲染出的"
+                   "条目清单,临时诊断字段)——RCA:出轨贴两跑失败时 catalog 有、DOM 匹配不上,"
+                   "次日复查条目又在(平台瞬态),当时没记'看到过什么'黑箱一晚;②failed 条目"
+                   "组装从'只取 reason'改为**通用透传**步骤自带的全部取证字段——白名单式"
+                   "取键已连吞三次证据(poll_timeline/caret_rect/items_seen),一次根治。"
+                   "回执形状向后兼容(纯增键)。",
+        "endpoints": ["/api/accounts/{account_id}/note-components"],
+    },
+    {
         "date": "2026-08-09",
         "title": "播客合集判据盲点修+建前查重升级为拦截,podcast-collections 解冻(P1)",
         "kind": "fix",

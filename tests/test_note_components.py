@@ -937,6 +937,24 @@ def test_collection_id_not_in_catalog_refuses(monkeypatch, wired):
     assert wired[0].texts == ["选择合集"]  # 只点了入口,一个条目都没点
 
 
+def test_collection_item_not_found_dumps_items_seen(monkeypatch, wired):
+    """C-2 取证锁:catalog 有、DOM 条目匹配不上时,失败回执必须带**当场渲染出的条目清单**。
+
+    RCA 2026-08-10 出轨贴:昨晚两跑 item_not_found、今晨复查条目又在(平台瞬态),但当时
+    没记"看到过什么",黑箱了一晚。items_seen 让瞬态复发时直接抓现行。临时诊断字段,
+    机制坐实/排除后按保质期纪律撤。
+    """
+    editor = Editor()
+    _wire(monkeypatch, editor, wired, publish=False)
+    monkeypatch.setattr(bnc, "_wait_collection_item", lambda _p, _n: None)
+
+    result = _run(editor, collection_id="c1")
+
+    f = result["failed"][0]
+    assert "collection_item_not_found" in f["reason"]
+    assert isinstance(f.get("items_seen"), list), "失败回执必须带 items_seen 取证"
+
+
 # ---------------- 发布按钮:落点复核 ----------------
 
 

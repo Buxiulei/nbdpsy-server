@@ -1052,9 +1052,21 @@ def _set_collection(
     name = target["name"]
     item = _wait_collection_item(page, name)
     if item is None:
+        # 当场取证:弹层此刻实际渲染出的条目(RCA 2026-08-10 出轨贴:catalog 里有、DOM 没有,
+        # 次日复查又有——平台瞬态,但当时没记条目清单,黑箱了一晚。**临时诊断字段**,
+        # 瞬态机制坐实/排除即撤,保质期纪律同 poll_timeline。)
+        items_seen = []
+        for el in page.query_selector_all(_COLLECTION_POPOVER_ITEM):
+            try:
+                items_seen.append(_norm(el.inner_text())[:40])
+            except Exception:  # noqa: BLE001 — 单条读不到只跳过
+                continue
+            if len(items_seen) >= 12:
+                break
         return {
             "status": "error",
             "reason": f"collection_item_not_found: 弹层里没有文案精确等于「{name}」的条目",
+            "items_seen": items_seen,
         }
     human.click(item, reason=f"选择合集「{name}」")
     human.wait(0.6, 1.2, context="等合集选中生效")
@@ -2849,7 +2861,10 @@ def _compose(
             if applied.get(k) is False
             else f"{k}_not_verified: 提交后没能回读(状态未知——先用 "
                  "note-component-reads 核对当前状态再决定,别盲目重跑)"
-        ))}
+        )),
+         # 步骤自带的取证字段透传(items_seen 等)——白名单式只取 reason 已经吞过三次证据
+         # (poll_timeline/caret_rect/items_seen),凡 step 里 reason/status 之外的键一律带上
+         **{fk: fv for fk, fv in steps[k].items() if fk not in ("reason", "status")}}
         for k in steps if applied.get(k) is not True
     ]
     appended = appended_part(body_before, body_after)
