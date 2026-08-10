@@ -13,6 +13,7 @@ from app.models.operator import Operator, OperatorAccountAccess
 from app.models.psych_glossary import PsychGlossary
 from app.models.publish_job import PublishJob
 from app.models.published_note import PublishedNote
+from app.models.retention_run import RetentionRun
 from app.models.risk_event import RiskEvent
 from app.models.style_profile import StyleProfile, StyleProfileVersion
 from app.models.upload_batch import UploadBatch
@@ -30,6 +31,7 @@ __all__ = [
     "ContentArchive",
     "PublishedNote",
     "NoteDeletion",
+    "RetentionRun",
     "NoteInteraction",
     "RiskEvent",
     "NoteMetric",

@@ -114,6 +114,13 @@ class PublishedNote(Base):
     # pending_id(已发布待补 id)/ linked(已补上)/ orphan(列表里有但本系统没发过)
     sync_status: Mapped[str] = mapped_column(default="pending_id")
 
+    # 笔记数量上限淘汰把这篇真删掉的时刻(NULL = 还在)。**台账行不物理删** —— 台账是永久的,
+    # "我们发过这篇"的事实要留着,这一列只是淘汰链的收敛标记:库存计数与淘汰候选都按它排行。
+    # 没有它,已删掉的笔记仍在库存里计数,第二天照样被选中、照样再建一条删除任务(幽灵 job),
+    # 而平台上早就没有这张卡片了 —— 淘汰永远不收敛。写入方见
+    # app/services/retention_scheduler.py 的 reconcile_deletions。
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

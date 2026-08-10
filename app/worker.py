@@ -41,6 +41,7 @@ from app.services.interaction_backfill_scheduler import InteractionBackfillSched
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
 from app.services.onboarding_scheduler import OnboardingScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
+from app.services.retention_scheduler import RetentionScheduler
 
 # 派发判据的唯一真源(见 app/services/queue_status.py 模块 docstring):什么算一次会话、
 # 闸放不放行、批次怎么排序、帽值默认取值。轮询端点的 queue 段读的是同一批函数 ——
@@ -167,6 +168,7 @@ class Supervisor:
         self._archive_reaper: ArchiveReaper | None = None
         self._note_metrics_scheduler: NoteMetricsScheduler | None = None
         self._draft_clean_scheduler: DraftCleanScheduler | None = None
+        self._retention_scheduler: RetentionScheduler | None = None
         self._interaction_backfill_scheduler: InteractionBackfillScheduler | None = None
         self._onboarding_scheduler: OnboardingScheduler | None = None
         self._egress_guard: EgressGuard | None = None
@@ -226,6 +228,13 @@ class Supervisor:
                 self._session_factory, settings.NOTE_METRICS_INTERVAL
             )
             self._note_metrics_scheduler.start()
+        if settings.RETENTION_CHECK_INTERVAL > 0:
+            # 代管账号笔记上限淘汰:挂在 note_metrics 之后(它只在"当日快照已存在"时才动手),
+            # 故注册点与 NoteMetricsScheduler 同款、就挂在它旁边。
+            self._retention_scheduler = RetentionScheduler(
+                self._session_factory, settings.RETENTION_CHECK_INTERVAL
+            )
+            self._retention_scheduler.start()
         if settings.EGRESS_CHECK_INTERVAL > 0:
             self._egress_guard = EgressGuard(settings.EGRESS_CHECK_INTERVAL)
             self._egress_guard.start()
@@ -295,6 +304,9 @@ class Supervisor:
         if self._draft_clean_scheduler is not None:
             await self._draft_clean_scheduler.stop()
             self._draft_clean_scheduler = None
+        if self._retention_scheduler is not None:
+            await self._retention_scheduler.stop()
+            self._retention_scheduler = None
         if self._note_metrics_scheduler is not None:
             await self._note_metrics_scheduler.stop()
             self._note_metrics_scheduler = None

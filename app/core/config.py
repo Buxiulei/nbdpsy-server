@@ -229,6 +229,29 @@ class Settings(BaseSettings):
     # 间隔只决定断档后多快补上,默认 1h。
     NOTE_METRICS_INTERVAL: int = 3600
 
+    # ── 代管账号的笔记数量上限淘汰(retention_scheduler)──
+    # 设计:docs/design/2026-08-10-managed-accounts-design.md 第五节。
+    # **这四个值里有三个是安全轨,不是调优旋钮** —— 淘汰是不可逆删除,调松任何一个都在
+    # 加快"误删自己内容"的速度。
+    # 总开关:0 = **只算不删**(照常打分、照常落 retention_runs 审计,就是不建删除 job)。
+    # 这是 kill switch,也是观察窗:想知道这套评分会选谁,就关着它跑几天看审计行。
+    RETENTION_ENABLED: bool = True
+    # 安全轨①宽限期:发布不足这么多天的笔记不参与淘汰。新笔记指标还没成型(曝光要几天
+    # 才铺开),不设宽限期等于每天把刚发的内容当"表现最差"删掉。
+    RETENTION_GRACE_DAYS: int = 7
+    # 安全轨③单日单号删除封顶:首次启用时库存可能远超上限(比如 140 篇对 100 的帽),
+    # 不封顶就是第一天一口气删 40 篇。封顶后多花几天收敛,换掉"大屠杀"的可能性。
+    RETENTION_DAILY_DELETE_MAX: int = 5
+    # 五指标权重(JSON 串)。加权平均前每个指标先在**候选集内**做 min-max 归一化,
+    # 故权重之比就是重要性之比,与指标量纲无关(浏览量上万、增粉个位数也能同台比)。
+    # 解析失败/取值非法一律回退这里的默认值并告警,绝不用一份坏权重去删笔记。
+    RETENTION_WEIGHTS: str = (
+        '{"views":1,"likes":2,"collects":3,"comments":3,"follows":5}'
+    )
+    # 扫描间隔(秒,0=关闭,与其余调度器同门)。语义不是"每小时删一次":每 UTC 日
+    # 每号至多跑一轮,且必须等当日数据快照到位才跑,间隔只决定"快照到位后多久接上"。
+    RETENTION_CHECK_INTERVAL: int = 3600
+
     # ── 出口链路自检(egress_guard)──
     # 防"代理重装/更新覆盖掉 sing-box 里 camoufox 直连规则"静默复发:规则一丢,camoufox
     # 出国 → 小红书风控 401 踢登录,症状与 ark-401 一模一样极易误判。两级自检(读配置 +

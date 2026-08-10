@@ -22,12 +22,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select, update
 
-from app.auth.context import current_operator
+from app.auth.context import AccessDenied, current_operator
 from app.auth.guards import assert_account_access, visible_account_ids
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import NotFoundError
 from app.models.publish_job import PublishJob
+from app.models.xhs_account import XhsAccount
 from app.publish.policy import (
     XHS_COVER_EXTENSIONS,
     XHS_VIDEO_EXTENSIONS,
@@ -200,7 +201,10 @@ MANIFEST_ENTRIES = [
                     "(异步入队,需对该账号有 access)",
         "admin_only": False,
         "params": {
-            "account_id": "body,int",
+            "account_id": "body,int|None(**省略/null = 广播**:给每个代管账号"
+                           "(GET /api/managed-accounts 里 managed=true 的)各建一条发布任务;"
+                           "传了就只发这一个号(「特指账号」)。广播时你必须对这些号有 access,"
+                           "一个都没授权 → 403;系统里一个代管账号都没有 → 422",
             "title": "body,str(显示长度截断 ≤20,静默不报错)",
             "content": "body,str(截断 ≤900,静默不报错)",
             "images": "body,list|None(图文笔记走这个;1-18 项,越界立即 400);每项三形态之一:"
@@ -237,7 +241,8 @@ MANIFEST_ENTRIES = [
             "schedule_time": "body,str|None(ISO8601,务必带时区偏移,如 "
                               "2026-01-01T09:00:00+08:00;不传则立即入队;不带偏移按 UTC 解释)",
             "collection_id": "body,str|None(加入合集,取自 GET /api/accounts/{id}/collections)",
-            "quoted_note_id": "body,str|None(引用本号的哪篇笔记;**优先级高于 related_counselor**)",
+            "quoted_note_id": "body,str|None(引用本号的哪篇笔记;**优先级高于 related_counselor**;"
+                              "**广播时不可给**——笔记 id 归属单账号,给了 422)",
             "activity_id": "body,str|None(关联活动,取自 GET /api/accounts/{id}/activities)",
             "related_counselor": "body,str|None(这篇推介哪位咨询师的姓名,如「李宇」;"
                                   "没给 quoted_note_id 时据它自动推导该引用哪篇笔记)",
@@ -245,14 +250,28 @@ MANIFEST_ENTRIES = [
                              "推荐词表:推介咨询师/概念解读/案例剖析/热点分析/互动引导/"
                              "个人记录/其他,词表会扩,传别的词也收)",
         },
-        "returns": "{job_id, status:'pending'}",
+        "returns": "指定账号:{job_id, status:'pending'};"
+                    "广播(省略 account_id):{broadcast:true, jobs:[{account_id, job_id}, ...]}"
+                    "——逐条按各自账号的会话闸/日上限调度,轮询各自的 job_id",
         "errors": "400=显式给了 images 但为空数组或超 18 张;"
                   "422=images / video / audio 多给或都不给 / video、audio、cover 格式不支持 / "
                   "三者任一文件不存在 / audio 时长越界或读不出 / audio 超 1GB / "
                   "播客封面超 32MB / 图文任务传了 cover / 非播客任务传了 podcast_collection / "
-                  "podcast_collection 与 collection_id 同时给;"
-                  "403=无该账号 access",
-        "notes": "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
+                  "podcast_collection 与 collection_id 同时给 / **广播时系统里没有代管账号** / "
+                  "**广播时显式给了 quoted_note_id**;"
+                  "403=无该账号 access(广播时=你对代管账号一个都没授权)",
+        "notes": "**不传 account_id = 广播给全部代管账号**(运营侧默认动作:"
+                 "「除非特指账号,默认所有代管账号一起发」)。广播不是一条任务发多个号,"
+                 "而是**每号各一条独立任务**:各自排队、各自受本号的每日上限与会话闸约束、"
+                 "各自重试、各自可 cancel/PATCH,任何一个号失败都不影响别的号。响应里的 "
+                 "jobs 数组就是逐号 job_id,照常一个个轮询。谁是代管账号看 "
+                 "GET /api/managed-accounts,改用 PUT /api/accounts/{account_id}/managed。"
+                 "**引用推导与日上限顺延都是逐号各算的**——A 号今天到量顺延到次日窗口,"
+                 "不牵连 B 号;引用只引本账号自己的咨询师推介笔记(见下)。"
+                 "所以**广播时不许给 quoted_note_id**(给了 422):笔记 id 归属单个账号,"
+                 "同一个 id 发给 N 个号最多只有它的主人引得上,其余是「引用悄悄没生效、笔记"
+                 "照常发出去」的静默失败。跨号引用请传 related_counselor 让每号各自推导。"
+                 "异步契约:拿到 job_id 后每 5-10s 调 GET /api/publish-jobs/{job_id} 轮询,直到 "
                  "published/failed;publishing 常态耗时 1-3 分钟;失败自动重试(最多 3 次,退避约 "
                  "2/10/30 分钟),单条任务最长约 40 分钟才会落 failed。同一账号的发布自动串行。"
                  "**视频笔记(video)与播客笔记(audio)都与图文共用本请求体的每一个字段** "
@@ -407,7 +426,9 @@ MANIFEST_ENTRIES = [
 
 
 class PublishNoteRequest(BaseModel):
-    account_id: int
+    # 发哪个号。**省略/null = 广播给全部代管账号**(managed=true),这是运营侧的默认动作:
+    # 「除非特指账号,默认所有代管账号一起发」。传了就是「特指账号」,行为与上线前一字不变。
+    account_id: int | None = None
     title: str
     content: str
     # 图文笔记的图片(URL / data URI / {b64, ext});与 video 互斥,二选一必填。
@@ -529,16 +550,139 @@ class PublishNoteRequest(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _check_broadcast_quote(self) -> "PublishNoteRequest":
+        """广播(省略 account_id)+ 显式 quoted_note_id → 422。
+
+        **笔记 id 归属单个账号**:引用别号的 note_id 在本号的引用弹窗里根本搜不到,广播时
+        把同一个 quoted_note_id 发给 N 个号,最多只有它的主人能引用成功,其余 N-1 个号是
+        「引用悄悄没生效、笔记照常发出去」的静默失败 —— 而引用失败只告警不阻断发布,事后
+        没人会发现。要跨号引用请用 related_counselor 让每个号各自推导本号的推介笔记。
+        """
+        if self.account_id is None and (self.quoted_note_id or "").strip():
+            raise ValueError(
+                "广播不支持显式 quoted_note_id(笔记 id 归属单账号),"
+                "跨号引用请用 related_counselor 逐号推导"
+            )
+        return self
+
+
+async def _broadcast_targets(operator, session) -> list[int]:
+    """广播目标:全部代管账号(managed=true)∩ caller 可见账号,按 id 升序。
+
+    两种空集分开报,因为补救动作完全不同:
+    - 系统里一个代管账号都没有 → 422(去 PUT /api/accounts/{id}/managed 把号加进来);
+    - 有代管账号但 caller 一个都没授权 → 403(找管理员要授权,或显式传 account_id)。
+    **不静默发 0 条**:调用方拿到 202 会以为发出去了,那是最难查的静默失败。
+    """
+    managed = list((await session.execute(
+        select(XhsAccount.id)
+        .where(XhsAccount.managed.is_(True))
+        .order_by(XhsAccount.id)
+    )).scalars().all())
+    if not managed:
+        raise HTTPException(
+            status_code=422,
+            detail="系统里没有任何代管账号(managed=true),广播发布无处可发:"
+                   "请先 PUT /api/accounts/{account_id}/managed 把账号加入代管,"
+                   "或在请求体里显式指定 account_id",
+        )
+    visible = await visible_account_ids(operator, session)
+    if visible is None:  # admin 全见
+        return managed
+    targets = [aid for aid in managed if aid in set(visible)]
+    if not targets:
+        raise AccessDenied(
+            "你没有任何代管账号的授权,无法广播发布;请显式指定一个你有权的 account_id,"
+            "或联系管理员授权"
+        )
+    return targets
+
+
+async def _create_publish_job(
+    session, payload: "PublishNoteRequest", operator, account_id: int,
+    scheduled_at: datetime | None, now_utc: datetime,
+    video_path: str | None, audio_path: str | None,
+) -> tuple[int, bool]:
+    """给一个账号建一条 pending 发布任务;返回 (job_id, 是否需要立即 nudge)。
+
+    从原端点体内原样提炼,唯一改动是**日上限顺延与引用推导逐号各算**(用局部变量而非
+    改写外层 scheduled_at)—— 广播时 A 号今天到量顺延到次日窗口,不能把 B 号一起顺延。
+    只 flush 不 commit:一次广播的 N 条任务由调用方一次提交,避免建到一半失败留下半批。
+    """
+    # F2:每账号每自然日发布上限。统计该账号当日(UTC)status in
+    # (pending/publishing/published) 的 job 数;达上限且本任务本会当日发出(立即或定时在今日
+    # 之内)则不立即发,顺延到次日活跃窗口起点(带抖动),仍落库 pending,不丢 job。
+    job_scheduled_at = scheduled_at
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    due_today = (
+        job_scheduled_at is None
+        or job_scheduled_at < today_start + timedelta(days=1)
+    )
+    if due_today:
+        count_stmt = (
+            select(func.count())
+            .select_from(PublishJob)
+            .where(PublishJob.account_id == account_id)
+            .where(PublishJob.status.in_(("pending", "publishing", "published")))
+            .where(PublishJob.created_at >= today_start)
+        )
+        day_count = (await session.execute(count_stmt)).scalar_one()
+        if day_count >= settings.PUBLISH_DAILY_CAP:
+            job_scheduled_at = _next_active_window_start(now_utc)
+    # 引用哪篇笔记:显式 quoted_note_id 优先;没给才按 related_counselor + 标题推导
+    # (规则见 app/services/counselor_quote.py),推不出来落 None —— 不引用,绝不猜。
+    # 在建 job 这一刻定下来而不是等发到一半再算:落库的就是最终值,事后翻 job 行即可
+    # 知道当时引了谁,不必去猜发布那一刻台账长什么样。
+    quoted_note_id = payload.quoted_note_id or await counselor_quote.resolve_quoted_note_id(
+        session, account_id, payload.title, payload.related_counselor
+    )
+    job = PublishJob(
+        account_id=account_id,
+        title=payload.title,
+        content=payload.content,
+        images_json=json.dumps(payload.images or [], ensure_ascii=False),
+        video_path=video_path,
+        audio_path=audio_path,
+        cover_path=(payload.cover or "").strip() or None,
+        topics_json=json.dumps(payload.topics or [], ensure_ascii=False),
+        schedule_time=job_scheduled_at,
+        status="pending",
+        created_by=operator.id,
+        # 列级多态:播客任务这里存的是**播客合集名称**,图文/视频存笔记合集 id。
+        # 两者互斥已在入参校验层钉死,不会互相覆盖。
+        collection_id=(
+            (payload.podcast_collection or "").strip() or None
+            if audio_path else payload.collection_id
+        ),
+        quoted_note_id=quoted_note_id,
+        activity_id=payload.activity_id,
+        related_counselor=payload.related_counselor,
+        note_purpose=payload.note_purpose,
+    )
+    session.add(job)
+    await session.flush()  # 拿自增 id,commit 由调用方统一做
+    return job.id, job_scheduled_at is None
+
 
 @router.post("/api/publish-jobs", status_code=202)
 async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
-    """发布笔记(异步入队):图文走 images,视频走 video,播客走 audio(三选一,已由入参校验钉死)。"""
+    """发布笔记(异步入队):图文走 images,视频走 video,播客走 audio(三选一,已由入参校验钉死)。
+
+    ``account_id`` 省略 = **广播给全部代管账号**,每号各建一条独立任务(逐号排队、逐号
+    受各自的日上限与会话闸约束);传了 = 只发这一个号,行为与上线前一字不变。
+    """
     operator = current_operator()
     # 运营配额闸:未完成任务达上限 → 429(admin 豁免),不建 job。
     await assert_operator_quota(operator)
     scheduled_at = _parse_schedule_time(payload.schedule_time)
     async with get_session() as session:
-        await assert_account_access(operator, payload.account_id, session)
+        # 校验顺序不变:先鉴权(或展开广播目标),再校验形状,最后才建任务。
+        if payload.account_id is not None:
+            await assert_account_access(operator, payload.account_id, session)
+            targets = [payload.account_id]
+        else:
+            targets = await _broadcast_targets(operator, session)
         # D1:建 job 前先校验图片张数,避免造出注定失败的 pending 任务。
         # 视频/播客笔记(video/audio 已通过入参校验)不走图片这条路,张数校验整段跳过。
         video_path = (payload.video or "").strip() or None
@@ -548,63 +692,28 @@ async def publish_note_endpoint(payload: PublishNoteRequest) -> dict:
                 raise ValueError("图文笔记至少需要 1 张图片")
             if len(payload.images) > _MAX_IMAGES:
                 raise ValueError(f"最多 {_MAX_IMAGES} 张图片")
-        # F2:每账号每自然日发布上限。统计该账号当日(UTC)status in
-        # (pending/publishing/published) 的 job 数;达上限且本任务本会当日发出(立即或定时在今日
-        # 之内)则不立即发,顺延到次日活跃窗口起点(带抖动),仍落库 pending,不丢 job。
         now_utc = datetime.utcnow()
-        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        due_today = scheduled_at is None or scheduled_at < today_start + timedelta(days=1)
-        if due_today:
-            count_stmt = (
-                select(func.count())
-                .select_from(PublishJob)
-                .where(PublishJob.account_id == payload.account_id)
-                .where(PublishJob.status.in_(("pending", "publishing", "published")))
-                .where(PublishJob.created_at >= today_start)
+        created: list[tuple[int, int, bool]] = []
+        for account_id in targets:
+            job_id, immediate = await _create_publish_job(
+                session, payload, operator, account_id, scheduled_at, now_utc,
+                video_path, audio_path,
             )
-            day_count = (await session.execute(count_stmt)).scalar_one()
-            if day_count >= settings.PUBLISH_DAILY_CAP:
-                scheduled_at = _next_active_window_start(now_utc)
-        # 引用哪篇笔记:显式 quoted_note_id 优先;没给才按 related_counselor + 标题推导
-        # (规则见 app/services/counselor_quote.py),推不出来落 None —— 不引用,绝不猜。
-        # 在建 job 这一刻定下来而不是等发到一半再算:落库的就是最终值,事后翻 job 行即可
-        # 知道当时引了谁,不必去猜发布那一刻台账长什么样。
-        quoted_note_id = payload.quoted_note_id or await counselor_quote.resolve_quoted_note_id(
-            session, payload.account_id, payload.title, payload.related_counselor
-        )
-        job = PublishJob(
-            account_id=payload.account_id,
-            title=payload.title,
-            content=payload.content,
-            images_json=json.dumps(payload.images or [], ensure_ascii=False),
-            video_path=video_path,
-            audio_path=audio_path,
-            cover_path=(payload.cover or "").strip() or None,
-            topics_json=json.dumps(payload.topics or [], ensure_ascii=False),
-            schedule_time=scheduled_at,
-            status="pending",
-            created_by=operator.id,
-            # 列级多态:播客任务这里存的是**播客合集名称**,图文/视频存笔记合集 id。
-            # 两者互斥已在入参校验层钉死,不会互相覆盖。
-            collection_id=(
-                (payload.podcast_collection or "").strip() or None
-                if audio_path else payload.collection_id
-            ),
-            quoted_note_id=quoted_note_id,
-            activity_id=payload.activity_id,
-            related_counselor=payload.related_counselor,
-            note_purpose=payload.note_purpose,
-        )
-        session.add(job)
+            created.append((account_id, job_id, immediate))
         await session.commit()
-        job_id = job.id
     # 立即发布 nudge(可空):有进程内调度器(单进程 all 模式/测试注入)时投队免等扫描;
     # 常态(api/worker 拆分)为 None → 静默跳过,由 worker 5s 扫描兜底(最坏多等 5s)。
-    if scheduled_at is None:
-        scheduler = get_active_scheduler()
-        if scheduler is not None:
-            scheduler.submit(job_id)
-    return {"job_id": job_id, "status": "pending"}
+    scheduler = get_active_scheduler()
+    if scheduler is not None:
+        for _account_id, job_id, immediate in created:
+            if immediate:
+                scheduler.submit(job_id)
+    if payload.account_id is not None:
+        return {"job_id": created[0][1], "status": "pending"}
+    return {
+        "broadcast": True,
+        "jobs": [{"account_id": a, "job_id": j} for a, j, _ in created],
+    }
 
 
 @router.get("/api/publish-jobs/{job_id}")
