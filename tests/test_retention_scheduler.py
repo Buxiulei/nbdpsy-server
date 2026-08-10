@@ -1,7 +1,7 @@
 """笔记数量上限淘汰:评分/选篇纯逻辑 + 调度器行为。
 
 这个组件会**不可逆地删线上笔记**,所以测试锁的不是"它能删",而是"它不该删的时候一篇
-都不碰":三条安全轨(宽限期 / 无指标不杀 / 单日封顶)各有一条用例,kill switch 有一条,
+都不碰":四条安全轨(宽限期 / 无指标不杀 / 单日封顶 / 保护位)各有一条用例,kill switch 有一条,
 "当日数据没到位就别动手"有一条。评分那几条锁的是"选出来的确实是最差的那篇"——选错篇
 和删错篇后果一样。
 
@@ -35,11 +35,14 @@ def _metrics(views=0, likes=0, collects=0, comments=0, follows=0) -> dict:
             "comments": comments, "follows": follows}
 
 
-def _note(title: str, days_ago: float, note_id: str | None = None) -> dict:
+def _note(
+    title: str, days_ago: float, note_id: str | None = None, protected: bool = False
+) -> dict:
     return {
         "note_id": note_id or f"n-{title}",
         "title": title,
         "published_at": _NOW - timedelta(days=days_ago),
+        "protected": protected,
     }
 
 
@@ -178,6 +181,35 @@ def test_plan_excludes_notes_without_metrics():
     detail = next(e for e in plan["details"] if e["title"] == "没指标")
     assert detail["eligible"] is False and detail["metrics"] is None
     assert "无指标" in detail["skip_reason"]
+
+
+def test_plan_never_selects_protected_note_but_still_counts_it():
+    """保护位:**永不入选,但仍计入库存** —— 淘汰那条"低互动=低价值"假设的显式例外。
+
+    造的正是踩坑的场景:功能位笔记(全矩阵置顶的品牌片/二维码导流笔记)指标天然垫底,
+    按加权得分它就是"最差的那篇",而删除不可逆。
+
+    两个断言各挡一半:
+    - 被选中的是**次差**的那篇而不是保护位 —— 挡"过滤没生效";
+    - ``note_count=3`` 且 ``over_cap=1``(差生确实被删了)—— 挡"顺手把保护位从库存里也
+      去掉了"。库存不算它的话这里 over_cap 会变 0、一篇都不删,等于把 note_cap 悄悄放大。
+    """
+    guard = _note("功能位", 30, protected=True)
+    bad, good = _note("差生", 30), _note("优等生", 30)
+    index = _index(
+        (guard, _metrics()),  # 指标全零 = 加权得分最低 = 不设防的话必被选中
+        (bad, _metrics(views=10)),
+        (good, _metrics(views=500, likes=50)),
+    )
+    plan = _plan([guard, bad, good], index, cap=2)
+
+    assert [e["title"] for e in plan["selected"]] == ["差生"]
+    assert plan["note_count"] == 3 and plan["over_cap"] == 1
+    detail = next(e for e in plan["details"] if e["title"] == "功能位")
+    assert detail["eligible"] is False and detail["selected"] is False
+    assert "保护位" in detail["skip_reason"]
+    # 审计明细要认得出是哪一篇(运营事后核对"我保的那篇确实没被动")
+    assert detail["note_id"] == "n-功能位"
 
 
 def test_plan_caps_deletions_per_run():
@@ -357,7 +389,8 @@ async def _seed_account(factory, account_id, *, managed=True, note_cap=1) -> Non
 
 
 async def _seed_note(
-    factory, account_id, title, *, days_ago=30, note_id=..., **metric_values
+    factory, account_id, title, *, days_ago=30, note_id=..., protected=False,
+    **metric_values,
 ) -> None:
     """一篇台账笔记 + 一行能 join 上的最新指标(不传指标即全零)。
 
@@ -372,6 +405,7 @@ async def _seed_note(
             account_id=account_id, note_id=note_id, title=title,
             published_at=published_at, platform_published_at=published_at,
             first_seen_at=published_at, permission_code=0, sync_status="orphan",
+            protected=protected,
         ))
         s.add(NoteMetric(
             account_id=account_id, title=title,
@@ -600,6 +634,35 @@ async def test_scan_deletes_worst_note_and_records_audit(session_factory):
     assert {d["title"] for d in details} == {"差生", "优等生"}
     picked = next(d for d in details if d["selected"])
     assert picked["title"] == "差生" and picked["job_id"] == job.id
+
+
+@pytest.mark.asyncio
+async def test_scan_never_deletes_protected_note(session_factory):
+    """端到端:台账上标了保护位的笔记,整条链路下来一条删除任务都不会为它建。
+
+    与上面那条纯逻辑用例分工不同:那条锁的是 ``build_plan`` 的选篇口径,这条锁的是
+    **保护位真的从库里被读出来并传进了选篇** —— 忘了把 ``protected`` 装进 note dict
+    的话纯逻辑那条照样绿,而线上会照删不误。
+    """
+    await _seed_account(session_factory, 1, note_cap=2)
+    await _seed_note(session_factory, 1, "功能位", protected=True)  # 全零指标 = 最该删
+    await _seed_note(session_factory, 1, "差生", views=10)
+    await _seed_note(session_factory, 1, "优等生", views=500, likes=50)
+    await _seed_today_snapshot(session_factory, 1)
+
+    deleted = await retention.RetentionScheduler(session_factory, 1).scan_once()
+
+    assert deleted == 1
+    jobs = await _delete_jobs(session_factory)
+    assert [json.loads(j.payload)["title"] for j in jobs] == ["差生"]
+
+    run = (await _runs(session_factory))[0]
+    # 库存仍然按 3 篇算(平台上确实有这一篇),只是它不进候选
+    assert run.platform_note_count == 3 and run.cap == 2
+    detail = next(
+        d for d in json.loads(run.details_json) if d["title"] == "功能位"
+    )
+    assert detail["selected"] is False and "保护位" in detail["skip_reason"]
 
 
 @pytest.mark.asyncio

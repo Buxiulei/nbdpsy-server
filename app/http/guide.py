@@ -116,10 +116,12 @@ CAPABILITY_GROUPS = [
         "title": "代管账号与笔记淘汰",
         "summary": "哪些号是「代管账号」(内容号,不指定 account_id 的发布默认广播给它们)、"
                    "每号的笔记数量上限,以及超上限时按五指标加权得分淘汰最差几篇的审计与"
-                   "手动触发。**淘汰是不可逆删除**,手动触发默认只预演不删。",
+                   "手动触发。**淘汰是不可逆删除**,手动触发默认只预演不删;"
+                   "打分口径不适用的笔记(如浏览量天然垫底的功能位)可标保护位永久豁免。",
         "paths": [
             "/api/managed-accounts",
             "/api/accounts/{account_id}/managed",
+            "/api/accounts/{account_id}/notes/{note_id}/protected",
             "/api/retention-runs",
         ],
     },
@@ -127,12 +129,15 @@ CAPABILITY_GROUPS = [
         "key": "interact",
         "title": "互动",
         "summary": "以自己的号对笔记做真实互动:发评论、历史笔记点赞收藏补量。"
-                   "全部会在平台留下真实痕迹,且受同号会话频次总闸约束。",
+                   "全部会在平台留下真实痕迹,且受同号会话频次总闸约束。"
+                   "另有一个纯 DB 读的反查:某篇笔记收到的赞/藏/评论里有多少是自家矩阵刷的"
+                   "(做数据分析前要把它减掉)。",
         "paths": [
             "/api/accounts/{account_id}/note-comments",
             "/api/note-comments/{comment_id}",
             "/api/interaction-backfills",
             "/api/interaction-backfills/{job_id}",
+            "/api/accounts/{account_id}/self-interactions",
         ],
     },
     {
@@ -239,6 +244,45 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-11",
+        "title": "笔记保护位(功能位永不被淘汰)+ 自家互动反查(数据分析前的减数)",
+        "kind": "feature",
+        "summary": "两条新能力,都是纯增,老调用不受影响。"
+                   "①**笔记保护位**:PUT /api/accounts/{account_id}/notes/{note_id}/protected "
+                   "标上之后那篇**永不进淘汰候选**,审计明细里记「保护位跳过」;"
+                   "GET /api/managed-accounts 每号多一个 protected_count。"
+                   "为什么要有它:淘汰按五指标加权删最低的几篇,底下压着「低互动 = 低价值」"
+                   "这条假设,而它对**功能位笔记**(全矩阵置顶的品牌片、二维码导流笔记)不成立"
+                   "—— 那些浏览量只有十几、按分就是最差的,却是门面与转化入口,而删除不可逆。"
+                   "⚠️ 保护位**仍计入库存**(平台上确实有这一篇,它占着 note_cap 的名额),"
+                   "所以标保护位不会让淘汰变松,只会让压力集中到剩下能删的笔记上;"
+                   "protected_count 逼近 note_cap 时该号已经没有淘汰空间。"
+                   "定位按 (account_id, note_id) 一起,只对上 note_id 不算 —— 传错号能改的话"
+                   "一次参数写错就把别的号的功能位摘掉了。"
+                   "②**自家互动反查**:GET /api/accounts/{account_id}/self-interactions"
+                   "?since=YYYY-MM-DD 按笔记聚合自家矩阵刷的赞/藏/评论,**纯 DB 读不烧会话**。"
+                   "平台指标里混着矩阵号的量,分析前要减掉它。三条读数纪律见该端点 notes,"
+                   "最要紧的两条:计数口径是「现在在平台上」(done 与 skipped 都算,error 不算),"
+                   "以及 coverage.unresolved_comments 不为零时 self_comments 只是下界。",
+        "endpoints": [
+            "/api/accounts/{account_id}/notes/{note_id}/protected",
+            "/api/managed-accounts",
+            "/api/accounts/{account_id}/self-interactions",
+        ],
+    },
+    {
+        "date": "2026-08-11",
+        "title": "裸链接(没带 xsec_token)提取笔记改成确定性报错,不再与「已删除/私密」并列",
+        "kind": "fix",
+        "summary": "POST /api/notes/extract 收到**没带 xsec_token 的链接**(从浏览器地址栏"
+                   "复制的裸 /explore/xxx 就是这种)时,报错直说「需要带 xsec_token 的完整链接」"
+                   "并给出怎么拿到正确链接;旧文案把它与「笔记可能已删除/私密」并列,读的人"
+                   "第一反应是去查笔记状态,查完一圈才发现问题在链接上 —— 而 token 在不在,"
+                   "解析链接那一步当场就知道,没必要让人猜。带了 token 仍取不到的情况文案不变"
+                   "(那才是真的可能已删除/转私密/token 过期)。行为不变,只是错误更好读。",
+        "endpoints": ["/api/notes/extract"],
+    },
+    {
+        "date": "2026-08-11",
         "title": "新能力「代管账号计划」:发布默认广播 + 笔记数量上限自动淘汰",
         "kind": "feature",
         "summary": "三件事。①**POST /api/publish-jobs 的 account_id 转可选**:省略即"
@@ -254,7 +298,11 @@ CHANGELOG_ENTRIES = [
                    "手动触发 POST /api/retention-runs 的 **dry_run 默认 true(只预演不删)**,"
                    "且真删要过三道闸(kill switch 关着 / 当天已真删过一轮 / 当天已到单日封顶 "
                    "→ 409)—— 手动触发与自动轮次受同一套限速,连点几次不会绕过封顶。"
-                   "**存量账号一个都不 seed**:全部留在 managed=false,谁进代管由 PUT 显式开启。"
+                   "**上线那一刻存量账号一个都不 seed**(全部留在 managed=false,加入代管是"
+                   "显式动作)—— 这是 08-11 迁移当时的初始态,**不是现在的名单**:上线后运营"
+                   "已陆续把内容号纳入代管。**当前谁在代管请读 GET /api/managed-accounts**"
+                   "(活数据,本表刻意不复制一份会过期的名单);要调整某个号用 "
+                   "PUT /api/accounts/{account_id}/managed。"
                    "另外两条与「同名」和「收敛」有关:同一账号有多篇同名笔记时那几篇整批不参与"
                    "淘汰(删除按标题定位卡片,同名会删错人);删成功的笔记退出库存计数,"
                    "不会第二天被重新选中再建一条删不到东西的任务。"
@@ -1017,6 +1065,23 @@ CHANGELOG_ENTRIES = [
 # ---------------------------------------------------------------------------
 
 KNOWN_LIMITATIONS = [
+    {
+        # 归 publish 域:播客合集的创建端点就在那一组(area 必须是已声明的能力域 key)
+        "area": "publish",
+        "what": "**播客合集只能建不能删,删除请人工去创作中心操作**。创作中心页面上那个删除动作"
+                "走的是 edith 的 ``pc/delete`` 接口,网络捕获实证**该请求不携带任何登录信息**"
+                "(没有可复用的 cookie / token),我们照捕获复刻调用一律回 **401**。"
+                "**机制没有钉死**:401 到底是缺了某个未捕获到的凭据、还是这个接口对非页面来源"
+                "一律拒,现有证据分不开 —— 能分开它的判别实验(换另一个号用同样方式删一次)"
+                "**已裁决不做**:那要拿一个真账号的真合集去试删,代价是不可逆删除,而收益只是"
+                "把一条我们已经决定人工处理的路径解释清楚。"
+                "所以:**别为删播客合集写自动化**,也别把 401 读成「apikey 没权限」——"
+                "那是小红书侧的 401,不是本服务的。要删就让运营在创作中心点。",
+        "why": "建合集这条链路(POST /api/accounts/{account_id}/podcast-collections)是真号验过的,"
+               "很容易让人默认「能建就能删」。实际删除走的是完全另一个接口,而它的鉴权方式"
+               "我们没复刻出来 —— 与其留一条会 401 的死路给调用方撞,不如如实标明并转人工。",
+        "since": "2026-08-11",
+    },
     {
         "area": "managed_accounts",
         "what": "**笔记数量上限判的是我们的台账计数,不是平台真实笔记数**,两者会双向漂移:"

@@ -9,14 +9,19 @@
 最新快照,删除建 ``browser_jobs`` 的 ``note_delete`` 任务(真号已验的删除链),调度器骨架
 套 ``NoteMetricsScheduler`` / ``DraftCleanScheduler`` 同一模板。本模块只做「该删谁」的决策。
 
-**三条安全轨是这个功能的主体,不是附加项**(淘汰 = 不可逆删除):
+**四条安全轨是这个功能的主体,不是附加项**(淘汰 = 不可逆删除):
 
 1. **宽限期**(``RETENTION_GRACE_DAYS``,默认 7 天):发布不足这么多天的笔记不参与
    淘汰。新笔记曝光要几天才铺开,不设宽限期等于每天把刚发的内容当"表现最差"删掉;
 2. **无指标不杀**(硬规则,无开关):join 不上 ``note_metrics`` 的笔记一律不进淘汰
    名单,只在审计明细里记「无指标跳过」。join 不上 = 我们对这篇一无所知,删它等于抽签;
 3. **单日单号删除封顶**(``RETENTION_DAILY_DELETE_MAX``,默认 5):首次启用时库存可能
-   远超上限(140 篇对 100 的帽),不封顶就是第一天一口气删 40 篇。
+   远超上限(140 篇对 100 的帽),不封顶就是第一天一口气删 40 篇;
+4. **保护位**(``published_notes.protected``):被标记的笔记**永不进候选,但仍计入库存**。
+   上面三条守的是"数据不足时别动手",这条守的是**打分口径本身不适用**的那类笔记 ——
+   淘汰按五指标加权删最低的几篇,前提是"低互动 = 低价值",而全矩阵置顶的**功能位笔记**
+   (品牌片、二维码导流笔记)浏览量只有 11-13、天然垫底,却是门面与转化入口。仍计入
+   库存是刻意的:平台上确实有这一篇,不算它等于把 note_cap 悄悄放大。
 
 外加 kill switch ``RETENTION_ENABLED=0``:照常打分、照常落审计,只是不建删除 job。
 
@@ -88,6 +93,7 @@ SKIP_NO_PUBLISH_TIME = "无发布时间(台账两个时间列都空),无法判�
 SKIP_DUP_TITLE = "同名歧义跳过(该号台账里有 {count} 篇同名笔记,按标题删会删错人)"
 SKIP_AMBIGUOUS_KEY = "指标映射歧义((标题, 发布日)在台账里对应多行),按无指标处理"
 SKIP_DELETE_IN_FLIGHT = "已有未完成的淘汰删除任务在途,本轮不重复选它"
+SKIP_PROTECTED = "保护位跳过(该笔记已标记 protected,永不参与淘汰;仍计入库存)"
 # 运行告警(不是某一篇笔记的事,但只有 details 这一个自由字段能落)
 WARN_BAD_CAP = (
     "⚠️ 运行告警:note_cap 非法({raw}),本轮按默认上限 {fallback} 篇计算 —— "
@@ -262,8 +268,9 @@ def build_plan(
 ) -> dict:
     """纯函数:给定库存 + 指标索引,算出本次该淘汰哪几篇与全量得分明细。
 
-    ``notes`` 每项 ``{"note_id","title","published_at"(naive UTC datetime|None)}``,
+    ``notes`` 每项 ``{"note_id","title","published_at"(naive UTC datetime|None),"protected"}``,
     调用方须**已排除**台账里 ``deleted_at`` 非空的行(那些是已经删掉的,不该再计入库存);
+    ``protected`` 为真的行照常计入库存,但**永不入选**(安全轨④,见模块 docstring);
     ``inflight_keys`` 是删除任务还在途的笔记键(见 ``note_key``):它们照常计入库存(平台上
     还在),但**不再入选**,而且会从"超出多少"里扣掉 —— 那几篇的删除已经承诺出去了。
     ``now`` 为 naive UTC。返回
@@ -319,6 +326,9 @@ def build_plan(
             "job_id": None,
         }
         details.append(entry)
+        if note.get("protected"):  # 安全轨④:运营显式保下的功能位,打分口径对它不适用
+            entry["skip_reason"] = SKIP_PROTECTED
+            continue
         if title in dup_titles:  # 同名歧义①:删错人的风险不可接受
             entry["skip_reason"] = SKIP_DUP_TITLE.format(count=dup_title_counts[title])
             continue
@@ -484,7 +494,8 @@ async def plan_account_retention(
     库存真值取 ``published_notes``(我们的永久台账)里 ``deleted_at`` 为空的行。⚠️ 它与平台
     真实笔记数会双向漂移:运营在 App 里手工删过 → 台账偏多(cap 被虚高计数触发);手工发的
     还没被台账同步捞回来 → 台账偏少(该淘汰的没淘汰)。本版**不做平台侧对账**(那要给每号
-    多起一次浏览器会话,会把同号会话额度打满),靠三条安全轨把漂移后果压住,详见设计第七节。
+    多起一次浏览器会话,会把同号会话额度打满),靠安全轨①②③把漂移后果压住,详见设计第七节
+    (保护位那道守的是另一件事 —— 打分口径对功能位不适用,与台账漂移无关)。
     """
     now = now or datetime.utcnow()
     inflight = await reconcile_deletions(session, account, now=now)
@@ -500,6 +511,7 @@ async def plan_account_retention(
             "title": r.title,
             # 平台权威时间优先;它可能为空(台账同步还没补上),退回本机发布时刻
             "published_at": r.platform_published_at or r.published_at,
+            "protected": bool(r.protected),
         }
         for r in rows
     ]

@@ -152,6 +152,114 @@ async def test_put_managed_requires_access(tmp_path, monkeypatch):
         assert r2.status_code == 404
 
 
+# ---------------- PUT /api/accounts/{id}/notes/{note_id}/protected ----------------
+
+
+async def test_put_protected_flips_and_is_idempotent(tmp_path, monkeypatch):
+    """标 / 撤保护位都返回**当前态**;重复标同一个值是幂等的 no-op。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号A", "uA", _COOKIES)
+        await _seed_two_notes(acc)
+
+        url = f"/api/accounts/{acc}/notes/nid-差生/protected"
+        r = await c.put(url, json={"protected": True}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 200, r.text
+        assert r.json() == {"account_id": acc, "note_id": "nid-差生",
+                            "title": "差生", "protected": True}
+
+        # 幂等:再标一次还是 true,不报错也不翻转
+        assert (await c.put(url, json={"protected": True},
+                            headers=bearer(ADMIN_KEY))).json()["protected"] is True
+        # 撤回
+        assert (await c.put(url, json={"protected": False},
+                            headers=bearer(ADMIN_KEY))).json()["protected"] is False
+
+
+async def test_put_protected_404_when_note_not_owned_by_account(tmp_path, monkeypatch):
+    """笔记不属于该号 → 404(哪怕这个 note_id 在别的号名下真实存在)。
+
+    按 (account_id, note_id) 定位而不是只按 note_id:错号也能改的话,一次传错参数就会
+    把别人的功能位保护摘掉,而摘掉之后它随时会被下一轮淘汰删走。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc1 = await seed_account("号一", "u-1", _COOKIES)
+        acc2 = await seed_account("号二", "u-2", _COOKIES)
+        await _seed_notes(acc1, ("号一的笔记", 10))
+
+        r = await c.put(f"/api/accounts/{acc2}/notes/nid-号一的笔记/protected",
+                        json={"protected": True}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 404, r.text
+        # 断言错误体形状:路由压根没注册时 FastAPI 也回 404,但给的是 {"detail": ...},
+        # 那会让这条用例在功能没实现时假绿。本仓的业务 404 一律 {"error": ...}
+        assert "error" in r.json(), r.text
+        # 台账里压根没有的 note_id 同样 404
+        r2 = await c.put(f"/api/accounts/{acc1}/notes/nid-不存在/protected",
+                         json={"protected": True}, headers=bearer(ADMIN_KEY))
+        assert r2.status_code == 404 and "error" in r2.json()
+
+
+async def test_put_protected_guards_access_and_body(tmp_path, monkeypatch):
+    """无该号授权 → 403;protected 缺失或多传字段 → 422。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号A", "uA", _COOKIES)
+        await _seed_notes(acc, ("一篇", 10))
+        url = f"/api/accounts/{acc}/notes/nid-一篇/protected"
+
+        op_key = "op-protected-denied"
+        await make_operator(op_key)  # 不授权任何号
+        assert (await c.put(url, json={"protected": True},
+                            headers=bearer(op_key))).status_code == 403
+
+        for body in ({}, {"protected": True, "x": 1}):
+            r = await c.put(url, json=body, headers=bearer(ADMIN_KEY))
+            assert r.status_code == 422, (body, r.text)
+
+
+async def test_managed_accounts_reports_protected_count(tmp_path, monkeypatch):
+    """列表给出每号的保护位篇数,且保护位**仍计入 note_count**(它占着上限的名额)。"""
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号A", "uA", _COOKIES)
+        await _seed_two_notes(acc)
+
+        before = (await c.get("/api/managed-accounts", headers=bearer(ADMIN_KEY))).json()
+        row = next(a for a in before["accounts"] if a["account_id"] == acc)
+        assert row["protected_count"] == 0 and row["note_count"] == 2
+
+        await c.put(f"/api/accounts/{acc}/notes/nid-差生/protected",
+                    json={"protected": True}, headers=bearer(ADMIN_KEY))
+
+        after = (await c.get("/api/managed-accounts", headers=bearer(ADMIN_KEY))).json()
+        row = next(a for a in after["accounts"] if a["account_id"] == acc)
+        assert row["protected_count"] == 1
+        assert row["note_count"] == 2, "保护位被从库存里去掉了 —— 那等于把 note_cap 悄悄放大"
+
+
+async def test_protected_note_survives_a_real_retention_run(tmp_path, monkeypatch):
+    """控制面闭环:标了保护位的那篇,真删轮次一条删除任务都不为它建。
+
+    这是运营真正会走的路径 —— 在控制面点保护、次日淘汰照跑。前面的服务层用例锁选篇口径,
+    这条锁的是"从 REST 标进去的那一位真的传到了淘汰"。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号A", "uA", _COOKIES)
+        await _set_managed(acc, True, note_cap=1)
+        await _seed_two_notes(acc)  # 差生(全零)会被选中,优等生不会
+
+        await c.put(f"/api/accounts/{acc}/notes/nid-差生/protected",
+                    json={"protected": True}, headers=bearer(ADMIN_KEY))
+
+        r = await c.post("/api/retention-runs",
+                         json={"account_id": acc, "dry_run": False},
+                         headers=bearer(ADMIN_KEY))
+        assert r.status_code == 200, r.text
+        run = r.json()["runs"][0]
+        # 保护位挡下差生后,超出的那一篇只能由优等生顶上(库存 2 / 上限 1 仍然超着)
+        assert [j.account_id for j in await _delete_jobs()] == [acc]
+        assert [json.loads(j.payload)["title"] for j in await _delete_jobs()] == ["优等生"]
+        guarded = next(d for d in run["details"] if d["title"] == "差生")
+        assert guarded["selected"] is False and "保护位" in guarded["skip_reason"]
+
+
 # ---------------- POST /api/retention-runs ----------------
 
 

@@ -131,6 +131,25 @@ def test_select_note_missing_id_raises():
         ne.select_note(_state(), "0" * 24)
 
 
+def test_select_note_names_the_missing_token_when_link_had_none():
+    """链接没带 xsec_token 时,报错要**直说是链接的问题**,不要和"已删除/私密"混在一起。
+
+    运营最常做的就是从浏览器地址栏里复制一条裸 explore 链接。那种链接必然被平台挡掉,
+    而旧文案把三种可能并列("已删除/私密,或链接缺 xsec_token"),读的人第一反应是去查
+    笔记状态,查完一圈才发现问题出在链接上 —— 而这一点我们当场就知道:token 在不在,
+    parse_note_ref 已经解析出来了。
+    """
+    with pytest.raises(ne.NoteExtractError) as bare:
+        ne.select_note(_state(), "0" * 24, has_xsec_token=False)
+    assert "xsec_token" in str(bare.value)
+    assert "已删除" not in str(bare.value), "没带 token 是确定的,别再并列一堆猜测"
+
+    # 带了 token 还取不到,才是"可能已删除/私密"那几种
+    with pytest.raises(ne.NoteExtractError) as with_token:
+        ne.select_note(_state(), "0" * 24, has_xsec_token=True)
+    assert "已删除" in str(with_token.value)
+
+
 # ---------------- 推荐流隔离 ----------------
 
 

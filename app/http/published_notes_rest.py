@@ -106,7 +106,7 @@ MANIFEST_ENTRIES = [
         },
         "returns": "{notes:[{id,account_id,note_id,title,note_url,note_type,published_at,"
                    "platform_published_at,generated_at,permission_code,permission_msg,"
-                   "visibility_changed_at,visibility_changed_by,sync_status,"
+                   "visibility_changed_at,visibility_changed_by,sync_status,protected,"
                    "source_publish_job_id,content_archive_id,operator_id,"
                    "related_counselor,note_purpose,purpose_source,content_fetched_at,"
                    "last_synced_at,"
@@ -119,7 +119,9 @@ MANIFEST_ENTRIES = [
                  "sync_status 三态 pending_id/linked/orphan 含义见 meta.field_notes;"
                  "published_at 永不为空(本机记录)而 platform_published_at 可能为空(平台权威)。"
                  "note_url 带 xsec 时效参数,**不保证永远可打开**,失效即重新同步。"
-                 "interaction 是对账快照非权威指标,要指标走 note-trends。",
+                 "interaction 是对账快照非权威指标,要指标走 note-trends。"
+                 "protected=true 是**保护位**:该篇被显式豁免出笔记上限淘汰,永不会被删"
+                 "(标记走 PUT /api/accounts/{account_id}/notes/{note_id}/protected)。",
     },
     {
         "method": "GET", "path": "/api/published-notes/{note_id}",
@@ -295,6 +297,10 @@ def _note_view(row: PublishedNote, *, include_content: bool = False) -> dict:
         "visibility_changed_at": _utc(row.visibility_changed_at),
         "visibility_changed_by": row.visibility_changed_by,
         "sync_status": row.sync_status,
+        # 保护位:true = 这篇被显式豁免出笔记上限淘汰(见 PUT .../notes/{note_id}/protected)。
+        # 列表里给它,是因为 GET /api/managed-accounts 的 protected_count 只说"保了几篇",
+        # 说不出"保的是哪几篇",运营没法核对自己标对没有。
+        "protected": bool(row.protected),
         "source_publish_job_id": row.source_publish_job_id,
         "content_archive_id": row.content_archive_id,
         "operator_id": row.operator_id,

@@ -1,4 +1,4 @@
-"""代管账号计划的管理面 REST(4 端点):代管开关 / 笔记上限 / 淘汰审计 / 手动触发。
+"""代管账号计划的管理面 REST(5 端点):代管开关 / 笔记上限 / 笔记保护位 / 淘汰审计 / 手动触发。
 
 设计 docs/design/2026-08-10-managed-accounts-design.md 第六节。需求原话是"全部后台处理,
 通过 API 给前端控制" —— 本模块就是那个控制面,决策与执行都在
@@ -12,6 +12,11 @@
 
 ``POST /api/retention-runs`` 的 ``dry_run`` **默认 true**:淘汰是不可逆删除,前端控制面
 的默认动作必须是"给我看会删谁",不能是"删给我看"。
+
+**保护位**(``PUT /api/accounts/{id}/notes/{note_id}/protected``)是淘汰口径的显式例外:
+淘汰按五指标加权删最低的几篇,底下压着"低互动 = 低价值"这条假设,而它对**功能位笔记**
+(全矩阵置顶的品牌片、二维码导流笔记)不成立 —— 那些浏览量天然垫底却是门面与转化入口。
+标了保护位的笔记**永不进候选,但仍计入库存**(平台上确实有这一篇)。
 """
 
 import json
@@ -50,7 +55,8 @@ MANIFEST_ENTRIES = [
         "summary": "列账号的代管状态:managed / note_cap / 笔记数 / 最近一次淘汰运行",
         "admin_only": False, "params": {},
         "returns": "{accounts: [{account_id, name, nickname, managed, note_cap, "
-                   "note_count, last_retention_run: {run_date, deleted_count, dry_run}|null}], "
+                   "note_count, protected_count, "
+                   "last_retention_run: {run_date, deleted_count, dry_run}|null}], "
                    "retention: {enabled, grace_days, daily_delete_max, weights, check_interval}}",
         "errors": "",
         "notes": "按 caller 可见账号收窄(admin 全见),与 GET /api/accounts 同门。"
@@ -63,6 +69,11 @@ MANIFEST_ENTRIES = [
                  "运营在 App 里手删过 → 台账偏多;手工发的还没被台账同步捞回来 → 台账偏少。"
                  "淘汰判上限用的就是这个数,所以差异大时先跑一次台账同步 "
                  "POST /api/accounts/{id}/note-ledger-syncs 再看。"
+                 "protected_count 是该号**保护位**篇数(永不参与淘汰的功能位笔记,见 "
+                 "PUT /api/accounts/{account_id}/notes/{note_id}/protected)。"
+                 "⚠️ **它是 note_count 的子集,不是另一堆** —— 保护位仍占着 note_cap 的名额,"
+                 "所以「可被淘汰的篇数」是 note_count - protected_count;"
+                 "protected_count 逼近 note_cap 时该号实际已经没有淘汰空间了。"
                  "retention 段是当前生效的淘汰参数(只读,改要动服务端配置)。",
     },
     {
@@ -86,6 +97,32 @@ MANIFEST_ENTRIES = [
                  "调小 note_cap 同理:那不是一个描述性字段,是删除动作的触发线。",
     },
     {
+        "method": "PUT", "path": "/api/accounts/{account_id}/notes/{note_id}/protected",
+        "summary": "给某篇已发布笔记标 / 撤**保护位**(标了就永不被淘汰删掉)",
+        "admin_only": False,
+        "params": {
+            "account_id": "path,int(笔记所属账号)",
+            "note_id": "path,str(平台笔记 id;台账里待补 id 的行没有它,标不了)",
+            "protected": "body,bool(**必填**,true=标上保护位,false=撤回)",
+        },
+        "returns": "{account_id, note_id, title, protected}",
+        "errors": "403=无该号授权;404=该号台账里没有这篇笔记;"
+                  "422=protected 缺失或传了它之外的字段",
+        "notes": "**这是淘汰口径的显式例外,不是一个描述性标记**。淘汰按五指标加权删得分"
+                 "最低的几篇,底下压着「低互动 = 低价值」这条假设 —— 它对**功能位笔记**"
+                 "(全矩阵置顶的品牌片、二维码导流笔记)不成立:那些浏览量天然只有十几,"
+                 "按分就是「最差的那篇」,而删除**不可逆**。标了保护位的笔记"
+                 "**永不进淘汰候选**,审计明细里记「保护位跳过」。"
+                 "⚠️ **仍计入库存**:平台上确实有这一篇,它占着 note_cap 的名额。所以保护位"
+                 "多了不会让淘汰变松,只会让淘汰压力集中到剩下那些能删的笔记上 —— "
+                 "保护位篇数逼近 note_cap 时,该号实际已经没有淘汰空间(见 "
+                 "GET /api/managed-accounts 的 protected_count)。"
+                 "幂等:重复标同一个值是 no-op,返回当前态。"
+                 "按 **(account_id, note_id) 一起**定位,只对上 note_id 不算 —— 传错号能改"
+                 "别人的保护位的话,一次参数写错就会把某个号的功能位摘掉,而摘掉之后它随时"
+                 "会被下一轮淘汰删走。",
+    },
+    {
         "method": "GET", "path": "/api/retention-runs",
         "summary": "笔记淘汰审计流水(每次运行删了谁、每篇多少分,全量明细)",
         "admin_only": False,
@@ -103,7 +140,9 @@ MANIFEST_ENTRIES = [
                  "GET /api/note-deletions/{deletion_id} 看删除结果)。"
                  "score 只在**同一次运行内**可比:打分前每个指标先在当次候选集内做 min-max "
                  "归一化,跨天的分数不同基准,别拿来做趋势。"
-                 "eligible=false 的原因见 skip_reason,五种:宽限期内(发布不足 "
+                 "eligible=false 的原因见 skip_reason,六种:**保护位**(运营显式标了 "
+                 "protected,永不参与淘汰 —— 见 "
+                 "PUT /api/accounts/{account_id}/notes/{note_id}/protected)、宽限期内(发布不足 "
                  f"RETENTION_GRACE_DAYS(默认 {settings.RETENTION_GRACE_DAYS})天)、"
                  "note_metrics 里 join 不到这篇(不知道表现就不删)、台账无发布时间、"
                  "**同名歧义**(该号台账里有多篇同名笔记——删除按标题定位卡片,同名会删错人,"
@@ -162,6 +201,18 @@ class ManagedUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     managed: bool | None = None
     note_cap: int | None = Field(default=None, ge=_MIN_NOTE_CAP, le=_MAX_NOTE_CAP)
+
+
+class ProtectedUpdateRequest(BaseModel):
+    """保护位入参。``protected`` **必填**(不像 managed 那样可省略)。
+
+    这个端点只有一个动作,省略它就没有可执行的语义;而"空体 = 查当前态"那套在这里是
+    危险的默认 —— 调用方以为自己标上了、实际什么也没发生,而没标上的后果是那篇笔记随时
+    可能被淘汰删走。要查当前态请读 GET /api/accounts/{id}/published-notes。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    protected: bool
 
 
 class RetentionRunRequest(BaseModel):
@@ -292,6 +343,16 @@ async def list_managed_accounts_endpoint() -> dict:
             .group_by(PublishedNote.account_id)
         )).all()) if account_ids else {}
 
+        # 保护位篇数。**与 note_count 同一个口径**(同样排掉 deleted_at 非空的行),
+        # 否则会出现 protected_count > note_count 这种读不懂的数。它是 note_count 的子集。
+        protected_counts = dict((await session.execute(
+            select(PublishedNote.account_id, func.count())
+            .where(PublishedNote.account_id.in_(account_ids))
+            .where(PublishedNote.deleted_at.is_(None))
+            .where(PublishedNote.protected.is_(True))
+            .group_by(PublishedNote.account_id)
+        )).all()) if account_ids else {}
+
         # 每号最近一次运行:按 id 倒序取全部再在内存里认第一条(审计量极低,一天几行)
         latest: dict[int, RetentionRun] = {}
         if account_ids:
@@ -311,6 +372,7 @@ async def list_managed_accounts_endpoint() -> dict:
                 "managed": bool(a.managed),
                 "note_cap": int(a.note_cap or 0),
                 "note_count": int(counts.get(a.id, 0)),
+                "protected_count": int(protected_counts.get(a.id, 0)),
                 "last_retention_run": (
                     {
                         "run_date": latest[a.id].run_date,
@@ -346,6 +408,40 @@ async def update_managed_endpoint(account_id: int, payload: ManagedUpdateRequest
             "name": account.name,
             "managed": bool(account.managed),
             "note_cap": int(account.note_cap or 0),
+        }
+
+
+@router.put("/api/accounts/{account_id}/notes/{note_id}/protected")
+async def update_note_protected_endpoint(
+    account_id: int, note_id: str, payload: ProtectedUpdateRequest
+) -> dict:
+    """标 / 撤某篇笔记的保护位;返回当前态。幂等,重复标同一个值是 no-op。
+
+    定位必须 **(account_id, note_id) 一起**:note_id 虽然平台侧唯一,但只按它定位意味着
+    传错 account_id 也能改成 —— 一次参数写错就把别的号的功能位摘掉了,而摘掉之后那篇随时
+    会被下一轮淘汰删走。对不上就 404,不静默改。
+    """
+    operator = current_operator()
+    async with get_session() as session:
+        await assert_account_access(operator, account_id, session)
+        note = (await session.execute(
+            select(PublishedNote)
+            .where(PublishedNote.account_id == account_id)
+            .where(PublishedNote.note_id == note_id)
+        )).scalars().first()
+        if note is None:
+            raise NotFoundError(
+                f"账号 {account_id} 的台账里没有笔记 {note_id};"
+                f"确认 note_id 与所属账号都对得上(台账里待补 id 的行还没有 note_id,"
+                f"可先跑一次 POST /api/accounts/{account_id}/note-ledger-syncs)"
+            )
+        note.protected = payload.protected
+        await session.commit()
+        return {
+            "account_id": account_id,
+            "note_id": note_id,
+            "title": note.title,
+            "protected": bool(note.protected),
         }
 
 

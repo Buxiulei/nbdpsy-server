@@ -50,7 +50,9 @@ MANIFEST_ENTRIES = [
                    "ip_location}, published_at, is_goods_note, is_goods_note_source, "
                    "unavailable{键→拿不到的原因}, source{final_url,from_cache,browser_session_used}, "
                    "comments_job?{job_id,status}}",
-        "errors": "400=链接里没有 note_id / 笔记页面拉不到 / 页面结构变了(reason 说明是哪种);"
+        "errors": "400=链接里没有 note_id / **链接没带 xsec_token**(浏览器地址栏复制的裸 "
+                  "/explore/ 链接必然是这种,报错会直说)/ 笔记页面拉不到 / 页面结构变了"
+                  "(reason 说明是哪种);"
                   "403=无该 account_id 授权;404=account_id 不存在;"
                   f"422=with_comments 越界(0-{_MAX_COMMENTS})或 with_comments>0 却没给 account_id;"
                   "429=运营者未完成任务配额已满",

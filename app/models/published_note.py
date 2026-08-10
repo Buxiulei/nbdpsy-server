@@ -16,7 +16,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -120,6 +120,14 @@ class PublishedNote(Base):
     # 而平台上早就没有这张卡片了 —— 淘汰永远不收敛。写入方见
     # app/services/retention_scheduler.py 的 reconcile_deletions。
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 保护位:置 1 的笔记**永不进淘汰候选**,但**仍计入库存**。淘汰按五指标加权删最低的
+    # 几篇,前提是"低互动 = 低价值" —— 这条假设对**功能位笔记**(全矩阵置顶的品牌片、
+    # 二维码导流笔记)不成立:它们浏览量天然垫底却是门面与转化入口,被删且不可逆。
+    # 仍计入库存是刻意的:平台上确实有这一篇,不算它等于把 note_cap 悄悄放大。
+    # ⚠️ server_default 不可省(同 xhs_accounts.managed):note_ledger 建行走的是显式列名的
+    # 裸 sqlite3 INSERT,新 NOT NULL 列在 DDL 里没有 DEFAULT 会让那条 INSERT 当场炸。
+    protected: Mapped[bool] = mapped_column(default=False, server_default=text("0"))
 
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

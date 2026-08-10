@@ -55,6 +55,13 @@ _CONSTRAINTS = [
     "(如 2026-01-01T01:00:00+00:00),不是本地时间;要北京时间自行 +8 小时。",
     "图片三形态:http(s) URL 字符串 / data URI 字符串 / {b64, ext} 对象;服务端自行下载/解码。",
     "RBAC:非 admin 只能看到/操作被授权的账号;admin 全见。",
+    "**HTTP 客户端必须带一个正常的 User-Agent**:本服务在 Cloudflare 后面,裸 "
+    "Python-urllib / 空 UA 之类的请求会被它以 **error 1010** 拦在到达服务之前。"
+    "症状极具误导性 —— 拿到的是一个 HTML 错误页而不是我们的 JSON 错误契约,"
+    "看着像 apikey 没权限,于是人去查权限、轮 key、查 RBAC,而问题根本不在这一层。"
+    "requests / httpx / curl 的默认 UA 都没问题;自己拼 urllib 请求时记得显式设 "
+    "User-Agent。判别方法:响应体不是 JSON(是 HTML)且没有我们的 error/detail 键,"
+    "就是被挡在门外了,不是鉴权问题。",
 ]
 
 _ERROR_CONTRACT = {

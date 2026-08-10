@@ -171,8 +171,12 @@ async def test_note_view_fields_and_time_offsets(tmp_path, monkeypatch):
             "note_id", "title", "note_url", "published_at", "platform_published_at",
             "permission_code", "permission_msg", "sync_status",
             "source_publish_job_id", "content_archive_id", "interaction",
+            # 保护位:淘汰的显式豁免。只给 protected_count 那个聚合数的话,运营看得到
+            # "保了几篇"却看不出"保的是哪几篇",没法核对自己标对没有
+            "protected",
         ):
             assert key in note, f"缺字段 {key}"
+        assert note["protected"] is False
         # 本机记录的发布时刻永不为空,且带显式 UTC 偏移
         assert note["published_at"] == "2026-07-20T01:02:03+00:00"
         assert note["platform_published_at"] is None

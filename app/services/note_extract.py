@@ -167,7 +167,7 @@ def parse_initial_state(html: str) -> dict:
             raise NoteExtractError(f"__INITIAL_STATE__ 解析失败:{exc}") from exc
 
 
-def select_note(state: dict, note_id: str) -> dict:
+def select_note(state: dict, note_id: str, *, has_xsec_token: bool = True) -> dict:
     """按 note_id 从 ``noteDetailMap`` 取目标笔记 —— **推荐流隔离就在这一步**。
 
     详情页会同时带上推荐流的其它笔记(SPA 内跳后尤其明显),运营原报告用的全文正则
@@ -183,9 +183,19 @@ def select_note(state: dict, note_id: str) -> dict:
     entry = detail_map.get(note_id)
     note = (entry or {}).get("note") if isinstance(entry, dict) else None
     if not note:
+        if not has_xsec_token:
+            # 这一支是**确定诊断,不是猜测**:token 在不在,parse_note_ref 当场就解析出来了。
+            # 裸 explore 链接(从浏览器地址栏复制的那种)平台必然挡掉,把它和"已删除/私密"
+            # 并列会让人先去查笔记状态,查完一圈才发现问题在链接上。
+            raise NoteExtractError(
+                f"这条链接没有 xsec_token,平台不会返回笔记内容(拿到的是空壳页)。"
+                f"**需要带 xsec_token 的完整链接**:请用小红书 App / 网页版的分享按钮生成"
+                f"原始链接(xhslink.cn/... 短链,或带 ?xsec_token=... 的完整笔记链接),"
+                f"不要直接复制浏览器地址栏里的 /explore/{note_id} 裸链、也不要手工精简 URL"
+            )
         raise NoteExtractError(
-            f"页面数据里没有 note_id={note_id} 这篇(笔记可能已删除/私密,"
-            f"或链接缺 xsec_token 被平台挡了)"
+            f"页面数据里没有 note_id={note_id} 这篇(链接带了 xsec_token 仍取不到,"
+            f"笔记可能已删除、已转私密,或 token 已过期 —— 重新分享一条新链接再试)"
         )
     return note
 
@@ -584,7 +594,10 @@ async def extract(
         resp = await client.get(final_url, headers=PAGE_HEADERS, timeout=30.0)
         if resp.status_code >= 400:
             raise NoteExtractError(f"笔记页面拉取失败:HTTP {resp.status_code}")
-        note = select_note(parse_initial_state(resp.text), ref.note_id)
+        note = select_note(
+            parse_initial_state(resp.text), ref.note_id,
+            has_xsec_token=bool(ref.xsec_token),
+        )
         payload = build_payload(note, ref)
 
         if with_images and payload["images"]:
