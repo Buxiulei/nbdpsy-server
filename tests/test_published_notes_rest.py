@@ -516,6 +516,31 @@ async def test_poll_visibility_error_and_unknown(tmp_path, monkeypatch):
 # ---------------- 防漂移(局部子集) ----------------
 
 
+def test_content_text_field_note_flags_flattened_and_points_to_extract():
+    """C1:content_text 的字段说明必须讲清「压平文本、非可写回原文」并指向 notes/extract。
+
+    调用方最容易犯的错就是拿 content_text 当原文直接回写编辑接口 —— 它话题空格分隔、
+    换行被压平,回写会丢话题。字段说明是唯一拦得住这个误用的地方,措辞漂了就等于没拦。
+    """
+    from app.http.published_notes_rest import _FIELD_NOTES
+
+    desc = _FIELD_NOTES["content_text"]
+    assert "压平" in desc, "必须点明这是压平文本(换行→空格)"
+    assert "不是可写回原文" in desc or "非可写回原文" in desc
+    assert "/api/notes/extract" in desc, "必须指向拿可写回原文的正确端点"
+
+
+def test_single_note_returns_schema_flags_content_text_flattened():
+    """C1:单条端点的 returns schema 里 content_text 也标注了「压平」,不只藏在 field_notes。"""
+    from app.http.published_notes_rest import MANIFEST_ENTRIES
+
+    single = next(
+        e for e in MANIFEST_ENTRIES if e["path"] == "/api/published-notes/{note_id}"
+    )
+    assert "压平" in single["returns"]
+    assert "/api/notes/extract" in single["returns"]
+
+
 def test_manifest_covers_new_routes():
     """8 条新路由在 manifest 与实际注册路由里双向全等(全局防漂移在 test_manifest.py)。"""
     from app.http import ALL_MANIFEST_ENTRIES

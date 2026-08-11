@@ -161,6 +161,69 @@ def test_extract_topics_tolerates_none():
     assert ne.extract_topics(None) == []
 
 
+# ---------------- normalize_topic_separators(话题 chip 分隔归一,C2) ----------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("", ""),
+        (None, ""),
+        # 空格分隔两个 chip → 连写
+        ("#A[话题]# #B[话题]#", "#A[话题]##B[话题]#"),
+        # 三个 chip 全部连起来(逐个吃掉分隔)
+        ("#A[话题]# #B[话题]# #C[话题]#", "#A[话题]##B[话题]##C[话题]#"),
+        # 连写输入:幂等,原样不变(chip 之间本就没空白)
+        ("#A[话题]##B[话题]#", "#A[话题]##B[话题]#"),
+        # chip 与正文之间的空格不动(前面不是 [话题]#)
+        ("正文 #A[话题]#", "正文 #A[话题]#"),
+        # 末尾单个 chip 后面的空格不动(后面接不上一个完整 chip)
+        ("正文 #A[话题]# ", "正文 #A[话题]# "),
+        # 多个空白 / 换行分隔一并吃掉
+        ("#A[话题]#   #B[话题]#", "#A[话题]##B[话题]#"),
+        ("#A[话题]#\n#B[话题]#", "#A[话题]##B[话题]#"),
+        # 全角空格分隔也吃掉(与 strip_trailing_hashtags 同口径含 全角空格)
+        ("#A[话题]#　#B[话题]#", "#A[话题]##B[话题]#"),
+    ],
+)
+def test_normalize_topic_separators(body, expected):
+    assert ne.normalize_topic_separators(body) == expected
+
+
+@pytest.mark.unit
+def test_normalize_topic_separators_preserves_topic_count():
+    """计数守恒:空格分隔的 8 个话题归一后一个不少(内容运营实测「直接回写丢 8 个」的反面)。"""
+    topics = [f"话题{i}" for i in range(8)]
+    space_form = "正文…… " + " ".join(f"#{t}[话题]#" for t in topics)
+
+    joined = ne.normalize_topic_separators(space_form)
+
+    assert ne.extract_topics(joined) == topics
+    assert len(ne.extract_topics(joined)) == 8
+    assert "[话题]# #" not in joined, "chip 之间不该再有空格分隔"
+    assert "[话题]##" in joined, "chip 之间应为连写"
+
+
+@pytest.mark.unit
+def test_normalize_topic_separators_does_not_touch_normal_hash_and_space():
+    """精准边界:正文正常内容里的 ``#`` 和空格一律不碰,只归一 chip 之间的分隔。"""
+    body = "学 C# 编程 价格 #500 特惠 #A[话题]# #B[话题]#"
+
+    out = ne.normalize_topic_separators(body)
+
+    assert out == "学 C# 编程 价格 #500 特惠 #A[话题]##B[话题]#"
+    assert "C# 编程" in out       # C 后面的 # 原封不动
+    assert "#500 特惠" in out      # 价格里的 #500 与其后空格原封不动
+
+
+@pytest.mark.unit
+def test_normalize_topic_separators_ignores_non_chip_hashtag_after_chip():
+    """chip 后面跟的是**普通井号标签**(不是完整 chip)→ 不合并,分隔空格保留。"""
+    # #普通标签 没有 [话题]# 后缀,lookahead 失配,A 后面的空格不动
+    assert ne.normalize_topic_separators("#A[话题]# #普通标签") == "#A[话题]# #普通标签"
+
+
 # ---------------- content_prefix_ok ----------------
 
 

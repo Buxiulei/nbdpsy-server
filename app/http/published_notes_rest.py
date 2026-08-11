@@ -90,6 +90,9 @@ _FIELD_NOTES = {
         "本系统发布的笔记正文在内容资产库(content_archive_id)那边,这一列可能是 null。"
         "空串 = 抓过了但确实没正文(纯图笔记),与 null(没抓过)不是一回事;"
         "content_fetched_at 非空即表示抓过。"
+        "⚠️ 这是**展示/检索用的压平文本(换行→空格)**,**不是可写回原文** —— 里头话题存成"
+        "空格分隔 `#A[话题]# #B[话题]#`,拿它当新正文直接回写编辑接口会丢话题。"
+        "要**可写回原文(带 \\n)**走 POST /api/notes/extract 的 content。"
     ),
     "ordering": "按 published_at 降序(最新发布在前),同刻按台账行 id 降序。",
 }
@@ -127,7 +130,8 @@ MANIFEST_ENTRIES = [
         "method": "GET", "path": "/api/published-notes/{note_id}",
         "summary": "按平台 note_id 取单条台账",
         "admin_only": False, "params": {"note_id": "path,str(24 位 hex 平台笔记 id)"},
-        "returns": "{note:{同列表单条视图 + content_text(正文,**只有本端点给**)}, "
+        "returns": "{note:{同列表单条视图 + content_text(正文**压平文本**,换行→空格,展示/检索用、"
+                   "**非可写回原文**,只有本端点给;可写回原文走 POST /api/notes/extract 的 content)}, "
                    "meta:{field_notes}}",
         "errors": "403=无该笔记所属账号的授权;404=台账里没有该 note_id",
         "notes": "只能按**平台 note_id** 取。sync_status=pending_id 的行还没有 note_id"

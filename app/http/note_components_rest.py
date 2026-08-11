@@ -33,6 +33,7 @@ from sqlalchemy import select
 from app.auth.context import current_operator
 from app.auth.guards import assert_account_access
 from app.browser.atomic_tasks import (
+    XHS_ABS_BODY_LIMIT,
     XHS_MAX_BODY_LENGTH,
     XHS_MAX_TITLE_DISPLAY,
     XHS_MAX_TOPICS,
@@ -154,8 +155,10 @@ MANIFEST_ENTRIES = [
                                         "**零点击**,可安全批量重跑)",
             "title": "body,str|None(整体替换标题;省略/null=不改;**空串=清空标题**,"
                      "与 null 语义不同;显示长度 >20 直接 422,**不截断**)",
-            "content": "body,str|None(整体替换正文;省略/null=不改;≤900 字;"
-                       "**不支持清空**,空串 422)",
+            "content": f"body,str|None(整体替换正文;省略/null=不改;"
+                       f"≤{XHS_MAX_BODY_LENGTH} 字(编辑既存超 {XHS_MAX_BODY_LENGTH} 字笔记时"
+                       f"放宽至 max({XHS_MAX_BODY_LENGTH}, 原文长度),**绝不允许变得比原来更长**;"
+                       f"硬天花板 {XHS_ABS_BODY_LIMIT});**不支持清空**,空串 422)",
             "add_images": "body,list|None(追加到现有图序**末尾**,1-18 项;每项三形态之一:"
                           "http URL / {b64,ext} / 本服务 /uploads 路径,与发布链路同款;"
                           "**建 job 前就落盘**,坏图当场 422)",
@@ -190,7 +193,10 @@ MANIFEST_ENTRIES = [
                   "或 collection_id 与 remove_collection_id 同时给(加入与移出语义相反),"
                   "或 set_original_declaration 传了 false(只支持开启);"
                   "或 topics 给了却全是空白(补话题至少要有一个非空话题名);"
-                  "422 还包括编辑字段自身不合法:title 显示长度 >20 / content 为空串或 >900 / "
+                  f"422 还包括编辑字段自身不合法:title 显示长度 >20 / content 为空串或 "
+                  f">{XHS_ABS_BODY_LIMIT}(注意 >{XHS_MAX_BODY_LENGTH} 但 ≤"
+                  f"{XHS_ABS_BODY_LIMIT} 的正文 REST 放行,是否受理取决于原文长度,由浏览器层"
+                  f"判 max({XHS_MAX_BODY_LENGTH}, 原文长度),不合格是 job 内该步失败不是 422)/ "
                   "给了图片操作却没给 expected_image_count / remove 下标重复或越界 / "
                   "删完原图剩 <1 / 改完总数 >18 / add_images 落盘失败 / "
                   "台账 note_type 不是图文(视频笔记与 null 一律拒绝);"
@@ -486,8 +492,15 @@ class NoteComponentsRequest(BaseModel):
                     "与 None 语义不同);显示长度 >20 直接 422,**绝不静默截断**",
     )
     content: str | None = Field(
-        default=None, min_length=1, max_length=XHS_MAX_BODY_LENGTH,
-        description="整体替换正文;None=不改;**不支持清空**(空串 422,收益趋零风险不明)",
+        default=None, min_length=1, max_length=XHS_ABS_BODY_LIMIT,
+        description=f"整体替换正文;None=不改;**不支持清空**(空串 422,收益趋零风险不明)。"
+                    f"长度口径 ≤{XHS_MAX_BODY_LENGTH} 字;**编辑既存的超 {XHS_MAX_BODY_LENGTH} "
+                    f"字笔记时放宽到 max({XHS_MAX_BODY_LENGTH}, 原文长度)**,但绝不允许改得比"
+                    f"原来更长(平台上真有 925/937 字的存量笔记,一刀切 {XHS_MAX_BODY_LENGTH} "
+                    f"会让它们连缩短正文的改动都提不进来);硬天花板 {XHS_ABS_BODY_LIMIT} 字,"
+                    f"超了直接 422。**max(…, 原文长度) 这一档在浏览器层判**(REST 拿不到原文"
+                    f"长度):不合格时该步 reason=`content_too_long_for_note`,**零点击零清空**、"
+                    f"笔记原样未动",
     )
     add_images: list | None = Field(
         default=None, min_length=1, max_length=_MAX_IMAGES,

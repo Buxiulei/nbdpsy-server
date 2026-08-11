@@ -666,3 +666,235 @@ def test_backspace_budget_exhaustion_still_fails_closed():
     assert result["status"] == "error"
     assert "清空失败" in result["reason"]
     assert human.kinds("type") == []
+
+
+# ==================== _backspace_budget:退格预算随残留长度(C3-③) ====================
+
+
+@pytest.mark.unit
+def test_backspace_budget_scales_with_residue_length():
+    """退格预算 = 基线 + 剩余字数 + 换行数×2;长残留严格拿到更大预算。"""
+    assert ne._backspace_budget("") == ne._CHIP_BACKSPACE_BUDGET           # 空残留 = 纯基线
+    assert ne._backspace_budget("a" * 100) == ne._CHIP_BACKSPACE_BUDGET + 100
+    # 换行按 2 算(tiptap 段落节点边界要多吃一次退格)
+    assert ne._backspace_budget("a\nb\nc") == ne._CHIP_BACKSPACE_BUDGET + 5 + 2 * 2
+    # 长残留严格大于短残留 —— 这正是进度制能清掉 900 字长文而不误报的底气
+    assert ne._backspace_budget("x" * 500) > ne._backspace_budget("xx")
+
+
+@pytest.mark.unit
+def test_backspace_budget_capped_at_max():
+    """再长也不过硬顶:到顶仍不空 = 结构异常,交回失败路径而非无限按。"""
+    assert ne._backspace_budget("x" * 100000) == ne._BACKSPACE_BUDGET_MAX
+
+
+# ==================== _clear_field:进度制清空(C3-①②④⑤) ====================
+
+
+def _reader(seq):
+    """诚实的假读法:第 n 次调用返回 ``seq[n]``,越界后固定返回 ``seq[-1]``。
+
+    **按调用次数**吐残留(绝不按输入 dict-lookup 糊弄):清空是"读一次→按一次→再读"的
+    递推,残留只跟"按了几次"有关、与 page 对象无关,所以 page 传谁都行。
+    """
+    calls = {"n": 0}
+
+    def read(_page):
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    return read
+
+
+@pytest.mark.unit
+def test_clear_field_keeps_going_while_shrinking_past_three_rounds():
+    """残留逐轮变短就继续,**不再固定 3 轮放弃**:连缩 9 轮、第 10 轮读空 → ``(True, "")``。
+
+    这条同时是防"进度制退回固定轮数"的变异哨兵:若把全选阶段改回固定 3 轮,3 轮后 prev_left
+    仍很长会转逐键退格,而预算按那时残留算(小),抵达不了空索引 → ``(False, …)`` 变红。
+    """
+    seq = ["a" * n for n in range(9, 0, -1)] + [""]   # 9,8,…,1,"" 共 10 次读回
+    human = FakeHuman()
+
+    ok, diag = ne._clear_field(object(), human, _reader(seq), intent="正文")
+
+    assert (ok, diag) == (True, "")
+    # 全选阶段真跑了 10 轮(每轮一次 Control+a),证明没在第 3 轮放弃
+    assert human.kinds("key").count(("key", "Control+a")) == 10
+
+
+@pytest.mark.unit
+def test_clear_field_switches_to_backspace_after_two_stalled_rounds():
+    """连续 2 轮读回没变短 → 判定全选推不动、**转阶段二逐键退格**(Control+End 出现)。"""
+    # 全选阶段:round1 "abc"(设 prev)→ round2 "abc"(停滞1)→ round3 "abc"(停滞2 break);
+    # 阶段二:第 _BACKSPACE_READ_EVERY 次退格抽查读回 "" → 成功
+    human = FakeHuman()
+
+    ok, _diag = ne._clear_field(object(), human, _reader(["abc", "abc", "abc", ""]), intent="正文")
+
+    assert ok is True
+    assert human.kinds("key").count(("key", "Control+a")) == 3   # 停滞 2 轮后不再全选
+    assert any("End" in k for _, k in human.kinds("key")), "应转入阶段二(Control+End 定位文末)"
+
+
+@pytest.mark.unit
+def test_clear_field_stops_as_soon_as_empty():
+    """清空即止:全选阶段第一轮就读回空 → 立即返回,一次退格都不按,也不进阶段二(C3-④)。"""
+    human = FakeHuman()
+
+    ok, diag = ne._clear_field(object(), human, _reader([""]), intent="正文")
+
+    assert (ok, diag) == (True, "")
+    assert human.kinds("key") == [("key", "Control+a"), ("key", "Backspace")]   # 只清一轮
+    assert not any("End" in k for _, k in human.kinds("key")), "读回即空不该进阶段二"
+
+
+@pytest.mark.unit
+def test_clear_field_exhausted_returns_false_with_diagnostic():
+    """预算耗尽仍不空 → ``(False, 诊断串)``,绝不谎报清空(C3-⑤)。
+
+    残留恒定非空:全选阶段停滞转退格,退格按满预算仍读回残留 → 失败;诊断串带轮数 +
+    退格次数 + 残留样本,供上层弃提交时留痕。
+    """
+    human = FakeHuman()
+
+    ok, diag = ne._clear_field(object(), human, _reader(["#顽固[话题]#"]), intent="正文")
+
+    assert ok is False
+    assert "残留" in diag and "逐键退格" in diag
+    assert "#顽固[话题]#" in diag           # 残留样本如实带出(repr 里含原串)
+
+
+# ==================== apply_content_edit 长度闸(C3 长度闸 + 变异哨兵②) ====================
+
+
+@pytest.mark.unit
+def test_content_edit_allows_shorter_writeback_to_oversized_note():
+    """既存 937 字笔记写回 925 字(变短)→ 放行(判据 ``max(900, 原文长度)`` 的放宽档)。
+
+    这条同时是防"把 ``max(900, L0)`` 改成死 900"的变异哨兵:925 > 900,退回死 900 会误拒 → 红。
+    """
+    before, after = "价" * 937, "价" * 925
+    page = FakePage(boxes=[_box()], bodies=[before, "", after])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, after)
+
+    assert result["status"] == "done", result.get("reason")
+    assert result["body_before"] == before
+
+
+@pytest.mark.unit
+def test_content_edit_rejects_growing_beyond_original_with_zero_action():
+    """新正文 > ``max(900, 原文长度)`` 且比原文更长 → ``content_too_long_for_note``,**零点击零清空**。
+
+    937 字笔记想写成 950 字(变长)被判据挡下:判据先于破坏,笔记原样未动。
+    """
+    before = "价" * 937
+    page = FakePage(boxes=[_box()], bodies=[before])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, "价" * 950)
+
+    assert result["status"] == "error"
+    assert result["reason"].startswith("content_too_long_for_note")
+    assert human.calls == [], "判据不合格必须零动作(没点击、没清空、没输入)"
+    assert page.reads.count("box") == 0, "连滚进视口的定位都不该发生"
+    assert result["body_before"] == before
+    assert result["body_read_back"] is None
+
+
+@pytest.mark.unit
+def test_content_edit_length_gate_fails_closed_when_before_unreadable():
+    """``body_before`` 读不回(None)→ L0 记 0、闸退到 900 **fail-closed**:901 字被拒。
+
+    读不到原文就没有放宽依据,宁可拒收让上层重试,也不拿猜的上限做全量覆盖提交。
+    """
+    page = FakePage(boxes=[_box()], bodies=[None])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, "字" * 901)
+
+    assert result["status"] == "error"
+    assert result["reason"].startswith("content_too_long_for_note")
+    assert "原 0 字" in result["reason"]
+    assert human.calls == []
+
+
+# ==================== C2:话题分隔归一化在注入前生效 ====================
+
+
+@pytest.mark.unit
+def test_content_edit_normalizes_space_separated_topics_before_typing():
+    """空格分隔的话题在**注入前**被归一成连写:真正打进编辑器的是连写文本,不是原始空格分隔。
+
+    调用方拿台账 content_text(话题空格分隔)当新正文回写,不归一编辑器认不出 chip 会丢话题。
+    """
+    space_form = "正文内容 #A[话题]# #B[话题]#"
+    joined_form = "正文内容 #A[话题]##B[话题]#"
+    # 编辑器读回的是归一后的连写形态(注入什么读回什么)
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", joined_form])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, space_form)
+
+    assert result["status"] == "done", result.get("reason")
+    assert human.kinds("type") == [("type", joined_form)]   # 打进去的是连写,不是空格分隔
+
+
+# ==================== readback 比对两边归一(消除对编辑器读回话题分隔形态的依赖) ====================
+#
+# 注入前 new_content 已归一成连写,但读回值来自 tiptap DOM —— 编辑器把相邻话题 chip 读回成
+# 连写还是空格分隔,静态不可证且可变。readback 比对若只对 new_content 单边归一,一旦编辑器
+# 读回带空格就与连写的 new_content 判不等 → 带末尾话题的正文编辑一律假失败。修复:比对时两边
+# 都过 normalize_topic_separators,只校验实质内容一致。下面第一条是本修复的核心哨兵。
+
+
+@pytest.mark.unit
+def test_content_edit_readback_with_spaced_topics_is_done():
+    """核心哨兵:new_content 连写、编辑器读回**带空格分隔** → 判 done,不再 content_readback_mismatch。
+
+    这正是对抗审查抓的真风险:read_back(带空格)≠ new_content(连写)会让带末尾话题的正文
+    编辑一律 fail-safe。两边归一后只剩实质内容,分隔空格差异不再造成假失败。
+    去掉 readback 比对的归一化(退回只 _norm),这条必转红 —— 变异哨兵。
+    """
+    joined_form = "正文内容 #A[话题]##B[话题]#"      # 注入的连写形态
+    spaced_read_back = "正文内容 #A[话题]# #B[话题]#"  # 编辑器读回带空格(模拟 DOM 行为)
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", spaced_read_back])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, joined_form)
+
+    assert result["status"] == "done", result.get("reason")
+    assert result["body_read_back"] == spaced_read_back  # 原始读回值如实留底,不被归一改写
+
+
+@pytest.mark.unit
+def test_content_edit_readback_joined_topics_still_done():
+    """回归:new_content 连写、读回也连写 → done(归一是幂等的,不破坏原本就相等的通路)。"""
+    joined_form = "正文内容 #A[话题]##B[话题]#"
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", joined_form])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, joined_form)
+
+    assert result["status"] == "done", result.get("reason")
+
+
+@pytest.mark.unit
+def test_content_edit_real_body_mismatch_still_errors():
+    """归一只吞话题分隔空格,不吞真 mismatch:正文实质文字不同 → 仍判 content_readback_mismatch。
+
+    话题 chip 部分完全相同(排除分隔差异),差异落在正文正文字上,确认归一没把真 mismatch 抹平。
+    """
+    new_content = "正文内容甲 #A[话题]##B[话题]#"
+    real_diff_read_back = "正文内容乙 #A[话题]##B[话题]#"  # 话题相同,正文字不同
+    page = FakePage(boxes=[_box()], bodies=["旧正文", "", real_diff_read_back])
+    human = FakeHuman()
+
+    result = ne.apply_content_edit(page, human, new_content)
+
+    assert result["status"] == "error"
+    assert result["reason"].startswith("content_readback_mismatch")
+    assert result["body_read_back"] == real_diff_read_back

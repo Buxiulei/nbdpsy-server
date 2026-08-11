@@ -31,6 +31,7 @@ from app.models.browser_job import BrowserJob
 from app.models.published_note import PublishedNote
 from app.services import note_components
 from tests.rest_helpers import ADMIN_KEY, bearer, rest_client, seed_account
+from app.browser.atomic_tasks import XHS_ABS_BODY_LIMIT, XHS_MAX_BODY_LENGTH
 
 _COOKIES = [{"name": "a1", "value": "x", "domain": ".xiaohongshu.com"}]
 # 1x1 PNG(与 test_images.py 同款),避免测试联网
@@ -142,18 +143,33 @@ async def test_empty_title_clears_but_empty_content_rejected(tmp_path, monkeypat
 
 
 async def test_content_length_boundary(tmp_path, monkeypatch):
-    """正文 ≤900 放行,901 → 422(发布链路同款 XHS_MAX_BODY_LENGTH)。"""
+    """REST 层正文长度边界:≤硬天花板 1000 放行,>1000 → 422。
+
+    900 是**发新笔记**的安全线,不是编辑接口的收口线。编辑既存笔记要放行平台上真有的
+    925/937 字存量笔记(baseline 把 content 的 max_length 从 900 放宽到 XHS_ABS_BODY_LIMIT),
+    所以 REST 只挡「超硬天花板 1000」这一刀;>900 但 ≤1000 的正文 REST **放行**,是否受理
+    取决于**原文长度**(max(900, 原文长度),只许不变长),那一档在浏览器层判、不在 REST。
+    """
     _api_role(monkeypatch, tmp_path)
     async with rest_client(tmp_path, monkeypatch) as c:
         acc = await seed_account("编辑正文号", "uEdBody", _COOKIES)
         await _seed_note(acc)
         url = f"/api/accounts/{acc}/note-components"
 
+        # ≤900:一直放行
         assert (await c.post(
-            url, json={"note_id": _NOTE, "content": "字" * 900}, headers=bearer(ADMIN_KEY)
+            url, json={"note_id": _NOTE, "content": "字" * XHS_MAX_BODY_LENGTH},
+            headers=bearer(ADMIN_KEY),
         )).status_code == 202
+        # 硬天花板 1000:REST 放行(>900 那一档留给浏览器层按原文长度判)
         assert (await c.post(
-            url, json={"note_id": _NOTE, "content": "字" * 901}, headers=bearer(ADMIN_KEY)
+            url, json={"note_id": _NOTE, "content": "字" * XHS_ABS_BODY_LIMIT},
+            headers=bearer(ADMIN_KEY),
+        )).status_code == 202
+        # 超硬天花板:REST 当场 422
+        assert (await c.post(
+            url, json={"note_id": _NOTE, "content": "字" * (XHS_ABS_BODY_LIMIT + 1)},
+            headers=bearer(ADMIN_KEY),
         )).status_code == 422
 
 

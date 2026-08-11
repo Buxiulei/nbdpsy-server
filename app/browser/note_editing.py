@@ -29,6 +29,7 @@ import time
 from loguru import logger
 
 from app.browser.atomic_tasks import (
+    XHS_MAX_BODY_LENGTH,
     XHS_MAX_TITLE_DISPLAY,
     XHS_MAX_TOPICS,
     topic_failure_detail,
@@ -46,6 +47,15 @@ from app.browser.topic_dropdown import (
 # 形态,所以同一条正则既能提"提交前旧正文里有哪些话题"(``topics_dropped``),也能提
 # 页面回读的正文。
 _TOPIC_PATTERN = re.compile(r"#([^#\[\]]+)\[话题\]#")
+
+# 话题 chip **之间**的空格分隔归一化正则:台账 ``content_text`` 把相邻话题存成空格分隔
+# ``#A[话题]# #B[话题]#``,而编辑器注入正文时要求话题连写 ``#A[话题]##B[话题]#`` 才认得出
+# chip。本正则匹配"一个 chip 收尾 ``[话题]#`` + 一段空白 + 下一个**完整** chip 的开头",用
+# 零宽 lookahead(与 ``_TOPIC_PATTERN`` 同款 chip 口径:``#`` + 非 ``#[]`` 名 + ``[话题]#``)
+# 锁死后面真是一个 chip —— 绝不误伤正文正常内容里的孤立 ``#`` 或空格(它们前面没有 ``[话题]#``、
+# 后面也接不上一个完整 chip)。空白类含半角/全角(``[\s　]``,与 ``atomic_tasks``
+# 的 ``_TRAILING_HASHTAGS_RE`` 同口径)。
+_TOPIC_CHIP_SEP_PATTERN = re.compile(r"(\[话题\]#)[\s　]+(?=#[^#\[\]]+\[话题\]#)")
 
 
 def plan_image_removal(indexes: list[int]) -> list[int]:
@@ -97,6 +107,23 @@ def extract_topics(body: str | None) -> list[str]:
     明确不做重建,见 1.2),替换**前**用本函数把旧正文里的话题记下来如实上报。
     """
     return [m.strip() for m in _TOPIC_PATTERN.findall(body or "") if m.strip()]
+
+
+def normalize_topic_separators(body: str | None) -> str:
+    """把话题 chip **之间**的空格分隔统一成连写(``[话题]# #`` → ``[话题]##``)。
+
+    纯字符串变换,零 DOM 假设,单测直接覆盖;由 ``apply_content_edit`` 在**注入前**调用。
+
+    为什么要它(2026-08-09 内容运营实测):台账 ``published_notes.content_text`` 是**展示/
+    检索用的压平文本**,相邻话题存成**空格分隔** ``#A[话题]# #B[话题]#``;而编辑器注入正文
+    时要求话题 chip **连写** ``#A[话题]##B[话题]#`` 才识别成实体,调用方拿 content_text 直接
+    回写会把话题**丢掉**(实测一篇丢 8 个)。归一后空格分隔与连写两种输入都不丢话题。
+
+    只吃掉 chip **之间**那段分隔空白,别的一律不碰:正文正常内容里的 ``#``、chip 与正文之间
+    的空格、末尾话题串后面的空格 —— 前面没有 ``[话题]#`` 或后面接不上一个完整 chip 的,都不
+    匹配。归一只减不增长度(吞空白),故不改变"编辑不许变长"的语义。
+    """
+    return _TOPIC_CHIP_SEP_PATTERN.sub(r"\1", body or "")
 
 
 def content_prefix_ok(read_back: str | None, target: str) -> bool:
@@ -220,12 +247,21 @@ _BODY_READ_JS = r"""() => {
 }"""
 
 # 定位/输入重试上限:与 ``_type_into_robust`` 同为 3。
-# 清空重试上限:tiptap 多节点下一次 Ctrl+A 可能只选中部分,重清几次;仍不空转逐键退格
-_CLEAR_TRIES = 3
-# 逐键退格预算(清 atomic chip 用):话题 ≤10 个 + 少量残字,40 次绰绰有余;耗尽仍不空
-# 说明结构异常(如嵌套只读块),那不是"再按几下"能解的,交回失败路径
-_CHIP_BACKSPACE_BUDGET = 40
 _TYPE_TRIES = 3
+# 清空阶段一(Ctrl+A 全选删除)的**防死循环硬顶**,不是常态轮数:常态由"还在不在变短"
+# 决定(见 ``_clear_field`` 的进度制)。
+_CLEAR_MAX_ROUNDS = 15
+# 连续几轮读回没变短就判定全选这条路推不动了,转阶段二逐键退格。
+_CLEAR_STALL_ROUNDS = 2
+# 阶段二逐键退格的预算**基线**:话题 ≤10 个 + 少量残字这种老场景 40 次绰绰有余;
+# 长正文按残留实况加码,见 ``_backspace_budget``。
+_CHIP_BACKSPACE_BUDGET = 40
+# 逐键退格预算的硬顶:再长的正文也不该按到这个数,到顶仍不空 = 结构异常(如嵌套只读块),
+# 那不是"再按几下"能解的,交回失败路径。
+_BACKSPACE_BUDGET_MAX = 1500
+# 逐键退格期间每几键读回一次:一次读回是一趟 evaluate 往返,比一次退格贵得多。老场景
+# 每 4 键读一次是因为总共才 40 键;长正文按每 4 键读会多付上百次往返,放宽到 10。
+_BACKSPACE_READ_EVERY = 10
 # 滚动进视口的尝试上限:与 ``note_components.click_publish`` 的滚动循环同为 3。
 _SCROLL_TRIES = 3
 
@@ -291,6 +327,82 @@ def _scroll_into_view(page, human, selectors: list[str], *, intent: str) -> dict
     return box
 
 
+def _backspace_budget(remaining: str) -> int:
+    """按**残留实况**算逐键退格预算:基线 + 剩余字符数 + 换行数×2,封顶 ``_BACKSPACE_BUDGET_MAX``。
+
+    换行按 2 算:tiptap 里一个换行是一个段落节点边界,删掉它往往要多吃一次退格(先删空
+    段落、再合并相邻段落),按 1 算会在多段落长文上刚好差一口气。
+    """
+    return min(
+        _CHIP_BACKSPACE_BUDGET + len(remaining) + remaining.count("\n") * 2,
+        _BACKSPACE_BUDGET_MAX,
+    )
+
+
+def _clear_field(page, human, read_current, *, intent: str) -> tuple[bool, str]:
+    """把目标框清空。返回 ``(清干净了吗, 没清干净时的诊断串)``。
+
+    两阶段,**全程走 human 层按键**(``evaluate`` 只用来读;JS 直接设值是"AI 托管"检测的
+    典型信号,红线):
+
+    - **阶段一** ``Ctrl+A`` + ``Backspace`` 循环,**进度制**:每轮读回,只要比上轮**严格
+      变短**就继续按;连续 ``_CLEAR_STALL_ROUNDS`` 轮没变短才判定这条路推不动、转阶段二。
+      ``_CLEAR_MAX_ROUNDS`` 只是防死循环的硬顶。
+    - **阶段二** 光标移到文末**逐键退格**(atomic 节点吃单独的 Backspace,一次删一个),
+      预算按残留实况算(``_backspace_budget``),读空即止。
+
+    为什么是进度制而不是固定轮数 —— RCA(2026-08-09 内容运营真号两跑复现):号5 笔记
+    6a69d5b0 线上正文 890 字 / 69 换行,两跑同错「3 次 Ctrl+A+Backspace 后仍残留
+    '黄安麟,北京大学临床心理学博士…'」。**残留是正文开头**,说明 Ctrl+A 每轮只选中了尾部
+    一部分节点 —— 它一直在往前啃、只是没啃完,而不是卡住不动。旧实现两处预算都是照
+    「≤10 个话题 chip + 少量残字」那个老场景定死的(固定 3 轮 + 固定 40 键),对 900 字
+    多节点长文根本不够:轮数用完就报错,明明还在推进。所以轮数改成**看进度不看次数**,
+    退格预算**随残留长度走**。
+
+    清不空仍走既有失败路径(调用方 ``_type_into`` 判失败 → 编排层弃提交,笔记原样未动)
+    —— 绝不在残留上输入,这条语义一个字都没动。
+    """
+    prev_left: str | None = None
+    stalled = 0
+    rounds = 0
+    for rounds in range(1, _CLEAR_MAX_ROUNDS + 1):
+        human.press_key("Control+a", reason=f"全选{intent}原内容")
+        human.press_key("Backspace", reason=f"清空{intent}")
+        human.wait(0.2, 0.5, context="清空后停顿")
+        if read_current is None:
+            return True, ""  # 没给读法的框(理论不该有)保持旧行为:清一次就算数
+        left = read_current(page) or ""
+        if not _norm(left):
+            return True, ""
+        if prev_left is not None and len(left) >= len(prev_left):
+            stalled += 1
+            if stalled >= _CLEAR_STALL_ROUNDS:
+                break
+        else:
+            stalled = 0
+        prev_left = left
+
+    # 阶段二:逐键退格删 atomic 节点(2026-08-03 真号确诊):tiptap 的话题 chip 是 atomic
+    # node,``Ctrl+A`` 选不中它们 —— 全选删除后残留一字不变('#身边的心理学[话题]#
+    # #明日方舟[话题]#')就是铁证。
+    budget = _backspace_budget(prev_left or "")
+    human.press_key("Control+End", reason=f"光标移到{intent}末尾(清残留)")
+    for i in range(budget):
+        human.press_key("Backspace", reason="")
+        if (i + 1) % _BACKSPACE_READ_EVERY == 0:
+            human.wait(0.15, 0.35, context="退格间隔")
+            if not _norm(read_current(page) or ""):
+                return True, ""
+    human.wait(0.2, 0.4, context="末次退格后读回")
+    left = _norm(read_current(page) or "")
+    if not left:
+        return True, ""
+    return False, (
+        f"{rounds} 轮 Ctrl+A+Backspace(进度制:连续 {_CLEAR_STALL_ROUNDS} 轮无进展转退格)"
+        f"+ {budget} 次逐键退格后仍残留 {left[:40]!r}"
+    )
+
+
 def _type_into(
     page,
     human,
@@ -335,47 +447,17 @@ def _type_into(
             human.click((cx, cy), reason=f"聚焦{intent}")
             human.wait(0.2, 0.5, context="聚焦后停顿")
             if clear_first:
-                # Ctrl+A → Backspace 清空,**清完必须读回为空再输入**(2026-08-03 真号打脸):
-                # E5 受控写只测了标题(input 单行,Ctrl+A 可靠),正文没测——tiptap 富文本的
-                # Ctrl+A 在多节点(段落+话题 chip)下可能只选中部分,残留旧内容;此时继续
-                # 输入,读回 = 新文本(前缀相同)+ 旧残留(后段不同),mismatch 只显示相同
-                # 前缀毫无诊断力,T7 真号连挂两次才定位到这。清不干净就再清,清空封顶
-                # _CLEAR_TRIES 次;仍不空 → 本次尝试失败(绝不在残留上输入)。
-                cleared = False
-                for _ in range(_CLEAR_TRIES):
-                    human.press_key("Control+a", reason=f"全选{intent}原内容")
-                    human.press_key("Backspace", reason=f"清空{intent}")
-                    human.wait(0.2, 0.5, context="清空后停顿")
-                    if read_current is None:
-                        cleared = True  # 没给读法的框(理论不该有)保持旧行为
-                        break
-                    left = read_current(page)
-                    if not _norm(left or ""):
-                        cleared = True
-                        break
-                if not cleared and read_current is not None:
-                    # 第二阶段:**逐键退格删 atomic 节点**(2026-08-03 真号确诊):
-                    # tiptap 的话题 chip 是 atomic node,Ctrl+A 选不中它们——三轮全选删除
-                    # 后残留一字不变('#身边的心理学[话题]# #明日方舟[话题]#')就是铁证。
-                    # atomic 节点吃单独的 Backspace(一次删一个),所以光标移到文末逐键退格,
-                    # 每几键读一次,读空即止。预算 _CHIP_BACKSPACE_BUDGET 封顶:残留是
-                    # chip 时按 chip 个数消耗,预算耗尽仍不空 = 结构异常,交回失败路径。
-                    human.press_key("Control+End", reason=f"光标移到{intent}末尾(清残留)")
-                    for i in range(_CHIP_BACKSPACE_BUDGET):
-                        human.press_key("Backspace", reason="")
-                        if (i + 1) % 4 == 0:
-                            human.wait(0.15, 0.35, context="退格间隔")
-                            if not _norm(read_current(page) or ""):
-                                cleared = True
-                                break
-                    if not cleared:
-                        human.wait(0.2, 0.4, context="末次退格后读回")
-                        cleared = not _norm(read_current(page) or "")
+                # **清完必须读回为空再输入**(2026-08-03 真号打脸):E5 受控写只测了标题
+                # (input 单行,Ctrl+A 可靠),正文没测 —— tiptap 富文本的 Ctrl+A 在多节点
+                # (段落+话题 chip)下可能只选中部分,残留旧内容;此时继续输入,读回 = 新文本
+                # (前缀相同)+ 旧残留(后段不同),mismatch 只显示相同前缀毫无诊断力,T7 真号
+                # 连挂两次才定位到这。清空的两阶段与预算口径见 ``_clear_field``;
+                # 清不空 → 本次尝试失败(**绝不在残留上输入**)。
+                cleared, clear_diag = _clear_field(
+                    page, human, read_current, intent=intent
+                )
                 if not cleared:
-                    last_err = (
-                        f"{intent}清空失败:{_CLEAR_TRIES} 次 Ctrl+A+Backspace 后仍残留 "
-                        f"{_norm(read_current(page) or '')[:40]!r}"
-                    )
+                    last_err = f"{intent}清空失败:{clear_diag}"
                     continue
             if value:
                 human.type_text(None, value, click_first=False, clear_first=False)
@@ -500,6 +582,39 @@ def apply_content_edit(page, human, new_content: str) -> dict:
     """
     body_before = read_body_value(page)
     topics_dropped = extract_topics(body_before)
+
+    # 话题 chip 空格分隔 → 连写归一,**注入前**做(纯字符串变换,见 ``normalize_topic_separators``)。
+    # 调用方常直接拿台账 content_text(话题空格分隔)当新正文回写,不归一编辑器认不出 chip 会
+    # 丢话题(内容运营实测一篇丢 8 个)。归一只吞 chip 之间的分隔空白、长度只减不增,放在长度
+    # 闸**之前** —— 闸量的就是真正注入的那份文本;读回全等比对也对这份归一后的文本比。
+    new_content = normalize_topic_separators(new_content)
+
+    # 长度闸,**动手之前判**(判据先于破坏):不合格就零点击、零清空,笔记原样未动。
+    # 放在这里而不是 REST 层,是因为判据要用**这篇的原文长度**,REST 拿不到(台账里的
+    # content_text 是压平文本,长度口径也未必与编辑器 innerText 一致,不能拿来当判据)。
+    #
+    # 判据 max(900, L0) 的两条边各治一种事故(2026-08-09 内容运营取证):
+    # - 下界 900:平常写回还是按发布链路那条安全线来;
+    # - 放宽到 L0:平台上真有 925(号1 6a6a0136)/ 937(号8 6a6b3c4c)字的存量笔记,一刀切
+    #   900 会让它们**任何**写回都进不来 —— 连"把 ¥800 改成 ¥600"这种把正文改短的动作都被
+    #   拒,调价被整个卡死;
+    # - 上界仍是 L0 而不是无限:编辑只允许**不变长**,不许借编辑把笔记撑得比原来更长。
+    #
+    # ``body_before`` 读不回来(None)时 L0 记 0 → 闸退到 900,**fail-closed**:读不到原文
+    # 就没有放宽的依据,宁可拒收让调用方重试,也不拿一个猜的上限去做全量覆盖提交。
+    length_limit = max(XHS_MAX_BODY_LENGTH, len(body_before or ""))
+    if len(new_content) > length_limit:
+        return {
+            "status": "error",
+            "reason": (
+                f"content_too_long_for_note: 新正文 {len(new_content)} 字超过该笔记允许上限 "
+                f"max({XHS_MAX_BODY_LENGTH}, 原 {len(body_before or '')} 字)"
+            ),
+            "body_before": body_before,
+            "topics_dropped": topics_dropped,
+            "body_read_back": None,
+        }
+
     box = _scroll_into_view(page, human, [_BODY_EDITOR], intent="正文框")
     if box is None:
         return {
@@ -525,12 +640,22 @@ def apply_content_edit(page, human, new_content: str) -> dict:
 
     human.wait(0.3, 0.8, context="等正文渲染稳定")
     read_back = read_body_value(page)
-    if _norm(read_back) != _norm(new_content):
+    # readback 比对**不关心**话题 chip 之间是连写还是空格分隔:编辑器把相邻话题 chip 读回成
+    # 连写(``#A[话题]##B[话题]#``)还是空格分隔(``#A[话题]# #B[话题]#``),是 tiptap 的 DOM
+    # 行为,未取证且可变。若编辑器读回带空格,而 ``new_content`` 注入前已归一成连写(见上方
+    # 第 590 行),直接全等比就会判不等 → 带末尾话题的正文编辑一律 content_readback_mismatch
+    # 假失败(推介笔记正文基本都带末尾话题,首单大概率直接撞)。故两边都先
+    # ``normalize_topic_separators`` 归一到同一分隔形态、再 ``_norm``,只校验**实质内容**一致。
+    # ``normalize_topic_separators`` 幂等,``new_content`` 此前已归一、这里再归一无副作用;
+    # ``describe_diff`` 的两入参也吃归一后的值,诊断串才不会被话题分隔空格噪声污染。
+    read_back_norm = _norm(normalize_topic_separators(read_back))
+    new_content_norm = _norm(normalize_topic_separators(new_content))
+    if read_back_norm != new_content_norm:
         return {
             "status": "error",
             "reason": (
                 "content_readback_mismatch: "
-                + describe_diff(_norm(read_back), _norm(new_content))
+                + describe_diff(read_back_norm, new_content_norm)
             ),
             "body_before": body_before,
             "topics_dropped": topics_dropped,
