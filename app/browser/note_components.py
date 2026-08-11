@@ -46,6 +46,7 @@
 """
 
 import json
+import os
 import re
 import time
 from io import BytesIO
@@ -2311,6 +2312,41 @@ def _finalize_topics(
     return result
 
 
+def _build_readback_summary(
+    read_back: Dict[str, Optional[str]],
+    images_after: Optional[int],
+    add_images: Optional[List[str]],
+) -> Dict[str, Any]:
+    """从**已有回读结果**零成本算一份"当场可判定"摘要:不额外起浏览器动作、不额外读页面。
+
+    动机(2026-08-09 内容运营取证):编辑长笔记(如调价「¥800→¥600」)后,调用方想立刻确认
+    生效内容,却只能 ①自己从完整 ``read_back`` dict 里捞正文再切片,或 ②拿 explore 公开页去比
+    —— 而公开页有**分钟级传播滞后**,拿它当即时真值会误判成假绿。这份摘要把提交那刻的编辑器
+    回读真值切成可直接判定的小字段,**结构通用**、不含任何业务概念(价格 / 咨询师之类)。
+
+    字段与数据源(全部取自 ``set_note_components`` 已经拿到的回读结果,不再多读一次页面):
+
+    - ``content_length`` / ``content_head`` / ``content_tail`` / ``topics_count``:取自
+      ``read_back["content"]``(提交后重进页面的正文回读真值);仅在**正文被编辑过**时有值,
+      否则为 None。``content_tail`` 给末 40 字(调用方从这看到末句 / 价格行),``content_head``
+      给头 30 字(看开头改没改),``topics_count`` 用 ``extract_topics`` 数正文里的话题实体;
+    - ``image_count``:提交后回读的图数(``images_after`` —— ``count_images`` 的双判据计数);
+    - ``last_image``:本次**追加**的最后一张本地图的 basename。⚠️ 回读侧只拿得到图**数** ——
+      ``count_images`` 与快照 image_count 都是纯计数,更新页上**没有零成本可读的 file_id / URL**
+      (要读得额外遍历一趟 DOM,违背"零成本纯从已有结果算")。故这里给的是**请求侧**"我最后
+      追加的那张"的可辨识名,让调用方对上"末图是不是我传的那张";纯删图(本次没追加)时为 None。
+    """
+    body = (read_back or {}).get("content")
+    return {
+        "content_length": len(body) if body is not None else None,
+        "content_head": body[:30] if body is not None else None,
+        "content_tail": body[-40:] if body is not None else None,
+        "topics_count": len(extract_topics(body)) if body is not None else None,
+        "image_count": images_after,
+        "last_image": os.path.basename(add_images[-1]) if add_images else None,
+    }
+
+
 # ---------------- 编辑已发布笔记:完整流程 ----------------
 
 
@@ -2614,6 +2650,14 @@ def set_note_components(
         if readback["read_back"]:
             # 标题/正文的回读真值:服务层台账回写只认它(不拿请求值凑数,编辑设计 3.3)
             result["read_back"] = readback["read_back"]
+        # readback_summary:正文/图片被改过时,从上面**已有的回读结果**零成本切一份"当场
+        # 可判定"摘要(不再起浏览器动作)。调用方据此直接判生效内容,不必自己捞完整 read_back
+        # dict、更不该拿 explore 公开页的即时值验收(公开页有分钟级传播滞后)。没改这两样
+        # (纯组件 / 纯话题请求)就不放 —— 对它无意义(编辑设计 3.3)。
+        if content is not None or wants_images:
+            result["readback_summary"] = _build_readback_summary(
+                readback["read_back"], readback["images_after"], add_images
+            )
         # ⑨bis 补话题回读:_verify_after_submit 已重进更新页,此刻读正文里的话题实体就是
         # **平台实况**(不是"点了就算")。读不出正文 → None(applied.topics=None,未确认)。
         if topic_plan is not None:

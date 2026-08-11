@@ -208,6 +208,14 @@ MANIFEST_ENTRIES = [
         "notes": "异步契约:起后台浏览器深链进笔记更新页 → 设置组件 → 点发布 → **重进页面"
                  "逐项回读**(约 2-4 分钟);拿 job_id 后每 5-10s 轮询 "
                  "GET /api/note-components/{job_id}。"
+                 "⚠️ **长正文(≥800 字)编辑耗时可达数分钟**:整体替换正文要先逐段清空"
+                 "(`Ctrl+A` 在多节点长文里每轮只选中一段、推不动时转**逐键退格**,900 字多段落"
+                 "的退格预算可达上千键)、再拟人化逐字重填(~80ms/字,900 字约 75-95s),本就慢,"
+                 "叠加多组件回读,最坏到 6-8 分钟。**轮询这类 job 的超时建议 ≥600 秒**——实测一篇"
+                 "890 字笔记用 900 秒轮询上限才拿到 done、更短的默认超时只拿到 unknown(客户端等"
+                 "不及),所以长正文/批量给到 900 秒更稳。拿到 done 后**看 result.readback_summary"
+                 "当场判定生效内容**(正文末 40 字看价格行/末句、image_count 看图数),"
+                 "**不要用 explore 公开页即时值验收——公开页有分钟级传播滞后**。"
                  "⚠️ 四条硬约束:"
                  "① **非幂等,失败不自动重跑**——提交是**全量覆盖**语义的一次真发布,"
                  "重跑就是再覆盖一次;看到 error/unknown 必须先去笔记里核对当前状态再决定;"
@@ -318,7 +326,9 @@ MANIFEST_ENTRIES = [
                    "permission_after?, permission_preserved?, permission_restored?, "
                    "body_appended?, topics_injected?, topics_dropped?, "
                    "topics_existing?, topics_added?, topics_truncated?, topics_failed?, "
-                   "images_before?, images_after?, ledger_synced?, aborted_before_submit?, reason?}",
+                   "images_before?, images_after?, ledger_synced?, aborted_before_submit?, "
+                   "readback_summary?:{content_length,content_head,content_tail,topics_count,"
+                   "image_count,last_image}, reason?}",
         "errors": "403=无该号授权;404=job_id 不存在",
         "notes": "status 五态:queued / running / done / error(附 reason)/ "
                  "**unknown(执行进程中断,改没改成未知)**。"
@@ -351,6 +361,13 @@ MANIFEST_ENTRIES = [
                  "topics_dropped=正文替换丢掉的旧话题实体名;images_before / images_after="
                  "编辑前留底与提交后回读的图数;ledger_synced=台账 title/content_text 回写"
                  "结果(false 只表示台账没同步上,平台侧改动照样是真的);"
+                 "**readback_summary=正文/图片改过时的『当场可判定』回读摘要**(只在正文或图片"
+                 "被编辑过时才有):{content_length=正文字数, content_tail=正文末 40 字"
+                 "(价格行/末句从这看), content_head=正文头 30 字, topics_count=正文话题数, "
+                 "image_count=提交后图数, last_image=本次追加的最后一张图 basename(纯删图为 null)};"
+                 "正文未编辑时 content_* / topics_count 为 null,图片未编辑时 image_count / "
+                 "last_image 为 null。**拿它当场判生效内容,别用 explore 公开页即时值验收 ——"
+                 "公开页有分钟级传播滞后**。"
                  "**aborted_before_submit=true 是特殊终态**:破坏性编辑步失败导致主动放弃"
                  "提交,**笔记原样未动,可直接安全重试**——与「提交了但只成一半」完全不同,"
                  "别按同一套处理。"
@@ -893,6 +910,9 @@ async def get_note_components_endpoint(job_id: str) -> dict:
             # image_add / image_remove 走上面 applied 那一项原样透传,不必单列。
             "topics_dropped", "images_before", "images_after", "ledger_synced",
             "aborted_before_submit",
+            # 正文/图片改过时的"当场可判定"回读摘要(2026-08-09 内容运营取证):零成本从
+            # read_back / images_after 切出,调用方据此当场判生效内容,不必拿公开页即时值验收。
+            "readback_summary",
             # 补话题(2026-08-08):applied.topics 走上面 applied 那一项透传;这里补它的
             # 明细键。存量视频笔记补话题的回执靠它们(追加语义 + 平台实况 + 逐项失败)。
             "topics_existing", "topics_added", "topics_truncated", "topics_failed",

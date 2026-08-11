@@ -272,6 +272,43 @@ async def test_poll_permission_alarm_fields(tmp_path, monkeypatch):
         assert body["permission_restored"]["ok"] is False
 
 
+async def test_poll_surfaces_readback_summary(tmp_path, monkeypatch):
+    """readback_summary 必须真下发到轮询响应 —— 守住 get 端点白名单那行的放行。
+
+    get 端点是"只透传白名单里列出的键"的机制,readback_summary 不在白名单就会**静默**从
+    响应里消失(功能不报错,调用方却再也拿不到当场判定摘要);本仓「白名单吞字段」反复咬人,
+    给这条下发链路钉一个会红的东西。**变异自检**:删掉 rest 端点白名单里的 "readback_summary"
+    那行,本用例的 `"readback_summary" in body` 断言必须转红。
+    """
+    _api_role(monkeypatch)
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("组件摘要号", "uNcSumm", _COOKIES)
+        summary = {
+            "content_length": 16,
+            "content_head": "新正文 #心理学小课堂[话题]#",
+            "content_tail": "新正文 #心理学小课堂[话题]#",
+            "topics_count": 1,
+            "image_count": 5,
+            "last_image": "b.png",
+        }
+        await _seed_job(
+            "nc-summ-1", "note_components", acc, "done",
+            {
+                "status": "done",
+                "applied": {"content": True, "image_add": True},
+                "failed": [],
+                "read_back": {"content": "新正文 #心理学小课堂[话题]#"},
+                "readback_summary": summary,
+            },
+        )
+        body = (await c.get(
+            "/api/note-components/nc-summ-1", headers=bearer(ADMIN_KEY)
+        )).json()
+
+        assert "readback_summary" in body, "白名单没放行 readback_summary,轮询响应把它吞了"
+        assert body["readback_summary"] == summary
+
+
 async def test_poll_error_unknown_and_cross_kind(tmp_path, monkeypatch):
     """一项都没生效 → error + reason;僵死 unknown 标记 → unknown;跨 kind 的 id → 404。"""
     _api_role(monkeypatch)

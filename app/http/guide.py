@@ -244,6 +244,29 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 CHANGELOG_ENTRIES = [
     {
         "date": "2026-08-11",
+        "title": "笔记编辑结果加『当场可判定』回读摘要 readback_summary + 长正文轮询超时指引",
+        "kind": "feature",
+        "summary": "编辑已发布笔记后想立刻确认生效内容(如调价「¥800→¥600」这行改没改),此前只能"
+                   "①自己从完整 read_back dict 捞正文切片,或 ②拿 explore 公开页去比 —— 而公开页有"
+                   "**分钟级传播滞后**,拿它当即时真值会误判成假绿。两件事,对调用方**纯增只放宽**:"
+                   "①**note-components 编辑结果新增 readback_summary**(仅正文或图片被改过时出现):"
+                   "从服务端**已有的回读结果**零成本切出、不多读一次页面,{content_length=正文字数, "
+                   "content_tail=正文末 40 字(价格行/末句从这看), content_head=正文头 30 字, "
+                   "topics_count=正文话题数, image_count=提交后图数, last_image=本次追加的最后一张图 "
+                   "basename(纯删图为 null)};正文未编辑时 content_* / topics_count 为 null,图片未"
+                   "编辑时 image_count / last_image 为 null。⚠️ last_image 是**请求侧**可辨识名而非"
+                   "平台 file_id —— 回读侧只拿得到图**数**,更新页没有零成本可读的 file_id/URL。"
+                   "②**manifest 补长正文耗时指引**:长正文(≥800 字)编辑要逐段清空 + 拟人化逐字重填,"
+                   "最坏 6-8 分钟,**轮询超时建议 ≥600 秒**(实测一篇 890 字用 900 秒才拿到 done、更短"
+                   "默认超时只拿到 unknown,长正文/批量给 900 秒更稳)。**拿到 done 看 "
+                   "result.readback_summary 当场判定,别用 explore 公开页即时值验收**(分钟级传播滞后)。",
+        "endpoints": [
+            "/api/accounts/{account_id}/note-components",
+            "/api/note-components/{job_id}",
+        ],
+    },
+    {
+        "date": "2026-08-11",
         "title": "长正文笔记编辑修复:清空进度制 + 编辑期长度判据放宽 + 话题分隔归一化",
         "kind": "fix",
         "summary": "内容运营调价 4 条既存长笔记时被整个卡死,三个独立缺陷叠加逐条修,"

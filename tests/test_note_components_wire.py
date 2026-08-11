@@ -314,6 +314,16 @@ def test_all_done_submits_once_and_verifies_each_criterion(monkeypatch):
     # 全算成"活动注入的",那是假报
     assert result["topics_injected"] == ["心理学小课堂"]
     assert result["permission_preserved"] is True
+    # readback_summary:正文+图片都改过 → 六个字段全有值,零成本从回读结果切出
+    body = "新正文 #心理学小课堂[话题]#"
+    assert result["readback_summary"] == {
+        "content_length": len(body),
+        "content_head": body[:30],
+        "content_tail": body[-40:],
+        "topics_count": 1,        # 心理学小课堂
+        "image_count": 5,         # 提交后回读图数(images_after)
+        "last_image": "b.png",    # add_images 末项 basename(/tmp/b.png)
+    }
 
 
 def test_readback_mismatch_is_false_not_done(monkeypatch):
@@ -379,9 +389,52 @@ def test_pure_component_request_is_untouched(monkeypatch):
         "open", "components", "publish", "open"
     ]
     assert result["applied"] == {"collection": True, "activity": True}
-    for key in ("topics_dropped", "images_before", "images_after", "read_back"):
+    for key in ("topics_dropped", "images_before", "images_after", "read_back",
+                "readback_summary"):
         assert key not in result, f"纯组件请求不该多出 {key}"
     assert result["aborted_before_submit"] is False
+
+
+# ---------------- readback_summary(2026-08-09 内容运营取证) ----------------
+
+
+def test_readback_summary_content_only_nulls_image_fields(monkeypatch):
+    """纯正文编辑(没动图):摘要在,content_* 有值,image_count / last_image 为 null。"""
+    _wire(monkeypatch, [], body_texts=("旧正文", "新正文"), body_read="新正文")
+
+    result = _run(content="新正文")
+
+    summary = result["readback_summary"]
+    assert summary["content_length"] == len("新正文")
+    assert summary["content_head"] == "新正文" and summary["content_tail"] == "新正文"
+    assert summary["topics_count"] == 0            # 正文里没有话题实体
+    # 没请求图片操作 → 没跑清点,两个图片字段都是 null(不是 0)
+    assert summary["image_count"] is None and summary["last_image"] is None
+
+
+def test_readback_summary_image_only_nulls_content_fields(monkeypatch):
+    """纯追加图片(没动正文):摘要在,image_count / last_image 有值,content_* 为 null。"""
+    _wire(monkeypatch, [], image_counts=(4, 6), body_texts=("正文不变", "正文不变"))
+
+    result = _run(add_images=["/tmp/x.png", "/tmp/y.png"], expected_image_count=4)
+
+    summary = result["readback_summary"]
+    # 正文没编辑 → read_back 里没有 content 键 → content_* / topics_count 全 null
+    assert summary["content_length"] is None and summary["topics_count"] is None
+    assert summary["content_head"] is None and summary["content_tail"] is None
+    assert summary["image_count"] == 6              # 提交后回读图数(images_after)
+    assert summary["last_image"] == "y.png"         # add_images 末项 basename
+
+
+def test_readback_summary_pure_remove_has_null_last_image(monkeypatch):
+    """纯删图(没追加):last_image 为 null —— 回读侧只有图**数**,认不出末图是哪张。"""
+    _wire(monkeypatch, [], image_counts=(4, 3), body_texts=("正文不变", "正文不变"))
+
+    result = _run(remove_image_indexes=[2], expected_image_count=4)
+
+    summary = result["readback_summary"]
+    assert summary["image_count"] == 3
+    assert summary["last_image"] is None
 
 
 def test_pure_component_all_failed_still_skips_publish(monkeypatch):
