@@ -115,7 +115,11 @@ class InteractionBackfillScheduler:
             await session.commit()
         logger.info(
             f"[interaction_backfill_scheduler] 已登记续跑补量:actor={actor} "
-            f"本轮候选 {len(plan['targets'])} 篇"
+            f"本轮候选 {len(plan['targets'])} 篇,"
+            # 被笔记熔断踢掉的篇:多个号都在主页里翻不到它,成因(平台屏蔽 / 排太靠后)
+            # 只能人判。自动续跑是这个功能的主路径,不在这条日志里露出来,就没人会发现
+            # 系统已经安静地不再调度它们了。
+            f"熔断 {len(plan['suppressed_notes'])} 篇"
         )
         return 1
 

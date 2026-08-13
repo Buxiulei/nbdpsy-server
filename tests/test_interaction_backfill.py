@@ -112,6 +112,7 @@ async def _add_interaction(
     action: str = "like",
     status: str = "done",
     done_at: datetime | None = None,
+    detail: str | None = None,
 ) -> None:
     async with db_module.async_session() as s:
         s.add(
@@ -120,6 +121,7 @@ async def _add_interaction(
                 note_id=note_id,
                 action=action,
                 status=status,
+                detail=detail,
                 done_at=done_at or datetime.utcnow(),
             )
         )
@@ -130,6 +132,33 @@ async def _mark_done(actor: int, note_id: str, when: datetime | None = None) -> 
     """把某篇对某号标成"两个动作都做完了"(选篇应当跳过它)。"""
     for action in svc.ACTIONS:
         await _add_interaction(actor, note_id, action, "done", when)
+
+
+async def _mark_all_error(
+    actor: int, note_id: str, detail: str, when: datetime | None = None
+) -> None:
+    """整篇失败的台账形状:定位失败时两个动作都记 error、同一个原因(见 _record_outcome)。"""
+    for action in svc.ACTIONS:
+        await _add_interaction(actor, note_id, action, "error", when, detail)
+
+
+# 两种失败原因的真实形状(原文见 app/browser/matrix_interact.py 的 MatrixInteractError)
+_PROFILE_DEAD = "profile_not_loaded: 发布者主页未渲染出笔记卡片(https://x/user/profile/u)"
+_NOT_FOUND = "note_not_found: 发布者主页未找到 note_id='n' / 标题「t」的笔记卡"
+
+
+async def _vote_not_found(actor: int, note_id: str) -> None:
+    """某号报「这篇在发布者主页上找不到」(笔记熔断数的就是这种票)。
+
+    时刻**刻意取在 error 冷却期之外**:落在冷却期内的话,那篇本来就会被冷却挡掉,
+    断言就测不出熔断本身有没有生效(假绿)。
+    """
+    await _mark_all_error(
+        actor,
+        note_id,
+        _NOT_FOUND,
+        datetime.utcnow() - timedelta(hours=svc.ERROR_RETRY_COOLDOWN_HOURS + 1),
+    )
 
 
 async def _plan(scope, target=None, actor=None, limit=None, now=None) -> dict:
@@ -420,6 +449,258 @@ async def test_actor_with_least_usage_today_is_picked(wired_db):
     assert (await _plan(svc.SCOPE_ACCOUNT, target=1))["actor_account_id"] == 3
 
 
+# ---------------- 断路器A:actor 熔断(2026-08-13 事故) ----------------
+#
+# 事故:号12 自 08-08 起 96 连败,全部同一个 profile_not_loaded(登录态在,但打开任何
+# 发布者主页都渲染不出笔记卡片)。它**没撞验证墙**,"撞墙即停"那套一次都没触发,风控台账
+# 零记录,error 冷却一过就再试 —— 96 次白开的会话全是实打实的风控暴露。
+
+
+async def test_actor_breaker_blocks_pinned_actor(wired_db, monkeypatch):
+    """连败 N 次的号本轮不派活 —— **硬指定它也拦得住**。
+
+    这正是号12 那条生产路径:任务登记时 actor 就定死了,execute 拿着自己的 id 重挑一次。
+    只在"挑最闲的号"那条分支上熔断的话,这条路径一次都拦不到。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(2):  # 两篇整篇失败 = 4 行
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, now - timedelta(minutes=i + 1))
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2)
+    assert plan["actor_account_id"] is None
+    assert plan["targets"] == []
+    assert "熔断" in plan["reason"]
+
+
+async def test_actor_breaker_lets_healthy_actor_take_over(wired_db, monkeypatch):
+    """半死号被跳过,健康号顶上 —— 熔断掐的是这个号,不是整条补量链路。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    await _add_account(2)  # 半死号
+    await _add_account(3)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(2):  # 号2 今日用量 2
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, now - timedelta(minutes=i + 1))
+    # 号3 今日用量 3,比号2 高 —— 不熔断的话"挑最闲的号"会挑中号2,这条断言才有鉴别力
+    for i in range(3):
+        await _mark_done(3, f"别的篇{i}")
+
+    assert (await _plan(svc.SCOPE_ACCOUNT, target=1))["actor_account_id"] == 3
+
+
+async def test_actor_breaker_needs_n_consecutive_errors(wired_db, monkeypatch):
+    """不到 N 次不熔断:偶发抖动不该让一个号停工(否则一次渲染失败就把号判死)。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 6)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(2):  # 4 行,差两行到 6
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, now - timedelta(minutes=i + 1))
+
+    assert (await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2))["actor_account_id"] == 2
+
+
+async def test_actor_breaker_ignores_partial_failures(wired_db, monkeypatch):
+    """赞成了藏没成**不算连败**:那是页内交互问题,不是账号半死,不该停这个号的工。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(3):
+        await _add_interaction(2, f"半{i}", "like", "done", now - timedelta(minutes=i + 1))
+        await _add_interaction(
+            2, f"半{i}", "collect", "error", now - timedelta(minutes=i + 1),
+            "收藏_button_not_found",
+        )
+
+    assert (await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2))["actor_account_id"] == 2
+
+
+async def test_actor_breaker_half_open_probes_exactly_one_note(wired_db, monkeypatch):
+    """半开探测:最新那条 error 过了冷却期就放行一轮,**那一轮只做一篇**。
+
+    没有半开就是死锁 —— 熔断的号永不被选中,也就永远产不出成功记录来复位。但探测也不能
+    按整轮上限(5 篇)放:真让半死的号一次探 5 篇,每个冷却周期照旧白开 5 次页,
+    断路器就只剩一半意义了。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_COOLDOWN_H", 12)
+    monkeypatch.setattr(svc.settings, "NOTE_INTERACTION_ROUND_LIMIT", 5)
+    await _add_account(1)
+    await _add_account(2)
+    for i in range(5):  # 有 5 篇可做,不熔断的话会一次派满
+        await _add_note(1, f"n{i}")
+    stale = datetime.utcnow() - timedelta(hours=13)
+    for i in range(2):
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, stale - timedelta(minutes=i))
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2)
+    assert plan["actor_account_id"] == 2
+    assert len(plan["targets"]) == 1
+
+
+async def test_healthy_actor_still_gets_a_full_round(wired_db, monkeypatch):
+    """探测成功复位后照常做满一轮 —— 半开的"只做一篇"不能漏到健康号头上。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    monkeypatch.setattr(svc.settings, "NOTE_INTERACTION_ROUND_LIMIT", 5)
+    await _add_account(1)
+    await _add_account(2)
+    for i in range(5):
+        await _add_note(1, f"n{i}")
+
+    assert len((await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2))["targets"]) == 5
+
+
+async def test_actor_breaker_resets_after_success(wired_db, monkeypatch):
+    """成功即**自然复位**:最近 N 条不再全是 error,不需要任何显式复位逻辑。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(2):
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, now - timedelta(minutes=i + 2))
+    # 半开那次探测成功了:最新一条是 done
+    await _add_interaction(2, "探测成功的篇", "like", "done", now)
+
+    assert (await _plan(svc.SCOPE_ACCOUNT, target=1, actor=2))["actor_account_id"] == 2
+
+
+# ---------------- 断路器B:笔记熔断(2026-08-13 事故) ----------------
+#
+# 事故:三篇 views=0/0/1 的笔记被全部 9 个 actor 报 note_not_found,各积了 16-18 个 error
+# 还在被冷却重试。actor 的报告是准确的 —— 那几篇大概率被平台屏蔽,主页根本不展示。
+
+
+async def test_note_breaker_suppresses_note_reported_by_k_actors(wired_db, monkeypatch):
+    """≥K 个不同号报"主页找不到" → 该篇移出候选,并出现在 suppressed_notes 里。
+
+    带出来是给**运营**看的:平台屏蔽不是系统能自己修的,不露出来就没人会去核实。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    await _add_account(1)
+    for actor in (2, 3, 4):
+        await _add_account(actor)
+    await _add_note(1, "屏蔽篇")
+    await _add_note(1, "正常篇")
+    for actor in (2, 3, 4):
+        await _vote_not_found(actor, "屏蔽篇")
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["正常篇"]
+    assert plan["suppressed_notes"] == ["屏蔽篇"]
+
+
+async def test_note_breaker_needs_k_distinct_actors(wired_db, monkeypatch):
+    """K-1 个号报找不到还不算数:一两个号看不到可能是它自己的会话问题。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    await _add_account(1)
+    for actor in (2, 3, 4):
+        await _add_account(actor)
+    await _add_note(1, "存疑篇")
+    for actor in (2, 3):
+        await _vote_not_found(actor, "存疑篇")
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["存疑篇"]
+    assert plan["suppressed_notes"] == []
+
+
+async def test_note_breaker_only_counts_note_not_found(wired_db, monkeypatch):
+    """只认"主页找不到"这一种错:按钮点不动是页内交互问题,不是这篇被平台屏蔽。"""
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    await _add_account(1)
+    for actor in (2, 3, 4):
+        await _add_account(actor)
+    await _add_note(1, "点不动的篇")
+    stale = datetime.utcnow() - timedelta(hours=svc.ERROR_RETRY_COOLDOWN_HOURS + 1)
+    for actor in (2, 3, 4):
+        await _mark_all_error(actor, "点不动的篇", "note_card_no_box: 命中卡片坐标不可得", stale)
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["点不动的篇"]
+    assert plan["suppressed_notes"] == []
+
+
+async def test_note_breaker_ignores_votes_from_invalid_actor(wired_db, monkeypatch):
+    """**失信号的票不算数**:号12 那种半死号对每篇都报找不到,票恒为真、不承载信息。
+
+    它现在是 restricted(人工止血置的),历史票据此自动失效 —— 否则每篇笔记都白拿它
+    一票,K 变相打了折,实际只需 K-1 个真信号就熔断。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_account(3)
+    await _add_account(12, cookie_status="restricted")  # 半死号,已人工止血
+    await _add_note(1, "存疑篇")
+    for actor in (2, 3, 12):
+        await _vote_not_found(actor, "存疑篇")
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["存疑篇"]
+    assert plan["suppressed_notes"] == []
+
+
+async def test_note_breaker_ignores_votes_from_tripped_actor(wired_db, monkeypatch):
+    """K-1 个有资格的号 + 1 个**被断路器A 熔断**的号 → 不熔断。
+
+    这也是两个断路器**结算顺序不能调**的原因:A 先跑完,B 才知道谁的票还算数。
+    将来任何 actor 半死(还没来得及被人工置 restricted),先被 A 熔断,票随之失效。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    for actor in (2, 3, 4):
+        await _add_account(actor)
+    await _add_note(1, "存疑篇")
+    for actor in (2, 3, 4):
+        await _vote_not_found(actor, "存疑篇")
+    # 号4 半死:再连败一篇,最近 4 行(这篇 2 行 + 存疑篇那 2 行)全是 error → 被 A 熔断
+    await _mark_all_error(4, "dead", _PROFILE_DEAD, datetime.utcnow())
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert plan["actor_account_id"] in (2, 3)
+    assert [t["note_id"] for t in plan["targets"]] == ["存疑篇"]
+    assert plan["suppressed_notes"] == []
+
+
+async def test_note_breaker_suppression_survives_note_cooldown_expiry(
+    wired_db, monkeypatch
+):
+    """熔断是**永久**的:冷却期过了也不放它回候选池(平台屏蔽不会自己好)。
+
+    恢复路径是人工的 —— 运营核实笔记恢复可见后,删掉该 note_id 的 error 台账行即可
+    重新入池(见 plan_round docstring)。这里顺带把那条路径也验一遍。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    await _add_account(1)
+    for actor in (2, 3, 4):
+        await _add_account(actor)
+    await _add_note(1, "屏蔽篇")
+    for actor in (2, 3, 4):
+        await _vote_not_found(actor, "屏蔽篇")  # 票本身已在冷却期之外
+
+    assert (await _plan(svc.SCOPE_ACCOUNT, target=1))["targets"] == []
+
+    # 运营核实后手工清票(DELETE ... WHERE note_id=? AND status='error')
+    async with db_module.async_session() as s:
+        for row in (await s.execute(select(NoteInteraction))).scalars().all():
+            await s.delete(row)
+        await s.commit()
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["屏蔽篇"]
+    assert plan["suppressed_notes"] == []
+
+
 # ---------------- 执行:不开浏览器 / 抖动 / 撞墙 / 记账 ----------------
 
 
@@ -434,6 +715,28 @@ async def test_nothing_to_do_never_opens_browser(wired_db, no_browser):
     assert result["picked"] == 0
     assert "error" not in result
     assert result["reason"]
+    assert _FakeClient.instances == []
+
+
+async def test_tripped_actor_never_opens_browser(wired_db, no_browser, monkeypatch):
+    """熔断的号**连一次会话都不起** —— 这才是断路器要省下的东西。
+
+    号12 那 96 次连败每一次都真起了 camoufox、真进了主页,失败的只是最后一步;省掉的
+    不是几秒 CPU,是 96 次实打实的风控暴露。任务登记时 actor 已定死,所以拦必须拦在
+    execute 重挑那一次上。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_ACTOR_BREAKER_N", 4)
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "n0")
+    now = datetime.utcnow()
+    for i in range(2):
+        await _mark_all_error(2, f"dead{i}", _PROFILE_DEAD, now - timedelta(minutes=i + 1))
+
+    result = await svc.execute(2, {"scope": svc.SCOPE_ACCOUNT, "target_account_id": 1})
+    assert result["picked"] == 0
+    assert "error" not in result  # 熔断不是失败,是"这轮不该派活"
+    assert "熔断" in result["reason"]
     assert _FakeClient.instances == []
 
 
@@ -781,9 +1084,10 @@ def api_role(monkeypatch):
     monkeypatch.setenv("NBDPSY_ROLE", "api")
 
 
-async def _seed_matrix() -> None:
-    await seed_account("号一", "u-1", _COOKIES)
-    await seed_account("号二", "u-2", _COOKIES)
+async def _seed_matrix(count: int = 2) -> None:
+    """灌 count 个 valid 矩阵号(默认两个:一个被互动、一个去互动)。"""
+    for index in range(1, count + 1):
+        await seed_account(f"号{index}", f"u-{index}", _COOKIES)
     async with db_module.async_session() as s:
         for account in (await s.execute(select(XhsAccount))).scalars().all():
             account.cookie_status = "valid"
@@ -807,6 +1111,29 @@ async def test_rest_start_backfill_queues_job(tmp_path, monkeypatch, api_role):
             f"/api/interaction-backfills/{body['job_id']}", headers=bearer(ADMIN_KEY)
         )
         assert poll.status_code == 200 and poll.json()["status"] == "queued"
+
+
+async def test_rest_response_carries_suppressed_notes(tmp_path, monkeypatch, api_role):
+    """被笔记熔断踢掉的篇要出现在**触发回执**里。
+
+    平台屏蔽不是系统能自己修的,只能靠人去核实;系统这边只会安静地不再调度它们 ——
+    回执里不露出来,就没有任何地方会告诉运营"这几篇你得去看看"。
+    """
+    monkeypatch.setattr(svc.settings, "INTERACTION_NOTE_BREAKER_ACTORS", 3)
+    async with rest_client(tmp_path, monkeypatch) as client:
+        await _seed_matrix(4)
+        await _add_note(1, "屏蔽篇")
+        await _add_note(1, "正常篇")
+        for actor in (2, 3, 4):
+            await _vote_not_found(actor, "屏蔽篇")
+
+        r = await client.post(
+            "/api/interaction-backfills",
+            json={"scope": "account", "target_account_id": 1},
+            headers=bearer(ADMIN_KEY),
+        )
+        assert r.status_code == 202, r.text
+        assert r.json()["suppressed_notes"] == ["屏蔽篇"]
 
 
 async def test_rest_skips_when_nothing_to_do(tmp_path, monkeypatch, api_role):

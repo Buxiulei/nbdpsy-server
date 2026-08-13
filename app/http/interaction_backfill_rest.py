@@ -37,8 +37,11 @@ MANIFEST_ENTRIES = [
             "actor_account_id": "body,int|None(scope=newcomer 必填:**去互动**的那个新号)",
             "limit": "body,int|None(本轮最多做几篇;只能往小压,超过单轮上限按上限算)",
         },
-        "returns": '{job_id, actor_account_id, status:"queued"} —— 挑不出可做的活时 '
-                   'job_id=null、status="skipped" 并附 reason(不建任务)',
+        "returns": '{job_id, actor_account_id, status:"queued", suppressed_notes:[note_id]} '
+                   '—— 挑不出可做的活时 job_id=null、status="skipped" 并附 reason(不建任务)。'
+                   'suppressed_notes = 被**笔记熔断**永久移出候选的篇(见 notes),'
+                   '**这是要人去核实的清单**,不是错误;里面既可能是被平台屏蔽的,'
+                   '也可能是在主页里排太靠后翻不到的,系统区分不了',
         "errors": "403=非管理员;422=scope 非法或 scope 与必填 id 不匹配;"
                   "429=运营者未完成任务配额已满",
         "notes": "异步契约:起后台浏览器(headed 真屏)在**一次会话里**逐篇进笔记详情点赞 + 收藏;"
@@ -57,7 +60,22 @@ MANIFEST_ENTRIES = [
                  "已做完的篇直接跳过**不开浏览器**;优先新发现的笔记、其次最近发布的。"
                  "互动方由系统挑(今天用得最少的那个 valid 号),不是调用方指定——"
                  "scope=newcomer 除外,那正是指定新号去补别人的历史。"
-                 "**非幂等**:僵死不自动重跑(重跑会重复开页、吃掉当日配额、放大风控暴露)。",
+                 "**非幂等**:僵死不自动重跑(重跑会重复开页、吃掉当日配额、放大风控暴露)。"
+                 "**两个断路器**(2026-08-13 事故驱动,专治「白开注定失败的会话」):"
+                 "①**actor 熔断** —— 最近 "
+                 f"INTERACTION_ACTOR_BREAKER_N(默认 {settings.INTERACTION_ACTOR_BREAKER_N})"
+                 "条互动台账行全是 error 的号本轮不派活(实据:一个号会话半死后 96 连败,"
+                 "全是同一个 profile_not_loaded,且因为没撞验证墙,「撞墙即停」那套一次都没触发);"
+                 f"熔断 INTERACTION_ACTOR_BREAKER_COOLDOWN_H(默认 "
+                 f"{settings.INTERACTION_ACTOR_BREAKER_COOLDOWN_H})小时后**半开探测**放行一轮"
+                 "(那一轮只做 1 篇),成功即自动复位。②**笔记熔断** —— 一篇被 ≥"
+                 f"INTERACTION_NOTE_BREAKER_ACTORS(默认 {settings.INTERACTION_NOTE_BREAKER_ACTORS})"
+                 "个**有资格**(valid 且未被 ① 熔断)的不同号在**发布者主页里翻不到**它,"
+                 "即**永久**移出候选并出现在 suppressed_notes 里。⚠️ 翻不到有两种成因、台账区分不了:"
+                 "被平台屏蔽/限流(实据:三篇 views=0 的笔记被全部 9 个号报找不到),或它在主页里"
+                 "排得太靠后、超出了定位的滚动预算。两种情况下继续每轮重试都同样徒劳,所以一律停调度,"
+                 "**成因交给人判**:请人工去平台看那几篇还在不在、在主页第几屏;确认它又该补了之后,"
+                 "删掉 note_interactions 里该 note_id 的 error 行即可重新入池(系统不自动恢复)。",
     },
     {
         "method": "GET", "path": "/api/interaction-backfills/{job_id}",
@@ -139,6 +157,8 @@ async def start_interaction_backfill_endpoint(
         "actor_account_id": result["actor_account_id"],
         "status": "queued" if result["job_id"] else "skipped",
         "reason": result["reason"],
+        # 被笔记熔断永久移出候选的篇:成因只能人判,不露出来就没人会去核实
+        "suppressed_notes": result["suppressed_notes"],
     }
 
 

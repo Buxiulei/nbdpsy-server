@@ -13,6 +13,11 @@
 3. **间隔抖动**:两篇之间 ``random.uniform(60, 240)`` 秒,**绝不连续快跑**;
 4. **共用 ``browser_slot``**:不额外起并发,与其它浏览器任务排队。
 
+这四层管的是"补得多快",管不了"白开多少次注定失败的会话",所以另有**两个断路器**
+(2026-08-13 事故驱动,判据与实据见 ``plan_round`` 上面那段注释):半死的 actor 熔断
+(带半开探测)、被多个号报"主页找不到"的笔记熔断。两者都只在**选篇/选 actor 阶段**判,
+浏览器层一个字不动 —— 注定失败的会话压根不该被派出去。
+
 **一轮 = 一个 actor 一次会话里做 ≤ M 篇**,不是"一篇一次会话"。会话频次才是被弹墙的
 直接原因(见上),所以宁可一次会话开久一点(整轮全程持有 ``browser_slot``,最长
 ``ROUND_BUDGET_SECONDS``),也不把 5 篇拆成 5 次起浏览器。这是本模块唯一一处**刻意
@@ -85,6 +90,15 @@ ROUND_BUDGET_SECONDS = 1200
 # 都拿它白开一次页。冷却期内不再选它,过期可再试一次。
 ERROR_RETRY_COOLDOWN_HOURS = 24
 
+# 笔记熔断认的那一种错:在发布者主页里翻不到这篇笔记卡。它与"按钮点不动"不同 ——
+# 后者是页内交互问题(卡片找到了),前者是**这篇根本没出现在主页上**。
+#
+# ⚠️ 翻不到有两种成因,台账区分不了:①这篇被平台屏蔽/限流,主页不展示它(运营核实事项);
+# ②它在主页里排得太靠后,超出了定位的滚动预算(定位侧的债)。**两种情况下继续每轮重试
+# 都同样徒劳**,所以熔断一视同仁地停掉调度,再把篇目列进 ``suppressed_notes`` 交给人判 ——
+# 别在文案里把它一口咬定成"被屏蔽了"。
+NOTE_MISSING_ERROR_KIND = "note_not_found"
+
 # 自动路径给各 actor 散开的窗口(秒):一次同步能触发好几个号,不散开就是一拥而上。
 AUTO_WINDOW_SECONDS = 1800
 
@@ -156,6 +170,144 @@ def _note_state(
     return complete, cooling
 
 
+# ---------------- 两个断路器(2026-08-13 事故驱动) ----------------
+#
+# 上面那几层闸管的是"补得多快",管不了"白开多少次注定失败的会话"。事故实据:
+#
+# - **actor 侧**:号12 自 08-08 起 96 连败,全部同一个 ``profile_not_loaded``(登录态在,
+#   但打开任何发布者主页都渲染不出笔记卡片 —— 账号会话半死)。它**没撞验证墙**,所以
+#   "撞墙即停 → 置 restricted"那套一次都没触发,风控台账零记录;error 冷却一过就再试,
+#   96 次白开的浏览器会话全是实打实的风控暴露。
+# - **笔记侧**:三篇 views=0/0/1 的笔记被全部 9 个 actor 报 ``note_not_found``,各积了
+#   16-18 个 error 还在被冷却重试。actor 的报告是准确的 —— 那几篇大概率被平台屏蔽,
+#   主页根本不展示,再重试一万次也是徒劳。
+#   ⚠️ 但建库时刻按 K=3 实测,达阈值的**共 10 篇**,其中 6 篇 views 在 67~520 之间,
+#   不像被屏蔽的 —— ``note_not_found`` 混了第二种成因(它在主页里排太靠后,超出定位的
+#   滚动预算)。熔断对两者一视同仁(继续重试都同样徒劳),但**别在对外文案里一口咬定
+#   "被屏蔽了"**,成因交给人判。见 ``NOTE_MISSING_ERROR_KIND``。
+#
+# 两者都在**选篇/选 actor 阶段**判掉,浏览器层一个字不动:白开的会话根本不该被派出去。
+
+# 上一次为某个 actor 打过的熔断日志(actor_id → 错误类别):只在类别变化时打一次。
+# 熔断期间每轮都跳过它,不去重的话日志会被同一句话刷屏,真出问题反而看不见
+# (手法照抄 ``InteractionBackfillScheduler._last_idle_reason``)。
+_last_breaker_log: dict[int, str] = {}
+
+# 断路器A 的三种结论
+BREAKER_CLOSED = "closed"  # 正常,照常派活
+BREAKER_OPEN = "open"      # 熔断,本轮不派活
+BREAKER_PROBE = "probe"    # 半开,放行但**本轮只做一篇**
+
+
+def _error_kind(detail: Optional[str]) -> str:
+    """从台账 ``detail`` 里取错误类别:``note_not_found: 主页没有这篇 | forensics=...``
+    → ``note_not_found``。
+
+    先切 ``|`` 再切 ``:`` —— 反过来会被取证 JSON 里的冒号切坏。
+    """
+    head = (detail or "").split("|", 1)[0]
+    return head.split(":", 1)[0].strip()[:64] or "unknown"
+
+
+def _actor_breaker_state(
+    rows: list[NoteInteraction], actor_id: int, now: datetime
+) -> tuple[str, Optional[str]]:
+    """这个 actor 的断路器状态 → ``(closed/open/probe, 最近的错误类别)``。
+
+    判据:该 actor 最近 ``INTERACTION_ACTOR_BREAKER_N`` 条台账行(**不分笔记**,按
+    ``done_at`` 倒序,同刻按 id 兜底)**全是 error** 即熔断。一篇失败落两行(赞 + 藏),
+    故默认的 6 ≈ 连续三篇整篇失败 —— 单动作失败(赞成了藏没成)会留下一条 done 行,
+    自然不算数,那种是页内交互问题,不是账号半死。
+
+    **半开探测**:最新那条 error 距今超过 ``INTERACTION_ACTOR_BREAKER_COOLDOWN_H`` 小时
+    就放它去探一次。没有半开就是死锁 —— 被熔断的号永不被选中,也就永远产不出成功记录
+    来复位。探测成功即**自然复位**(最近 N 条不再全 error);再失败则从新的那条 error
+    重新计时。半开这一轮**只做一篇**(见 ``plan_round`` 里 take 的收窄):一轮上限是 5 篇,
+    真让半死的号一次探 5 篇,等于每个冷却周期照旧白开 5 次页,断路器就只剩一半意义了。
+    """
+    window = max(1, int(settings.INTERACTION_ACTOR_BREAKER_N))
+    mine = sorted(
+        (row for row in rows if row.actor_account_id == actor_id),
+        key=lambda row: (row.done_at, row.id or 0),
+        reverse=True,
+    )[:window]
+    if len(mine) < window or any(row.status != "error" for row in mine):
+        return BREAKER_CLOSED, None
+    kind = _error_kind(mine[0].detail)
+    cooldown = timedelta(hours=max(0, int(settings.INTERACTION_ACTOR_BREAKER_COOLDOWN_H)))
+    if mine[0].done_at <= now - cooldown:
+        return BREAKER_PROBE, kind
+    return BREAKER_OPEN, kind
+
+
+def _settle_actor_breaker(
+    rows: list[NoteInteraction], actor_ids: list[int], now: datetime
+) -> tuple[set[int], set[int]]:
+    """结算 actor 熔断 → ``(熔断的, 半开待探的)``。
+
+    **必须在笔记熔断之前跑**:后者要拿这里的结果判投票资格。
+
+    熔断时告警一次(带 actor id 与最近错误类别),恢复/半开时清掉记录 —— 下次再熔断会
+    重新告警。不去重的话熔断期间每轮都刷同一句话,真出问题反而看不见。
+    """
+    tripped: set[int] = set()
+    probing: set[int] = set()
+    for actor_id in actor_ids:
+        state, kind = _actor_breaker_state(rows, actor_id, now)
+        if state == BREAKER_OPEN:
+            tripped.add(actor_id)
+            if _last_breaker_log.get(actor_id) != kind:
+                logger.warning(
+                    f"[interaction_backfill] 账号{actor_id} 已熔断:最近 "
+                    f"{settings.INTERACTION_ACTOR_BREAKER_N} 条互动全部失败({kind}),"
+                    f"本轮不派活;"
+                    f"{settings.INTERACTION_ACTOR_BREAKER_COOLDOWN_H}h 后半开探测一次"
+                )
+                _last_breaker_log[actor_id] = kind
+            continue
+        _last_breaker_log.pop(actor_id, None)
+        if state == BREAKER_PROBE:
+            probing.add(actor_id)
+            logger.info(
+                f"[interaction_backfill] 账号{actor_id} 熔断冷却已过({kind}),"
+                f"本轮半开探测**只做一篇**;成功即自动复位"
+            )
+    return tripped, probing
+
+
+def _suppressed_note_ids(rows: list[NoteInteraction], voters: set[int]) -> set[str]:
+    """结算笔记熔断:被 ≥K 个**有资格**的不同 actor 在主页里翻不到的篇。
+
+    **只数有资格 actor 的票**(``voters`` = valid 且未被 actor 熔断)。理由是证据偏倚:
+    号12 那种半死 actor 对**每一篇**笔记都报 ``note_not_found``,它的票恒为真、不承载
+    任何信息;裸数票会让 K 变相打折(多一个半死号就少要一个真信号)。它现在是
+    ``restricted``,历史票据此自动失效;将来任何 actor 半死,先被断路器A 熔断,票随之失效。
+
+    **不需要清票逻辑**:``note_interactions`` 是 ``UNIQUE(actor, note, action)`` 覆盖式
+    更新 —— 半死 actor 恢复后重试成功会把自己那两行 error 覆盖成 done,票自动翻转。
+    """
+    quorum = max(1, int(settings.INTERACTION_NOTE_BREAKER_ACTORS))
+    votes: dict[str, set[int]] = {}
+    for row in rows:
+        if (
+            row.actor_account_id in voters
+            and row.status == "error"
+            and _error_kind(row.detail) == NOTE_MISSING_ERROR_KIND
+        ):
+            votes.setdefault(row.note_id, set()).add(row.actor_account_id)
+    return {note_id for note_id, actors in votes.items() if len(actors) >= quorum}
+
+
+def _no_plan(reason: str, suppressed: Optional[list[str]] = None) -> dict:
+    """挑不出东西来时的统一返回形状(**不是错误**,补完了就是补完了)。"""
+    return {
+        "actor_account_id": None,
+        "targets": [],
+        "reason": reason,
+        "suppressed_notes": suppressed or [],
+    }
+
+
 async def plan_round(
     session,
     scope: str,
@@ -164,10 +316,29 @@ async def plan_round(
     limit: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> dict:
-    """规划一轮补量:挑 actor + 挑篇,**已按四层闸里的前两层截断**。
+    """规划一轮补量:挑 actor + 挑篇,**已按四层闸里的前两层 + 两个断路器截断**。
 
-    返回 ``{"actor_account_id": int|None, "targets": [...], "reason": str|None}``;
-    挑不出东西来时 actor/targets 为空并给 ``reason``(**不是错误**,补完了就是补完了)。
+    返回 ``{"actor_account_id": int|None, "targets": [...], "reason": str|None,
+    "suppressed_notes": [note_id...]}``;挑不出东西来时 actor/targets 为空并给
+    ``reason``(**不是错误**,补完了就是补完了)。
+
+    ``suppressed_notes`` = 本轮被**笔记熔断**踢出候选的篇(见下),带出来是给人看的:
+    多个号都在主页里翻不到它,系统这边只会安静地不再调度 —— 不列出来就没人会去查那是
+    平台屏蔽了,还是它在主页里排太靠后翻不到(见 ``NOTE_MISSING_ERROR_KIND`` 注释)。
+
+    两个断路器**按顺序结算,顺序不能调**(2026-08-13 事故驱动,判据与理由见上面那段注释):
+
+    1. **actor 熔断**:最近 N 条台账行全是 error 的号本轮不派活;冷却过后半开探测放它
+       走一轮,那一轮**只做一篇**(探 5 篇等于照旧白开 5 次页);
+    2. **笔记熔断**:被 ≥K 个**有资格**(valid 且未被第 1 步熔断)的不同 actor 报过
+       ``note_not_found`` 的篇移出候选、**不再调度**。先跑第 1 步正是为了让半死 actor
+       的票在这一步失效 —— 它对每篇都报找不到,票恒为真、不承载信息。**它只判"多个号
+       都翻不到"这个事实,不判成因**(屏蔽 vs 主页里排太靠后),成因交给人。
+
+    **笔记熔断不自动恢复**(平台屏蔽不会自己好,定位翻不到也不会自己好)。人工核实、
+    确认这篇又该补了之后的恢复路径:**手工删掉该 note_id 的 error 台账行**
+    (``DELETE FROM note_interactions WHERE note_id=? AND status='error'``),票清零,
+    下一轮它自然重新入池 —— 不需要任何开关。
 
     三种 scope 的选篇口径:
 
@@ -193,7 +364,7 @@ async def plan_round(
     """
     now = now or datetime.utcnow()
     if scope not in SCOPES:
-        return {"actor_account_id": None, "targets": [], "reason": f"未知 scope: {scope}"}
+        return _no_plan(f"未知 scope: {scope}")
 
     accounts = (await session.execute(select(XhsAccount))).scalars().all()
     by_id = {a.id: a for a in accounts}
@@ -204,13 +375,11 @@ async def plan_round(
     # ── 谁去互动(actor 候选)与互动谁(owner 范围) ──
     if scope == SCOPE_NEWCOMER:
         if actor_account_id is None:
-            return {"actor_account_id": None, "targets": [],
-                    "reason": "scope=newcomer 必须指定 actor_account_id"}
+            return _no_plan("scope=newcomer 必须指定 actor_account_id")
         owners = {a.id for a in accounts if a.id != actor_account_id}
     elif scope == SCOPE_ACCOUNT:
         if target_account_id is None:
-            return {"actor_account_id": None, "targets": [],
-                    "reason": "scope=account 必须指定 target_account_id"}
+            return _no_plan("scope=account 必须指定 target_account_id")
         owners = {target_account_id}
     else:
         owners = {a.id for a in accounts}
@@ -218,8 +387,31 @@ async def plan_round(
     actor_pool = [actor_account_id] if actor_account_id is not None else list(valid_ids)
     actor_pool = [aid for aid in actor_pool if aid in valid_ids]
     if not actor_pool:
-        return {"actor_account_id": None, "targets": [],
-                "reason": "没有可用的互动账号(需 cookie_status=valid 且有 cookie)"}
+        return _no_plan("没有可用的互动账号(需 cookie_status=valid 且有 cookie)")
+
+    # 台账按**全部 valid 号**取(不只本轮的 actor_pool):笔记熔断要数"有资格 actor 的票",
+    # 那是个全局判据,只看 actor_pool 会因为 scope 不同而数出不同的票。
+    ledger = (
+        (
+            await session.execute(
+                select(NoteInteraction).where(
+                    NoteInteraction.actor_account_id.in_(valid_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # ── 断路器A:actor 熔断(**先于笔记熔断结算**,它的结果是后者的投票资格) ──
+    tripped, probing = _settle_actor_breaker(ledger, valid_ids, now)
+    blocked = [aid for aid in actor_pool if aid in tripped]
+    actor_pool = [aid for aid in actor_pool if aid not in tripped]
+    if not actor_pool:
+        return _no_plan(
+            f"候选互动账号 {blocked} 已因连续失败熔断,本轮不派活"
+            f"({settings.INTERACTION_ACTOR_BREAKER_COOLDOWN_H}h 后半开探测一次)"
+        )
 
     # ── 候选笔记:公开 + 有 note_id + 作者有 user_id,按优先级排好序 ──
     notes = (
@@ -248,21 +440,26 @@ async def plan_round(
         n for n in notes
         if (owner := by_id.get(n.account_id)) is not None and (owner.user_id or "").strip()
     ]
-    if not notes:
-        return {"actor_account_id": None, "targets": [],
-                "reason": "没有符合条件的公开笔记(只互动 permission_code=0 且已知 note_id 的笔记)"}
 
-    ledger = (
-        (
-            await session.execute(
-                select(NoteInteraction).where(
-                    NoteInteraction.actor_account_id.in_(actor_pool)
-                )
-            )
-        )
-        .scalars()
-        .all()
+    # ── 断路器B:笔记熔断(只数有资格 actor 的票,资格已由断路器A 结算过) ──
+    suppressed_all = _suppressed_note_ids(
+        ledger, {aid for aid in valid_ids if aid not in tripped}
     )
+    suppressed = sorted({n.note_id for n in notes if n.note_id in suppressed_all})
+    notes = [n for n in notes if n.note_id not in suppressed_all]
+    if not notes:
+        detail = (
+            f";另有 {len(suppressed)} 篇被熔断(≥"
+            f"{settings.INTERACTION_NOTE_BREAKER_ACTORS} 个号在发布者主页翻不到它,"
+            f"需人工核实)"
+            if suppressed
+            else ""
+        )
+        return _no_plan(
+            "没有符合条件的公开笔记(只互动 permission_code=0 且已知 note_id 的笔记)"
+            + detail,
+            suppressed,
+        )
 
     daily_cap = max(1, int(settings.NOTE_INTERACTION_DAILY_LIMIT))
     round_cap = _round_limit_of(limit)
@@ -289,10 +486,14 @@ async def plan_round(
             if capped
             else "候选账号都没有可补的笔记(都做完了或还在失败冷却期内)"
         )
-        return {"actor_account_id": None, "targets": [], "reason": reason}
+        return _no_plan(reason, suppressed)
 
     used, actor_id, eligible = best
     take = min(round_cap, daily_cap - used)
+    if actor_id in probing:
+        # 半开探测只做一篇:一轮上限是 5 篇,让半死的号一次探 5 篇等于每个冷却周期照旧
+        # 白开 5 次页 —— 断路器就只剩一半意义了。探成了下一轮自然复位,照常做满一轮。
+        take = 1
     targets = [
         {
             "note_row_id": n.id,
@@ -303,7 +504,12 @@ async def plan_round(
         }
         for n in eligible[:take]
     ]
-    return {"actor_account_id": actor_id, "targets": targets, "reason": None}
+    return {
+        "actor_account_id": actor_id,
+        "targets": targets,
+        "reason": None,
+        "suppressed_notes": suppressed,
+    }
 
 
 # ---------------- 任务登记(REST 手工 / 台账同步自动) ----------------
@@ -321,15 +527,23 @@ async def start_backfill(
     号锁与 profile 也按它走);具体做哪几篇则留到执行时再挑一次 —— 排队期间日配额可能
     已被别的轮次吃掉,拿登记那一刻的快照去做等于绕过日上限。
 
-    挑不出 actor(都达日上限 / 没有可补的笔记)时**不登记任务**,返回 ``job_id=None`` +
-    ``reason``:开一个注定空转的浏览器任务毫无意义。
+    挑不出 actor(都达日上限 / 没有可补的笔记 / 号被熔断)时**不登记任务**,返回
+    ``job_id=None`` + ``reason``:开一个注定空转的浏览器任务毫无意义。
+
+    ``suppressed_notes`` 原样带出:被笔记熔断踢掉的篇是**人工核实事项**(多个号都在主页
+    里翻不到它),不在回执里露出来就没人会发现 —— 系统这边只会安静地不再调度它们。
     """
     async with get_session() as session:
         plan = await plan_round(
             session, scope, target_account_id, actor_account_id, limit
         )
     if plan["actor_account_id"] is None:
-        return {"job_id": None, "actor_account_id": None, "reason": plan["reason"]}
+        return {
+            "job_id": None,
+            "actor_account_id": None,
+            "reason": plan["reason"],
+            "suppressed_notes": plan["suppressed_notes"],
+        }
 
     actor = plan["actor_account_id"]
     payload = {
@@ -342,9 +556,14 @@ async def start_backfill(
     browser_jobs_repo.spawn_inline(job_id, lambda: execute(actor, payload))
     logger.info(
         f"[interaction_backfill] 已登记补量任务 {job_id}(scope={scope} actor={actor} "
-        f"本轮候选 {len(plan['targets'])} 篇)"
+        f"本轮候选 {len(plan['targets'])} 篇,熔断 {len(plan['suppressed_notes'])} 篇)"
     )
-    return {"job_id": job_id, "actor_account_id": actor, "reason": None}
+    return {
+        "job_id": job_id,
+        "actor_account_id": actor,
+        "reason": None,
+        "suppressed_notes": plan["suppressed_notes"],
+    }
 
 
 async def schedule_after_sync(account_id: int) -> list[str]:
