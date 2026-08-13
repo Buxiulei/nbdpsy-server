@@ -39,6 +39,7 @@ from app.services.content_archive import ArchiveReaper
 from app.services.draft_clean import DraftCleanScheduler
 from app.services.dreamina import ClipReaper, DreaminaScheduler
 from app.services.interaction_backfill_scheduler import InteractionBackfillScheduler
+from app.services.note_ledger_sync_scheduler import NoteLedgerSyncScheduler
 from app.services.note_metrics_scheduler import NoteMetricsScheduler
 from app.services.onboarding_scheduler import OnboardingScheduler
 from app.services.placeholder_reaper import PlaceholderReaper
@@ -172,6 +173,7 @@ class Supervisor:
         self._retention_scheduler: RetentionScheduler | None = None
         self._interaction_backfill_scheduler: InteractionBackfillScheduler | None = None
         self._audience_sync_scheduler: AudienceSyncScheduler | None = None
+        self._note_ledger_sync_scheduler: NoteLedgerSyncScheduler | None = None
         self._onboarding_scheduler: OnboardingScheduler | None = None
         self._egress_guard: EgressGuard | None = None
         self._video_scheduler = None
@@ -257,6 +259,18 @@ class Supervisor:
                 self._session_factory, settings.AUDIENCE_SYNC_INTERVAL
             )
             self._audience_sync_scheduler.start()
+        if (
+            settings.LEDGER_SYNC_SCHEDULER_ENABLED
+            and settings.LEDGER_SYNC_SCAN_INTERVAL > 0
+        ):
+            # 笔记台账保底同步:与上面两位同门(只插 queued 行,浏览器在 account_worker 子进程)。
+            # 补的是"只有发过布的号才被同步"这个缺口 —— 纯手工运营的号原本永远等不到同步。
+            self._note_ledger_sync_scheduler = NoteLedgerSyncScheduler(
+                self._session_factory,
+                settings.LEDGER_SYNC_SCAN_INTERVAL,
+                settings.LEDGER_SYNC_MIN_INTERVAL,
+            )
+            self._note_ledger_sync_scheduler.start()
         if settings.ONBOARDING_CHECK_INTERVAL > 0:
             self._onboarding_scheduler = OnboardingScheduler(
                 self._session_factory,
@@ -307,6 +321,9 @@ class Supervisor:
         if self._onboarding_scheduler is not None:
             await self._onboarding_scheduler.stop()
             self._onboarding_scheduler = None
+        if self._note_ledger_sync_scheduler is not None:
+            await self._note_ledger_sync_scheduler.stop()
+            self._note_ledger_sync_scheduler = None
         if self._audience_sync_scheduler is not None:
             await self._audience_sync_scheduler.stop()
             self._audience_sync_scheduler = None

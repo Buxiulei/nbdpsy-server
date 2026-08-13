@@ -333,6 +333,20 @@ class Settings(BaseSettings):
     # 单次调用可用 ?exclude_self=false 覆盖(排查自家互刷量时要看得见它们)。
     AUDIENCE_SELF_EXCLUDE: bool = True
 
+    # ── 笔记台账保底同步(note_ledger_sync_scheduler)──
+    # 补的是"同步频率完全跟着发布走"这个缺口:台账同步原本只有发布钩子 + 手工触发两个
+    # 入口,常发的号一天刷好几次,而纯手工运营的禁发号十几天才被人戳一次 —— 它手工发的
+    # 笔记不进台账,互动补量选篇要 note_id 非空,于是最不该漏的号漏得最彻底。
+    # ENABLED 是 kill switch(关掉只停保底,发布钩子与手工触发照旧)。
+    LEDGER_SYNC_SCHEDULER_ENABLED: bool = True
+    # 扫描间隔(秒,0=关闭):多久看一眼"有没有号该同步了"。它**不是**每号的同步频率,
+    # 调小只会更频繁地问,答案照样受下面那道门槛约束。
+    LEDGER_SYNC_SCAN_INTERVAL: int = 600
+    # 每号到期门槛(秒):距上次同步超过这么久才轮到它,默认 12 小时。
+    # 常发的号被发布钩子天然刷新这个时刻,几乎不会撞上保底 —— 保底不重复。
+    # 调小 = 每号更频繁地开真号会话,直接顶到 ACCOUNT_HOURLY_SESSION_CAP=4 那条风控红线上。
+    LEDGER_SYNC_MIN_INTERVAL: int = 43200
+
     # ── 合集批量清理(note_collection_batch,2026-08-07 运营移出需求 P1/P2)──
     # 两个上限差一个数量级,因为**两条路的代价差一个数量级**:
     # - 移出(dry_run=false)每篇是一次真「更新」提交(全量覆盖语义),比点赞收藏重得多,
