@@ -113,12 +113,17 @@ def test_schema_has_no_visitor_identity_columns(monkeypatch, tmp_path):
 
 
 def test_downgrade_removes_tables(monkeypatch, tmp_path):
-    """回滚干净:两张表是纯新增,downgrade 后一点痕迹不留(也不碰任何既有表)。"""
+    """回滚干净:受众三张表是纯新增,downgrade 后一点痕迹不留(也不碰任何既有表)。
+
+    回滚目标用**显式版本号**(受众功能前的 head)而不是 "-1":功能已横跨两个迁移
+    (a7c31e9b48d2 两张表 + b3d9f2c4a1e7 自家号登记表),步数会随链生长漂移。
+    """
     db_file = _upgraded(monkeypatch, tmp_path, "aud_down.db")
-    command.downgrade(_cfg(), "-1")
+    command.downgrade(_cfg(), "c4e7a91d3b58")
 
     tables = {r[0] for r in _query(
         db_file, "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "audience_events" not in tables and "audience_sync_state" not in tables
+    assert "audience_self_userids" not in tables
     # 既有表毫发无损
     assert {"xhs_accounts", "published_notes"} <= tables

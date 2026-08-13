@@ -290,3 +290,33 @@ async def test_self_userids_ignore_blank(db):
     db.add(XhsAccount(id=1, name="空号", user_id=""))
     await db.commit()
     assert await an.self_account_userids(db) == set()
+
+
+# ---------------- 号9 泄漏回归(2026-08-13 事故) ----------------
+
+
+@pytest.mark.asyncio
+async def test_former_self_account_still_excluded_after_row_deleted(db):
+    """账号行被删后其 user_id 仍在排除名单(号9 事故复现):进过矩阵就永远排除。"""
+    acct = XhsAccount(id=9, name="米之木木", user_id="self-ex9")
+    db.add(acct)
+    await db.commit()
+    # 第一次调用:活名单合并进登记表
+    assert "self-ex9" in await an.self_account_userids(db)
+
+    # 号被移出系统(2026-08-13 生产真实发生:xhs_accounts 只剩 9 行)
+    await db.delete(acct)
+    await db.commit()
+
+    # 活名单已无此号,但登记表记得它——排除名单必须仍含
+    assert "self-ex9" in await an.self_account_userids(db)
+
+
+@pytest.mark.asyncio
+async def test_new_account_auto_registered(db):
+    """新加的号在下一次调用即自动进登记表(加号场景不回退)。"""
+    assert await an.self_account_userids(db) == set()
+    db.add(XhsAccount(id=2, name="新号", user_id="self-new"))
+    await db.commit()
+
+    assert "self-new" in await an.self_account_userids(db)

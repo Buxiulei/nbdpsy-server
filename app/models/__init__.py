@@ -5,6 +5,7 @@
 """
 
 from app.models.audience_event import AudienceEvent
+from app.models.audience_self_userid import AudienceSelfUserid
 from app.models.audience_sync_state import AudienceSyncState
 from app.models.browser_job import BrowserJob
 from app.models.content_archive import ContentArchive
@@ -46,5 +47,6 @@ __all__ = [
     "StyleProfile",
     "StyleProfileVersion",
     "AudienceEvent",
+    "AudienceSelfUserid",
     "AudienceSyncState",
 ]

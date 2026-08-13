@@ -263,6 +263,23 @@ CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 
 CHANGELOG_ENTRIES = [
     {
+        "date": "2026-08-13",
+        "title": "受众分析自家号排除修复:退出矩阵的号不再混进潜客漏斗",
+        "kind": "fix",
+        "summary": "验收发现已移出系统的号9(现昵称「淡三花」)以 55 次互动顶在互动者列表与"
+                   "漏斗头部——排除名单原来只认当前在册账号,账号行删了历史互刷事件就漏进分析。"
+                   "现在改为追加型登记:进过矩阵的 user_id 永远排除,删号不再泄漏;新加的号"
+                   "首次被查询时自动登记。对调用方零 API 变化,受众各端点回执里自家号(含已"
+                   "退出的)不再出现;若你缓存过互动者列表,建议重拉一遍。",
+        "endpoints": [
+            "/api/audience/overview",
+            "/api/audience/actors",
+            "/api/audience/actors/{userid}",
+            "/api/audience/funnel",
+            "/api/audience/segments",
+        ],
+    },
+    {
         "date": "2026-08-12",
         "title": "新增受众行为库五个只读端点:互动者身份 / 纵向轨迹 / 群体切片 / 潜客漏斗",
         "kind": "feature",

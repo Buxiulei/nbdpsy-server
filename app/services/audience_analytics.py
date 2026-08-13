@@ -30,9 +30,11 @@ from collections import defaultdict
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audience_event import AudienceEvent
+from app.models.audience_self_userid import AudienceSelfUserid
 from app.models.xhs_account import XhsAccount
 
 # ---------------- 打分口径(全部 v1 启发式,待真实转化数据校准)----------------
@@ -220,16 +222,32 @@ def activity_band(event_count: int) -> str:
 
 
 async def self_account_userids(session: AsyncSession) -> set[str]:
-    """本矩阵全部自家号的平台 user_id(**现查,不硬编码**)。
+    """自家号 user_id 名单 = 活名单 ∪ 追加型登记表(**进过矩阵就永远排除**)。
 
     自家号互刷的互动照常入库(它也是数据),但分析默认把它们剔除 —— 不剔的话"最活跃的
-    受众"永远是自家矩阵号,整个库就废了。硬编码一份名单则会在下一次加号时静默失效。
+    受众"永远是自家矩阵号,整个库就废了。硬编码一份名单会在加号时静默失效;而**只查
+    活名单会在删号时静默失效**(2026-08-13 号9 事故:账号行被移出系统后,它 55 条互刷
+    事件以互动第一名顶在漏斗头部,还顶着改过的昵称「淡三花」)。所以:每次调用把活名单
+    合并进 ``audience_self_userids`` 登记表(新号自动登记、只进不出),排除按登记表走。
     空串不进名单:那会退化成"排除 fstatus 缺失的真受众"。
     """
     rows = (await session.execute(
         select(XhsAccount.user_id).where(XhsAccount.user_id.is_not(None))
     )).scalars().all()
-    return {(uid or "").strip() for uid in rows} - {""}
+    live = {(uid or "").strip() for uid in rows} - {""}
+    known = set((await session.execute(
+        select(AudienceSelfUserid.user_id)
+    )).scalars().all())
+    missing = live - known
+    if missing:
+        for uid in sorted(missing):
+            await session.execute(
+                sqlite_insert(AudienceSelfUserid)
+                .values(user_id=uid)
+                .on_conflict_do_nothing(index_elements=["user_id"])
+            )
+        await session.commit()
+    return known | live
 
 
 async def load_actor_aggregates(
