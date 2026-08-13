@@ -1,0 +1,1600 @@
+{
+ "source": "notification_probe_account_1_20260812T082020Z.json",
+ "note": "真号取证快照(号1,2026-08-12,922 条赞收藏 + 98 条关注)里抽出的**真实** message,逐字保留结构;仅把互动者身份做了确定性假名化 —— userid / nickname / 头像 image(含 connections 的复数键 images),以及 link 里的第二个出口 authorId= / uid= / anchorInteractId=。解析器认的是结构与 type 取值,不认具体 userid 串,而把真人的平台 id 与昵称推进 git 历史没有必要。事件 id / 时间戳 / 笔记 id / 笔记标题 / type / 各层嵌套一律原样。原始 dump 在 data/scene_captures/(gitignore,不入库)。",
+ "likes": [
+  {
+   "id": "7673038974943840268",
+   "time": 1786518603,
+   "score": 7673038974943840268,
+   "liked": false,
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "d44557b60b3f086908c94dc4",
+    "nickname": "互动者01",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/ad4c045f27f86252fe50fb257bd3837b?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "item_info": {
+    "type": "note_info",
+    "id": "6a7c1a61000000002402e62c",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "xsec_token": "SCRUBBED",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "width": 749,
+     "height": 999
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0
+   },
+   "track_type": "6",
+   "time_flag": 0
+  },
+  {
+   "score": 7673038717246874066,
+   "item_info": {
+    "id": "6a7c1a61000000002402e62c",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "width": 749,
+     "height": 999
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0
+   },
+   "id": "7673038717246874066",
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "liked": false,
+   "time_flag": 0,
+   "time": 1786518543,
+   "user_info": {
+    "userid": "948d049c2e53f51eb9abc43b",
+    "nickname": "互动者03",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/f3a9a65a790a79ee57524c8dcf13f234?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "6"
+  },
+  {
+   "id": "7673038301003155976",
+   "user_info": {
+    "userid": "aec6bbf1fb082f9591b67971",
+    "nickname": "互动者04",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/9caece174c42e57bc9c9e5eac1e0549e?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   },
+   "liked": false,
+   "item_info": {
+    "type": "note_info",
+    "image_info": {
+     "width": 749,
+     "height": 999,
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg"
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "id": "6a7c1a61000000002402e62c",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "6",
+   "time_flag": 0,
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "time": 1786518446,
+   "score": 7673038301003155976
+  },
+  {
+   "title": "赞了你的笔记",
+   "time": 1786518409,
+   "score": 7673038142089273619,
+   "item_info": {
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0,
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "width": 749,
+     "height": 999
+    },
+    "id": "6a7c1a61000000002402e62c",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "red_official_verify_type": 0,
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg"
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "note_info"
+   },
+   "track_type": "6",
+   "time_flag": 0,
+   "id": "7673038142089273619",
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "7c312c48c2af7bc1b8036f60",
+    "nickname": "互动者05",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/2426565f043d63145dcc8e85ec0ef291?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "liked": false,
+   "type": "liked/item"
+  },
+  {
+   "liked": false,
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "score": 7673037755174337634,
+   "user_info": {
+    "nickname": "互动者06",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b0bab76d399146501806618d87b67298?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "f630d5e368a54c4fb826379d"
+   },
+   "item_info": {
+    "id": "6a7c1a61000000002402e62c",
+    "image_info": {
+     "width": 749,
+     "height": 999,
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "user_info": {
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0,
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02"
+    },
+    "status": 0
+   },
+   "track_type": "6",
+   "id": "7673037755174337634",
+   "time": 1786518319,
+   "time_flag": 0
+  },
+  {
+   "title": "赞了你的笔记",
+   "time": 1786518243,
+   "score": 7673037428755729371,
+   "item_info": {
+    "xsec_token": "SCRUBBED",
+    "id": "6a7c1a61000000002402e62c",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "width": 749,
+     "height": 999
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "type": "note_info",
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    }
+   },
+   "track_type": "6",
+   "liked": false,
+   "id": "7673037428755729371",
+   "user_info": {
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "6e902048fd2e822e18223705",
+    "nickname": "互动者07",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b665d23dd3ba8dfeef0adfe8dee16a18?imageView2/2/w/120/format/jpg"
+   },
+   "time_flag": 0,
+   "type": "liked/item"
+  },
+  {
+   "id": "7673037321381464907",
+   "type": "liked/item",
+   "time": 1786518218,
+   "user_info": {
+    "xsec_token": "SCRUBBED",
+    "userid": "997b5fca682ed19edb033718",
+    "nickname": "互动者08",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/9370e2bb73e44fab732ceb3f1ff0b7cc?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友"
+   },
+   "time_flag": 0,
+   "title": "赞了你的笔记",
+   "score": 7673037321381464907,
+   "item_info": {
+    "content": "过度换气｜不是喘不上气，是气吸太多了",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "width": 749,
+     "height": 999
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "status": 0,
+    "id": "6a7c1a61000000002402e62c"
+   },
+   "track_type": "6",
+   "liked": false
+  },
+  {
+   "score": 7673018033052594930,
+   "track_type": "6",
+   "liked": false,
+   "time_flag": 0,
+   "item_info": {
+    "link": "xhsdiscover://item/discovery.6a71dbdf000000000502adec?type=normal&sourceID=notifications&feedType=single",
+    "xsec_token": "SCRUBBED",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g0k0323fjic5k74005noda2v08d26hqqevio?imageView2/2/w/1080/format/jpg",
+     "width": 876,
+     "height": 1313
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "content": "行为实验和多参加活动，你做的是哪种",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g0k0323fjic5k74005noda2v08d26hqqevio?imageView2/2/w/1080/format/jpg",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "type": "note_info",
+    "id": "6a71dbdf000000000502adec"
+   },
+   "id": "7673018033052594930",
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "time": 1786513727,
+   "user_info": {
+    "nickname": "互动者09",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b75467dfc54e5d564424f59b7065b230?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "55b635c64cd6579dbcfd9394"
+   }
+  },
+  {
+   "item_info": {
+    "attach_item_info": {
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+      "width": 749,
+      "height": 999
+     },
+     "illegal_info": {
+      "status": 0,
+      "desc": "",
+      "illegal_status": "NORMAL"
+     },
+     "status": 0,
+     "xsec_token": "SCRUBBED",
+     "type": "note_info",
+     "id": "6a7c1a61000000002402e62c",
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single"
+    },
+    "extra_info": {
+     "desc": "隐私专辑",
+     "status": 1
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "content": "默认专辑",
+    "status": 0
+   },
+   "track_type": "4",
+   "time_flag": 0,
+   "id": "7673038996787735475",
+   "time": 1786518608,
+   "score": 7673038996787735475,
+   "liked": false,
+   "type": "faved/item",
+   "title": "收藏了你的笔记",
+   "user_info": {
+    "userid": "d44557b60b3f086908c94dc4",
+    "nickname": "互动者01",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/ad4c045f27f86252fe50fb257bd3837b?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   }
+  },
+  {
+   "title": "收藏了你的笔记",
+   "time": 1786518548,
+   "score": 7673038738721726269,
+   "item_info": {
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "status": 0,
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "content": "默认专辑",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "attach_item_info": {
+     "type": "note_info",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "xsec_token": "SCRUBBED",
+     "id": "6a7c1a61000000002402e62c",
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+      "width": 749,
+      "height": 999
+     },
+     "illegal_info": {
+      "illegal_status": "NORMAL",
+      "status": 0,
+      "desc": ""
+     },
+     "status": 0
+    },
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "4",
+   "id": "7673038738721726269",
+   "type": "faved/item",
+   "user_info": {
+    "userid": "948d049c2e53f51eb9abc43b",
+    "nickname": "互动者03",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/f3a9a65a790a79ee57524c8dcf13f234?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   },
+   "liked": false,
+   "time_flag": 0
+  },
+  {
+   "time": 1786518450,
+   "score": 7673038318183035382,
+   "track_type": "4",
+   "liked": false,
+   "time_flag": 0,
+   "id": "7673038318183035382",
+   "type": "faved/item",
+   "title": "收藏了你的笔记",
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "aec6bbf1fb082f9591b67971",
+    "nickname": "互动者04",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/9caece174c42e57bc9c9e5eac1e0549e?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "item_info": {
+    "attach_item_info": {
+     "type": "note_info",
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "id": "6a7c1a61000000002402e62c",
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+      "width": 749,
+      "height": 999
+     },
+     "illegal_info": {
+      "status": 0,
+      "desc": "",
+      "illegal_status": "NORMAL"
+     },
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "status": 0,
+     "xsec_token": "SCRUBBED"
+    },
+    "extra_info": {
+     "desc": "隐私专辑",
+     "status": 1
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "content": "默认专辑",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "status": 0
+   }
+  },
+  {
+   "type": "faved/item",
+   "time": 1786518414,
+   "score": 7673038163196440597,
+   "liked": false,
+   "time_flag": 0,
+   "id": "7673038163196440597",
+   "user_info": {
+    "xsec_token": "SCRUBBED",
+    "userid": "7c312c48c2af7bc1b8036f60",
+    "nickname": "互动者05",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/2426565f043d63145dcc8e85ec0ef291?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友"
+   },
+   "item_info": {
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "content": "默认专辑",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "attach_item_info": {
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "type": "note_info",
+     "id": "6a7c1a61000000002402e62c",
+     "status": 0,
+     "xsec_token": "SCRUBBED",
+     "image_info": {
+      "width": 749,
+      "height": 999,
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg"
+     },
+     "illegal_info": {
+      "status": 0,
+      "desc": "",
+      "illegal_status": "NORMAL"
+     }
+    },
+    "status": 0
+   },
+   "track_type": "4",
+   "title": "收藏了你的笔记"
+  },
+  {
+   "type": "faved/item",
+   "title": "收藏了你的笔记",
+   "time": 1786518324,
+   "track_type": "4",
+   "time_flag": 0,
+   "id": "7673037777017105438",
+   "score": 7673037777017105438,
+   "user_info": {
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "f630d5e368a54c4fb826379d",
+    "nickname": "互动者06",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b0bab76d399146501806618d87b67298?imageView2/2/w/120/format/jpg"
+   },
+   "item_info": {
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "xsec_token": "SCRUBBED",
+    "content": "默认专辑",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "attach_item_info": {
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "status": 0,
+     "xsec_token": "SCRUBBED",
+     "type": "note_info",
+     "id": "6a7c1a61000000002402e62c",
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+      "width": 749,
+      "height": 999
+     },
+     "illegal_info": {
+      "status": 0,
+      "desc": "",
+      "illegal_status": "NORMAL"
+     }
+    },
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "status": 0
+   },
+   "liked": false
+  },
+  {
+   "time_flag": 0,
+   "title": "收藏了你的笔记",
+   "score": 7673037445936750331,
+   "user_info": {
+    "userid": "6e902048fd2e822e18223705",
+    "nickname": "互动者07",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b665d23dd3ba8dfeef0adfe8dee16a18?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "4",
+   "liked": false,
+   "id": "7673037445936750331",
+   "type": "faved/item",
+   "time": 1786518248,
+   "item_info": {
+    "content": "默认专辑",
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "type": "board_info",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "attach_item_info": {
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "illegal_info": {
+      "desc": "",
+      "illegal_status": "NORMAL",
+      "status": 0
+     },
+     "status": 0,
+     "xsec_token": "SCRUBBED",
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "type": "note_info",
+     "id": "6a7c1a61000000002402e62c",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "image_info": {
+      "width": 749,
+      "height": 999,
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg"
+     }
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "id": "6248112f000000000101e907"
+   }
+  },
+  {
+   "type": "faved/item",
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "997b5fca682ed19edb033718",
+    "nickname": "互动者08",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/9370e2bb73e44fab732ceb3f1ff0b7cc?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "item_info": {
+    "content": "默认专辑",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "board_info",
+    "id": "6248112f000000000101e907",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+    "attach_item_info": {
+     "status": 0,
+     "type": "note_info",
+     "id": "6a7c1a61000000002402e62c",
+     "content": "过度换气｜不是喘不上气，是气吸太多了",
+     "illegal_info": {
+      "desc": "",
+      "illegal_status": "NORMAL",
+      "status": 0
+     },
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323osddr4n2005noda2v08d26vglsusg?imageView2/2/w/1080/format/jpg",
+      "width": 749,
+      "height": 999
+     },
+     "link": "xhsdiscover://item/discovery.6a7c1a61000000002402e62c?type=normal&sourceID=notifications&feedType=single",
+     "xsec_token": "SCRUBBED"
+    }
+   },
+   "track_type": "4",
+   "liked": false,
+   "time_flag": 0,
+   "id": "7673037338562489886",
+   "title": "收藏了你的笔记",
+   "time": 1786518222,
+   "score": 7673037338562489886
+  },
+  {
+   "id": "7672901231047747929",
+   "score": 7672901231047747929,
+   "user_info": {
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "108082ebacdfca09a3fa75c0",
+    "nickname": "互动者10",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/87b3e463ae1f8e37ccd44ff9afb37feb?imageView2/2/w/120/format/jpg"
+   },
+   "item_info": {
+    "attach_item_info": {
+     "type": "note_info",
+     "content": "焦虑发作时，身体到底在干什么",
+     "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323o1ei97n4105noda2v08d265lahd70?imageView2/2/w/1080/format/jpg",
+     "image_info": {
+      "url": "http://ci.xiaohongshu.com/spectrum/1040g34o323o1ei97n4105noda2v08d265lahd70?imageView2/2/w/1080/format/jpg",
+      "width": 1080,
+      "height": 1620
+     },
+     "id": "6a7b3da2000000002403c408",
+     "illegal_info": {
+      "status": 0,
+      "desc": "",
+      "illegal_status": "NORMAL"
+     },
+     "link": "xhsdiscover://item/discovery.6a7b3da2000000002403c408?type=video&sourceID=notifications&feedType=single",
+     "status": 0,
+     "xsec_token": "SCRUBBED"
+    },
+    "extra_info": {
+     "status": 1,
+     "desc": "隐私专辑"
+    },
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g34o323o1ei97n4105noda2v08d265lahd70?imageView2/2/w/1080/format/jpg",
+    "link": "xhsdiscover://item/discovery.6a7b3da2000000002403c408?type=video&sourceID=notifications&feedType=single",
+    "content": "默认专辑",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "board_info",
+    "id": "6248112f000000000101e907"
+   },
+   "type": "faved/item",
+   "title": "收藏了你的笔记",
+   "time": 1786486532,
+   "track_type": "4",
+   "liked": false,
+   "time_flag": 0
+  },
+  {
+   "liked": false,
+   "time_flag": 0,
+   "comment_info": {
+    "id": "6a717d32000000002a00725e",
+    "content": "@爱吃桃的大慧慧",
+    "illegal_info": {
+     "desc": "",
+     "illegal_status": "NORMAL",
+     "status": 0
+    },
+    "status": 0,
+    "liked": false,
+    "like_count": 1
+   },
+   "type": "liked/comment",
+   "title": "赞了你的评论",
+   "time": 1785826825,
+   "score": 7670067811057738904,
+   "user_info": {
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "5f522df4225e168351523eb0",
+    "nickname": "互动者11"
+   },
+   "item_info": {
+    "id": "6a671311000000000f00a3a6",
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g0k03234as6v5n2005olt8bm6sj9iuf3ic3g?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g0k03234as6v5n2005olt8bm6sj9iuf3ic3g?imageView2/2/w/1080/format/jpg",
+     "width": 1080,
+     "height": 1920
+    },
+    "link": "xhsdiscover://item/discovery.6a671311000000000f00a3a6?type=video&sourceID=notifications&feedType=single&anchorCommentId=6a717d32000000002a00725e&authorId=35c9250d30121b0dec272cb5",
+    "status": 0,
+    "type": "note_info",
+    "content": "重庆还是有甜妹的",
+    "illegal_info": {
+     "desc": "",
+     "illegal_status": "NORMAL",
+     "status": 0
+    },
+    "user_info": {
+     "userid": "35c9250d30121b0dec272cb5",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "36",
+   "id": "7670067811057738904"
+  },
+  {
+   "liked": false,
+   "time_flag": 0,
+   "id": "7669773215325246679",
+   "type": "liked/comment",
+   "score": 7669773215325246679,
+   "user_info": {
+    "nickname": "互动者12",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/b555b8b72db58399fe03c64d0ab1e9ef?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "1b319022aecc433bd1524e8f"
+   },
+   "comment_info": {
+    "id": "6946c1390000000031031e40",
+    "content": "这小脚丫真好看，修护完好治愈，非常喜欢这种好物分享，感谢博主！",
+    "illegal_info": {
+     "illegal_status": "NORMAL",
+     "status": 0,
+     "desc": ""
+    },
+    "status": 0,
+    "liked": false,
+    "like_count": 3
+   },
+   "title": "赞了你的评论",
+   "time": 1785758234,
+   "item_info": {
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "content": "美卡脚开裂的看过来",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/note_pre_post_uhdr/1040g3r831qan7kao7o704a04db2o8q4op5obqj8?imageView2/2/w/1080/format/jpg",
+     "width": 3024,
+     "height": 4032
+    },
+    "link": "xhsdiscover://item/discovery.6946b131000000000d03dd85?type=normal&sourceID=notifications&feedType=single&anchorCommentId=6946c1390000000031031e40&authorId=97373ce8d81ae1312e7a9450",
+    "user_info": {
+     "userid": "97373ce8d81ae1312e7a9450",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "id": "6946b131000000000d03dd85",
+    "image": "http://ci.xiaohongshu.com/note_pre_post_uhdr/1040g3r831qan7kao7o704a04db2o8q4op5obqj8?imageView2/2/w/1080/format/jpg"
+   },
+   "track_type": "7"
+  },
+  {
+   "score": 7667984193573526784,
+   "user_info": {
+    "xsec_token": "SCRUBBED",
+    "userid": "d0008a09f4689ac2336a73d5",
+    "nickname": "互动者13",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/0cc6fc79fbeeef17f463ee661bc6ced4?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0
+   },
+   "item_info": {
+    "image": "http://ci.xiaohongshu.com/note_pre_post_uhdr/1040g3r831vn6us961m2040kn832d037rdhu9tk8?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/note_pre_post_uhdr/1040g3r831vn6us961m2040kn832d037rdhu9tk8?imageView2/2/w/1080/format/jpg",
+     "width": 4284,
+     "height": 5712
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "content": "皇帝岛海钓，收获满满",
+    "id": "69f752670000000036002edc",
+    "link": "xhsdiscover://item/discovery.69f752670000000036002edc?type=normal&sourceID=notifications&feedType=single&anchorCommentId=69f7fc28000000002902e9fb&authorId=5f522df4225e168351523eb0",
+    "user_info": {
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0,
+     "userid": "5f522df4225e168351523eb0"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info"
+   },
+   "comment_info": {
+    "liked": false,
+    "like_count": 0,
+    "id": "69f7fc28000000002902e9fb",
+    "content": "你俩真的是太开心了[赞R]",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0
+   },
+   "id": "7667984193573526784",
+   "type": "liked/comment",
+   "title": "赞了你的评论",
+   "time": 1785341695,
+   "track_type": "7",
+   "liked": false,
+   "time_flag": 0
+  },
+  {
+   "time": 1784517121,
+   "score": 7664442675373371540,
+   "item_info": {
+    "user_info": {
+     "red_official_verify_type": 0,
+     "userid": "783af177f62666e1ff4a742c",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg"
+    },
+    "status": 0,
+    "id": "69476309000000001e0155cc",
+    "content": "范德芬的剪刀脚可能使伊萨克伤缺8-10周…",
+    "image": "http://ci.xiaohongshu.com/notes_pre_post/1040g3k831qbcve2e6u605ome3j30vsf50bmrcs8?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/notes_pre_post/1040g3k831qbcve2e6u605ome3j30vsf50bmrcs8?imageView2/2/w/1080/format/jpg",
+     "width": 1200,
+     "height": 1500
+    },
+    "type": "note_info",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.69476309000000001e0155cc?type=normal&sourceID=notifications&feedType=single&anchorCommentId=694764820000000032001f10&authorId=783af177f62666e1ff4a742c",
+    "xsec_token": "SCRUBBED"
+   },
+   "comment_info": {
+    "content": "这剪刀脚真利落，强度直接拉满，分析得也好专业，非常喜欢，感谢分享～",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0,
+    "liked": false,
+    "like_count": 2,
+    "id": "694764820000000032001f10"
+   },
+   "time_flag": 0,
+   "id": "7664442675373371540",
+   "type": "liked/comment",
+   "title": "赞了你的评论",
+   "user_info": {
+    "nickname": "互动者14",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/8a5cf307f447f822f7c7773e8efd6107?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "3f6d948070f8f0cbddffb204"
+   },
+   "track_type": "7",
+   "liked": false
+  },
+  {
+   "id": "7663430785372788088",
+   "item_info": {
+    "image": "http://ci.xiaohongshu.com/spectrum/1040g0k03229at0hn70005nf8vop08pv3n4qsn0o?imageView2/2/w/1080/format/jpg",
+    "link": "xhsdiscover://item/discovery.6a4b69d3000000001003def8?type=video&sourceID=notifications&feedType=single&anchorCommentId=6a59ef34000000002a0327d1&authorId=627309db8b8d3160f876365f",
+    "status": 0,
+    "id": "6a4b69d3000000001003def8",
+    "content": "商家拒绝出餐",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "user_info": {
+     "userid": "627309db8b8d3160f876365f",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/spectrum/1040g0k03229at0hn70005nf8vop08pv3n4qsn0o?imageView2/2/w/1080/format/jpg",
+     "width": 720,
+     "height": 1280
+    }
+   },
+   "liked": false,
+   "score": 7663430785372788088,
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "5f522df4225e168351523eb0",
+    "nickname": "互动者11",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "comment_info": {
+    "id": "6a59ef34000000002a0327d1",
+    "content": "@爱吃桃的大慧慧",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0,
+    "liked": false,
+    "like_count": 0
+   },
+   "track_type": "36",
+   "time_flag": 0,
+   "type": "liked/comment",
+   "title": "赞了你的评论",
+   "time": 1784281522
+  },
+  {
+   "liked": false,
+   "type": "liked/comment",
+   "time": 1783591030,
+   "score": 7660465144585083975,
+   "comment_info": {
+    "id": "694793ba00000000300277c7",
+    "content": "红色波点太可爱了，显得脚好白好精致，非常喜欢这个款式，感谢分享呀～",
+    "illegal_info": {
+     "illegal_status": "NORMAL",
+     "status": 0,
+     "desc": ""
+    },
+    "status": 0,
+    "liked": false,
+    "like_count": 4
+   },
+   "track_type": "7",
+   "time_flag": 0,
+   "id": "7660465144585083975",
+   "title": "赞了你的评论",
+   "user_info": {
+    "nickname": "互动者15",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/c7999ca2885fce81ee3c2a8d7864ebdf?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "81036443b074976209b7f0ee"
+   },
+   "item_info": {
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "id": "6947906c000000001e00938b",
+    "content": "红色波点💅我是不会放弃做脚的！",
+    "image": "http://ci.xiaohongshu.com/1040g2sg31qbiilttn0705nn51dagbs4jmolfl98?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/1040g2sg31qbiilttn0705nn51dagbs4jmolfl98?imageView2/2/w/1080/format/jpg",
+     "width": 1920,
+     "height": 2560
+    },
+    "link": "xhsdiscover://item/discovery.6947906c000000001e00938b?type=normal&sourceID=notifications&feedType=single&anchorCommentId=694793ba00000000300277c7&authorId=57593283c0e28146cc74df7f",
+    "user_info": {
+     "userid": "57593283c0e28146cc74df7f",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    }
+   }
+  },
+  {
+   "score": 336198496,
+   "user_info": {
+    "nickname": "互动者11",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "5f522df4225e168351523eb0"
+   },
+   "item_info": {
+    "image": "http://ci.xiaohongshu.com/1040g00831bgci66mgu0049aid0kri1k24f55k9g?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "height": 1920,
+     "url": "http://ci.xiaohongshu.com/1040g00831bgci66mgu0049aid0kri1k24f55k9g?imageView2/2/w/1080/format/jpg",
+     "width": 1080
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.6760f8a0000000000800d54b?type=video&sourceID=notifications&feedType=single&anchorInteractId=5f522df4225e168351523eb0&interactType=like&authorId=caff12be8d7b6080015d034f",
+    "type": "note_info",
+    "id": "6760f8a0000000000800d54b",
+    "user_info": {
+     "userid": "5f522df4225e168351523eb0",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "61",
+   "time_flag": 0,
+   "type": "liked/share/item",
+   "time": 1734442975,
+   "liked": false,
+   "id": "336198496",
+   "title": "赞了你分享的笔记"
+  },
+  {
+   "id": "335676479",
+   "type": "liked/share/item",
+   "time": 1734118650,
+   "score": 335676479,
+   "item_info": {
+    "link": "xhsdiscover://item/discovery.675afa37000000000603e4b6?type=video&sourceID=notifications&feedType=single&anchorInteractId=5f522df4225e168351523eb0&interactType=like&authorId=8dc38305146b95296043f6b6",
+    "user_info": {
+     "userid": "5f522df4225e168351523eb0",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "id": "675afa37000000000603e4b6",
+    "image": "http://ci.xiaohongshu.com/1040g00831bah96do7e005pmnmta7c68iomogkvo?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "width": 1080,
+     "height": 1920,
+     "url": "http://ci.xiaohongshu.com/1040g00831bah96do7e005pmnmta7c68iomogkvo?imageView2/2/w/1080/format/jpg"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info"
+   },
+   "title": "赞了你分享的笔记",
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED",
+    "userid": "5f522df4225e168351523eb0",
+    "nickname": "互动者11",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both"
+   },
+   "track_type": "61",
+   "liked": false,
+   "time_flag": 0
+  },
+  {
+   "time": 1729963778,
+   "score": 328151152,
+   "time_flag": 0,
+   "id": "328151152",
+   "type": "liked/share/item",
+   "item_info": {
+    "image_info": {
+     "width": 1276,
+     "height": 1701,
+     "url": "http://ci.xiaohongshu.com/1040g2sg3189t2m4mjq705n4hgvbk94q0ddi8m0o?imageView2/2/w/1080/format/jpg"
+    },
+    "status": 0,
+    "type": "note_info",
+    "image": "http://ci.xiaohongshu.com/1040g2sg3189t2m4mjq705n4hgvbk94q0ddi8m0o?imageView2/2/w/1080/format/jpg",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.66f80793000000002c02fba8?type=video&sourceID=notifications&feedType=single&anchorInteractId=5f522df4225e168351523eb0&interactType=like&authorId=6f01209d5158eb8c5ca3cfbf",
+    "user_info": {
+     "userid": "5f522df4225e168351523eb0",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "xsec_token": "SCRUBBED",
+    "id": "66f80793000000002c02fba8"
+   },
+   "track_type": "61",
+   "liked": false,
+   "title": "赞了你分享的笔记",
+   "user_info": {
+    "userid": "5f522df4225e168351523eb0",
+    "nickname": "互动者11",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   }
+  },
+  {
+   "id": "327953630",
+   "title": "赞了你分享的笔记",
+   "time": 1729867478,
+   "user_info": {
+    "userid": "5f522df4225e168351523eb0",
+    "nickname": "互动者11",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/a8ea4652ef9590a63bff38a261c28ccd?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0,
+    "indicator": "你的好友",
+    "xsec_token": "SCRUBBED"
+   },
+   "track_type": "61",
+   "time_flag": 0,
+   "type": "liked/share/item",
+   "score": 327953630,
+   "item_info": {
+    "id": "670f3958000000001b012697",
+    "illegal_info": {
+     "status": 0,
+     "desc": "",
+     "illegal_status": "NORMAL"
+    },
+    "link": "xhsdiscover://item/discovery.670f3958000000001b012697?type=video&sourceID=notifications&feedType=single&anchorInteractId=5f522df4225e168351523eb0&interactType=like&authorId=56b28e933eef7e199f48d28a",
+    "xsec_token": "SCRUBBED",
+    "status": 0,
+    "type": "note_info",
+    "image": "http://ci.xiaohongshu.com/1040g2sg3190hvovf44704a511chjmu1np4vjrno?imageView2/2/w/1080/format/jpg",
+    "image_info": {
+     "url": "http://ci.xiaohongshu.com/1040g2sg3190hvovf44704a511chjmu1np4vjrno?imageView2/2/w/1080/format/jpg",
+     "width": 1080,
+     "height": 1440
+    },
+    "user_info": {
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0,
+     "userid": "5f522df4225e168351523eb0"
+    }
+   },
+   "liked": false
+  },
+  {
+   "time": 1722186769,
+   "score": 313234753,
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的粉丝",
+    "xsec_token": "SCRUBBED",
+    "userid": "7731cd66112207dac7ee504c",
+    "nickname": "互动者16",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/8a840b1b7baccd001af1b59fb65b9408?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans"
+   },
+   "item_info": {
+    "link": "xhsdiscover://profile/avatarPreview?uid=8536e22607d5470be1b16c63",
+    "user_info": {
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0,
+     "nickname": "互动者02"
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "avatar",
+    "id": "1040g2jo31504tm7b146g5noda2v08d26ag6iiko",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/e10cc7f41d3a14da304c627be24809e1?imageView2/2/w/120/format/jpg"
+   },
+   "track_type": "71",
+   "id": "313234753",
+   "type": "liked/item",
+   "title": "赞了你的头像",
+   "liked": false,
+   "time_flag": 0
+  },
+  {
+   "item_info": {
+    "image": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+    "link": "xhsdiscover://item/discovery.69e34d98000000001d01a83e?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "id": "69e34d98000000001d01a83e",
+    "content": "情绪缓存已满，允许宕机",
+    "image_info": {
+     "url": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+     "width": 40,
+     "height": 40
+    },
+    "illegal_info": {
+     "status": 1,
+     "desc": "该内容已删除",
+     "illegal_status": "DELETE"
+    }
+   },
+   "track_type": "6",
+   "liked": false,
+   "id": "7630076017583514520",
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "time": 1776515510,
+   "score": 7630076017583514520,
+   "time_flag": 0,
+   "user_info": {
+    "userid": "6aaf7424f026cd356031e3a3",
+    "nickname": "互动者17",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/4daea95d2d6aad1c9efe2c8d1c6354bf?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED"
+   }
+  },
+  {
+   "time": 1776515510,
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "user_info": {
+    "nickname": "互动者17",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/4daea95d2d6aad1c9efe2c8d1c6354bf?imageView2/2/w/120/format/jpg",
+    "fstatus": "none",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "6aaf7424f026cd356031e3a3"
+   },
+   "item_info": {
+    "content": "情绪缓存已满，允许宕机",
+    "image_info": {
+     "url": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+     "width": 40,
+     "height": 40
+    },
+    "user_info": {
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg",
+     "red_official_verify_type": 0
+    },
+    "id": "69e34d98000000001d01a83e",
+    "image": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+    "illegal_info": {
+     "status": 1,
+     "desc": "该内容已删除",
+     "illegal_status": "DELETE"
+    },
+    "link": "xhsdiscover://item/discovery.69e34d98000000001d01a83e?type=normal&sourceID=notifications&feedType=single",
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info"
+   },
+   "track_type": "6",
+   "liked": false,
+   "time_flag": 0,
+   "id": "7630076017583514520",
+   "score": 7630076017583514520
+  },
+  {
+   "liked": false,
+   "id": "7650679357955455202",
+   "type": "liked/item",
+   "title": "赞了你的笔记",
+   "time": 1781312599,
+   "user_info": {
+    "red_official_verify_type": 0,
+    "indicator": "你的关注",
+    "xsec_token": "SCRUBBED",
+    "userid": "c1084c80b7488ee401b5ee92",
+    "nickname": "互动者18",
+    "image": "https://sns-avatar-qc.xhscdn.com/avatar/05649c365079134803f6b32e98ae37e0?imageView2/2/w/120/format/jpg",
+    "fstatus": "follows"
+   },
+   "track_type": "6",
+   "score": 7650679357955455202,
+   "item_info": {
+    "image": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+    "image_info": {
+     "height": 40,
+     "url": "https://picasso-static.xiaohongshu.com/fe-platform/202661a98e8a30595b0b783fb9396d33561790e3.png",
+     "width": 40
+    },
+    "status": 0,
+    "xsec_token": "SCRUBBED",
+    "type": "note_info",
+    "id": "69dbce4000000000230121e9",
+    "content": "32岁量化分析师：允许代码跑飞十分钟",
+    "illegal_info": {
+     "status": 1,
+     "desc": "该内容已删除",
+     "illegal_status": "DELETE"
+    },
+    "link": "xhsdiscover://item/discovery.69dbce4000000000230121e9?type=normal&sourceID=notifications&feedType=single",
+    "user_info": {
+     "red_official_verify_type": 0,
+     "userid": "8536e22607d5470be1b16c63",
+     "nickname": "互动者02",
+     "image": "https://sns-avatar-qc.xhscdn.com/avatar/993d8fad0dc1200b5a0014339ec021da?imageView2/2/w/120/format/jpg"
+    }
+   },
+   "time_flag": 0
+  }
+ ],
+ "connections": [
+  {
+   "user": {
+    "xsec_token": "SCRUBBED",
+    "userid": "1e68e4edd2e8a61937b4bea1",
+    "nickname": "互动者19",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/5f6f675ccc3622130c4bd5ff7a17ebce?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans",
+    "red_official_verify_type": 0
+   },
+   "time": 1786409699,
+   "score": 7672571236194674000,
+   "track_type": "1",
+   "id": "7672571236194673713",
+   "type": "follow/you",
+   "title": "开始关注你了"
+  },
+  {
+   "type": "follow/you",
+   "title": "开始关注你了",
+   "user": {
+    "userid": "00429480b48fac8816e1921d",
+    "nickname": "互动者20",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/20617845358ca6d7a429b134345c6aaf?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED"
+   },
+   "time": 1786282052,
+   "score": 7672022996136374000,
+   "track_type": "1",
+   "id": "7672022996136373942"
+  },
+  {
+   "id": "7672007117640657859",
+   "type": "follow/you",
+   "title": "开始关注你了",
+   "user": {
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "4bd9c49f942ea95d285fd891",
+    "nickname": "互动者21",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/1472e199798df314957984bcb8c71481?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans"
+   },
+   "time": 1786278355,
+   "score": 7672007117640658000,
+   "track_type": "1"
+  },
+  {
+   "score": 7671905447175152000,
+   "track_type": "1",
+   "id": "7671905447175151333",
+   "type": "follow/you",
+   "title": "开始关注你了",
+   "user": {
+    "xsec_token": "SCRUBBED",
+    "userid": "34efd0ed070be7aa4f27fbac",
+    "nickname": "互动者22",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/4ae619404d65291469e7c143ec18cb3e?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans",
+    "red_official_verify_type": 0
+   },
+   "time": 1786254683
+  },
+  {
+   "id": "7671676405159185866",
+   "type": "follow/you",
+   "title": "开始关注你了",
+   "user": {
+    "userid": "cbcf39d1a5cf2a3a37ba58a5",
+    "nickname": "互动者23",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/ec7c981f7b9cf21e6d3b0c710c0b2dcd?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans",
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED"
+   },
+   "time": 1786201355,
+   "score": 7671676405159185000,
+   "track_type": "1"
+  },
+  {
+   "user": {
+    "xsec_token": "SCRUBBED",
+    "userid": "997b5fca682ed19edb033718",
+    "nickname": "互动者08",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/9370e2bb73e44fab732ceb3f1ff0b7cc?imageView2/2/w/120/format/jpg",
+    "fstatus": "both",
+    "red_official_verify_type": 0
+   },
+   "time": 1786003499,
+   "score": 7670826620478858000,
+   "track_type": "1",
+   "id": "7670826620478858668",
+   "type": "follow/you",
+   "title": "开始关注你了"
+  },
+  {
+   "title": "开始关注你了",
+   "user": {
+    "red_official_verify_type": 0,
+    "xsec_token": "SCRUBBED",
+    "userid": "127a7cfd1b8f230601f18389",
+    "nickname": "互动者24",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/22708719dd40c864bfa4299550f759cd?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans"
+   },
+   "time": 1785644064,
+   "score": 7669282858908893000,
+   "track_type": "1",
+   "id": "7669282858908893595",
+   "type": "follow/you"
+  },
+  {
+   "id": "7668343802595324403",
+   "user": {
+    "xsec_token": "SCRUBBED",
+    "userid": "2da0a4af37fb25a7d9502f31",
+    "nickname": "互动者25",
+    "images": "https://sns-avatar-qc.xhscdn.com/avatar/1209e1ab32b2d3d8806555a962737116?imageView2/2/w/120/format/jpg",
+    "fstatus": "fans",
+    "red_official_verify_type": 0
+   },
+   "time": 1785425423,
+   "tag_type": "pymk",
+   "type": "follow/you",
+   "title": "Ta关注了你，期待你的回关",
+   "score": 7668343802595324000,
+   "track_type": "1",
+   "tag": "你可能认识的人"
+  }
+ ]
+}

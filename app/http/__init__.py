@@ -8,6 +8,7 @@ ALL_MANIFEST_ENTRIES 拼其 MANIFEST_ENTRIES(/api/* 之外的路由如 downloads
 from app.http import (
     accounts_rest,
     admin_rest,
+    audience_rest,
     cookies_import,
     content_archive_rest,
     cookies_rest,
@@ -60,6 +61,7 @@ ALL_ROUTERS = [
     interaction_backfill_rest.router,
     managed_accounts_rest.router,
     self_interactions_rest.router,
+    audience_rest.router,
     op_images_rest.router,
     podcast_rest.router,
     publish_artifacts_rest.router,
@@ -93,6 +95,7 @@ ALL_MANIFEST_ENTRIES = [
     *interaction_backfill_rest.MANIFEST_ENTRIES,
     *managed_accounts_rest.MANIFEST_ENTRIES,
     *self_interactions_rest.MANIFEST_ENTRIES,
+    *audience_rest.MANIFEST_ENTRIES,
     *op_images_rest.MANIFEST_ENTRIES,
     *podcast_rest.MANIFEST_ENTRIES,
     *publish_artifacts_rest.MANIFEST_ENTRIES,

@@ -4,6 +4,8 @@
 以及 Alembic autogenerate(env.py 导入本包)据此感知全部表结构。
 """
 
+from app.models.audience_event import AudienceEvent
+from app.models.audience_sync_state import AudienceSyncState
 from app.models.browser_job import BrowserJob
 from app.models.content_archive import ContentArchive
 from app.models.note_deletion import NoteDeletion
@@ -43,4 +45,6 @@ __all__ = [
     "PsychGlossary",
     "StyleProfile",
     "StyleProfileVersion",
+    "AudienceEvent",
+    "AudienceSyncState",
 ]

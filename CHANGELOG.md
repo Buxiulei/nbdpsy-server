@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.24.0 (2026-08-12)
+
+**受众行为库上线:把「谁在跟我们矩阵互动」沉淀成可查、可分层、可打分的公开行为资产(纯新增)。**
+设计 `docs/design/2026-08-12-audience-behavior-library-design.md`,取证依据是号1 通知页实采的
+922 条赞收藏 + 98 条关注(两年触底)。
+
+- **采集**:新 job kind `audience_sync`,UI 驱动被动监听通知页 `/you/likes` 与 `/you/connections`
+  ——**不逆向签名直调接口**,全程 `SyncHumanActions` 只读导航 + 滚动,无任何点赞/关注/进陌生人
+  主页/提交类点击。`AudienceSyncScheduler` 每 `AUDIENCE_SYNC_INTERVAL`(默认 3600s)挑一个到期
+  未采的**代管号**派一张单(在飞不叠、挑不出跳过、只插 queued 行不 spawn_inline)。首采全量
+  翻到底,之后增量翻到已知事件即停(全量封顶 40 轮 / 增量 5 轮)。
+- **两张新表**(迁移 `a7c31e9b48d2`,**无 seed**):`audience_events` 一次互动一行(去重键
+  `(account_id, platform_event_id)`),`audience_sync_state` 每号每 channel 一条增量游标。
+- **解析**:五种通知事件各自取笔记 id 的位置**都不一样**,分叉写死并用取证快照的真实 message
+  单测钉死 —— `faved/item` 的笔记在 `item_info.attach_item_info`(`item_info` 本体是收藏夹)、
+  `liked/item`+`avatar` 没有笔记(它的 `item_info.id` 是头像文件名)、`liked/share/item` 没有
+  `content` 键、connections 的互动者挂在 `user` 且头像键是复数 `images`。
+- **5 个分析端点**(纯 DB 读,零会话成本):`GET /api/audience/overview`(汇总卡)、`/actors`
+  (列表,按潜客分/次数/最近互动排序 + 关系/互动类型筛)、`/actors/{userid}`(单人纵向轨迹:
+  时间线 + 跨号分布 + 关系演变变化点 + 打分明细)、`/funnel`(五层潜客漏斗 + 各层代表人物)、
+  `/segments`(关系分布 / 活跃度分档 / 互动类型 / 内容偏好)。
+- **潜客打分**:五维(互动次数 / 跨号数 / 最近度 / 互动深度 / 关系位置)候选集内 min-max 归一化
+  后加权,权重 `AUDIENCE_SCORE_WEIGHTS` 可配。⚠️ **这是 v1 启发式不是科学模型** —— 转化回流
+  数据(谁最终进了私域)当前不存在,分数只是可解释的相对排序,不是概率;代码、manifest、
+  回执三处都写着"待真实转化数据校准"。
+- **合规边界(硬红线)**:只存平台通知流已公开给我们的字段;库里**没有也不会有** `actor_userid`
+  → 来访者真实身份(姓名/手机/预约/咨询关系)的关联列或表(迁移测试按列名钉死这条);不采集
+  互动者主页;自家矩阵号 user_id 从 `xhs_accounts` **现查**排除(默认剔除,`exclude_self=false`
+  可看自家互刷量)。
+- 新配置四项:`AUDIENCE_SYNC_ENABLED`(kill switch)/ `AUDIENCE_SYNC_INTERVAL` /
+  `AUDIENCE_SCORE_WEIGHTS` / `AUDIENCE_SELF_EXCLUDE`。
+
 ## 0.23.3 (2026-08-11)
 
 **已发布笔记编辑易用性增强:done 结果带「当场可判定」回读摘要 + 长正文轮询超时指引(纯增)。**

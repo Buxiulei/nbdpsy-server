@@ -34,6 +34,7 @@ from app.core.config import settings
 from app.models.browser_job import BrowserJob
 from app.models.publish_job import PublishJob
 from app.services import op_images as op_images_service
+from app.services.audience_sync_scheduler import AudienceSyncScheduler
 from app.services.content_archive import ArchiveReaper
 from app.services.draft_clean import DraftCleanScheduler
 from app.services.dreamina import ClipReaper, DreaminaScheduler
@@ -170,6 +171,7 @@ class Supervisor:
         self._draft_clean_scheduler: DraftCleanScheduler | None = None
         self._retention_scheduler: RetentionScheduler | None = None
         self._interaction_backfill_scheduler: InteractionBackfillScheduler | None = None
+        self._audience_sync_scheduler: AudienceSyncScheduler | None = None
         self._onboarding_scheduler: OnboardingScheduler | None = None
         self._egress_guard: EgressGuard | None = None
         self._video_scheduler = None
@@ -248,6 +250,13 @@ class Supervisor:
                 self._session_factory, settings.INTERACTION_BACKFILL_INTERVAL
             )
             self._interaction_backfill_scheduler.start()
+        if settings.AUDIENCE_SYNC_ENABLED and settings.AUDIENCE_SYNC_INTERVAL > 0:
+            # 受众行为库采集:与补量调度同门(只插 queued 行,浏览器在 account_worker 子进程)。
+            # ENABLED 是 kill switch —— 平台改版/撞墙频繁时先关它止血,已入库数据与分析端点不受影响。
+            self._audience_sync_scheduler = AudienceSyncScheduler(
+                self._session_factory, settings.AUDIENCE_SYNC_INTERVAL
+            )
+            self._audience_sync_scheduler.start()
         if settings.ONBOARDING_CHECK_INTERVAL > 0:
             self._onboarding_scheduler = OnboardingScheduler(
                 self._session_factory,
@@ -298,6 +307,9 @@ class Supervisor:
         if self._onboarding_scheduler is not None:
             await self._onboarding_scheduler.stop()
             self._onboarding_scheduler = None
+        if self._audience_sync_scheduler is not None:
+            await self._audience_sync_scheduler.stop()
+            self._audience_sync_scheduler = None
         if self._interaction_backfill_scheduler is not None:
             await self._interaction_backfill_scheduler.stop()
             self._interaction_backfill_scheduler = None

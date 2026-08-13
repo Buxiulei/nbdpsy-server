@@ -50,6 +50,9 @@ _IDEMPOTENT_KINDS = (
     "note_components_read",
     "note_media_sync",  # 纯只读快照,重跑零副作用
     "note_extract_comments",  # 他人笔记评论只读抓取,结果按 note_id 覆盖写缓存
+    # 受众事件采集:纯只读通知页 + ON CONFLICT DO NOTHING 入库 + 游标只进不退,
+    # 重跑最多把同一段重采一遍
+    "audience_sync",
 )
 
 # 进程内消费任务强引用集合:防未完成的 asyncio.Task 被 GC 提前回收。

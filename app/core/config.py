@@ -288,6 +288,29 @@ class Settings(BaseSettings):
     # 真正决定"多久补完"的是日上限,不是这个值。
     INTERACTION_BACKFILL_INTERVAL: int = 1800
 
+    # ── 受众行为库(audience,设计 docs/design/2026-08-12-audience-behavior-library-design.md)──
+    # 采集调度总开关(kill switch)。关掉只停**采集**,已入库的数据与 5 个分析端点照常。
+    # 出问题(平台改版 / 撞墙频繁)时先关它止血,不必回滚代码。
+    AUDIENCE_SYNC_ENABLED: bool = True
+    # 采集扫描间隔(秒)。它同时是**每号的到期门槛** —— 一个号距上次采集超过这么久才轮到它。
+    # 一小时一次的依据:增量轮只滚到已知区(实测号1 全量 47 页 40 轮,增量封顶 5 轮),
+    # 而通知流不会在一小时里堆出翻不完的量。调小 = 每号更频繁地开真号会话,
+    # 直接顶到 ACCOUNT_HOURLY_SESSION_CAP=4 那条风控红线上,**风险由业务侧承担**。
+    AUDIENCE_SYNC_INTERVAL: int = 3600
+    # 潜客打分五维权重(JSON 串)。各维度先在候选人群内 min-max 归一化再加权,
+    # 故权重之比就是重要性之比,与量纲无关。
+    # ⚠️ **这是 v1 启发式,不是科学模型**:转化回流数据(谁最终进了私域)当前不存在,
+    # 权重是运营直觉的初版。真实转化数据到位后必须回来重标定 —— 这个配置项就是为那天留的。
+    # 解析失败/取值非法一律回退代码里的默认值并告警(见 audience_analytics.parse_weights)。
+    AUDIENCE_SCORE_WEIGHTS: str = (
+        '{"frequency":0.30,"cross_account":0.20,"recency":0.20,'
+        '"depth":0.15,"relation":0.15}'
+    )
+    # 分析端点是否默认剔除自家矩阵号(user_id 从 xhs_accounts 现查,不硬编码)。
+    # 出厂 true:不剔的话"最活跃的受众"永远是自家号互刷出来的量,整个库读起来就是废话。
+    # 单次调用可用 ?exclude_self=false 覆盖(排查自家互刷量时要看得见它们)。
+    AUDIENCE_SELF_EXCLUDE: bool = True
+
     # ── 合集批量清理(note_collection_batch,2026-08-07 运营移出需求 P1/P2)──
     # 两个上限差一个数量级,因为**两条路的代价差一个数量级**:
     # - 移出(dry_run=false)每篇是一次真「更新」提交(全量覆盖语义),比点赞收藏重得多,
