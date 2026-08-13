@@ -88,6 +88,7 @@ async def _add_note(
     permission_code: int | None = 0,
     first_seen_at: datetime | None = None,
     platform_published_at: datetime | None = None,
+    deleted_at: datetime | None = None,
 ) -> int:
     """造一行台账笔记;返回行 id。"""
     async with db_module.async_session() as s:
@@ -95,6 +96,7 @@ async def _add_note(
             account_id=account_id,
             note_id=note_id,
             title=title,
+            deleted_at=deleted_at,
             published_at=platform_published_at or datetime(2026, 7, 1),
             platform_published_at=platform_published_at or datetime(2026, 7, 1),
             first_seen_at=first_seen_at or datetime(2026, 7, 1),
@@ -245,6 +247,19 @@ async def test_only_public_notes_are_picked(wired_db):
 
     plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
     assert [t["note_id"] for t in plan["targets"]] == ["pub"]
+
+
+async def test_deleted_notes_excluded_from_candidates(wired_db):
+    """deleted_at 非空的笔记不派单:淘汰真删/平台收走补标后,调度与总账口径必须一致
+    (coverage 端点按 deleted_at IS NULL 计分母,不滤则给死笔记白开页)。"""
+    from datetime import datetime as _dt
+    await _add_account(1)
+    await _add_account(2)
+    await _add_note(1, "alive", permission_code=0)
+    await _add_note(1, "dead", permission_code=0, deleted_at=_dt(2026, 8, 13))
+
+    plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
+    assert [t["note_id"] for t in plan["targets"]] == ["alive"]
 
 
 async def test_note_without_id_or_publisher_user_id_excluded(wired_db):

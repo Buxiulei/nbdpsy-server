@@ -419,6 +419,10 @@ async def plan_round(
             await session.execute(
                 select(PublishedNote)
                 .where(
+                    # 已删笔记(淘汰真删/平台收走后由对账补标)不再派单:总账端点
+                    # 按 deleted_at IS NULL 计分母,这里不滤两边就会分叉——调度给
+                    # 死笔记白开页,而总账早已不数它(coverage 单交付时点出的口径分歧)
+                    PublishedNote.deleted_at.is_(None),
                     PublishedNote.account_id.in_(owners),
                     PublishedNote.note_id.is_not(None),
                     # permission_code 必须**显式等于 0**:写 `!= 1` 或 `not permission_code`

@@ -232,7 +232,8 @@ def _delete_first_match(page, human: SyncHumanActions, title: str) -> int:
 
 
 def delete_notes_by_title(
-    page, account_id: int, title: str, count: int = 1
+    page, account_id: int, title: str, count: int = 1,
+    allow_ambiguous: bool = False,
 ) -> Dict[str, Any]:
     """按标题删除最多 ``count`` 篇笔记(一次会话逐篇删,省反复起浏览器)。
 
@@ -241,6 +242,9 @@ def delete_notes_by_title(
         account_id: 账号 ID(日志用)。
         title: 笔记标题(精确匹配,容忍卡片截断省略号)。
         count: 最多删除篇数(同题多篇时逐篇删,每篇独立校验)。
+        allow_ambiguous: 同题卡 ≥2 张时是否仍执行。**默认拒绝**(2026-08-13 李冠阳
+            双篇事故:同题一死一活,"删首张"=按发布时间倒序的最新篇,恰好删掉要保留的
+            健康篇——歧义下的不可逆操作必须由人显式确认后放行,如"删 N 留 1"的同题清理)。
 
     Returns:
         {"deleted": 实际删除数, "remaining": 剩余同题卡数}
@@ -251,6 +255,16 @@ def delete_notes_by_title(
     human = SyncHumanActions(page)
     _open_note_manage(page, human, account_id)
     human.wait(1.0, 2.0, context="笔记管理页浏览")
+
+    # 同名歧义硬闸:动手前先数同题卡。删除按 DOM 序(=发布时间倒序)取首张,
+    # 同题多篇时"删哪张"对调用方是不可见的随机——不可逆操作拒绝在歧义下执行。
+    found = page.evaluate(_FIND_CARD_JS, title)
+    same_title = int(found.get("count", 0)) if found.get("found") else 0
+    if same_title >= 2 and not allow_ambiguous:
+        raise NoteDeleteError(
+            f"ambiguous_title: 管理页同题卡 {same_title} 张,无法确定删除目标,拒绝执行;"
+            f"确系同题清理(删 N 留 1)请带 allow_ambiguous 重试"
+        )
 
     deleted = 0
     for i in range(count):

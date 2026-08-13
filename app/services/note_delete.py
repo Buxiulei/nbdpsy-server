@@ -35,7 +35,8 @@ _registry: dict[str, dict] = {}
 
 
 def start_delete(
-    account_id: int, cookies: list[dict], title: str, count: int = 1
+    account_id: int, cookies: list[dict], title: str, count: int = 1,
+    allow_ambiguous: bool = False,
 ) -> str:
     """登记一条 browser_jobs 台账并(all 模式)派进程内执行,立即返回 deletion_id。
 
@@ -43,7 +44,8 @@ def start_delete(
     供 execute 做 note_deletions 双写(execute 契约签名不含 job id)。
     """
     deletion_id = uuid.uuid4().hex
-    payload = {"title": title, "count": count, "deletion_id": deletion_id}
+    payload = {"title": title, "count": count, "deletion_id": deletion_id,
+               "allow_ambiguous": allow_ambiguous}
     browser_jobs_repo.enqueue_from_request(
         "note_delete", payload, account_id=account_id, job_id=deletion_id
     )
@@ -142,7 +144,8 @@ def _delete_sync(account_id: int, cookies: list[dict], title: str, count: int) -
         start = client.start()
         if not start.get("success"):
             raise NoteDeleteError(f"browser_start_failed: {start.get('error')}")
-        return delete_notes_by_title(client.page, account_id, title, count)
+        return delete_notes_by_title(client.page, account_id, title, count,
+            allow_ambiguous=bool((payload or {}).get("allow_ambiguous")))
     finally:
         client.stop()
 

@@ -72,7 +72,10 @@ MANIFEST_ENTRIES = [
         "admin_only": False,
         "params": {"account_id": "path,int",
                    "title": "body,str(笔记标题,精确匹配,容忍卡片截断)",
-                   "count": "body,int=1(同题多篇时一次会话最多删几篇)"},
+                   "count": "body,int=1(同题多篇时一次会话最多删几篇)",
+                   "allow_ambiguous": "body,bool=false(同题卡≥2张默认拒绝执行报"
+                                      " ambiguous_title——删除按管理页序取首张=最新篇,"
+                                      "同题一死一活会删错;确系删N留1清理才带 true)"},
         "returns": '{deletion_id, status:"running"}',
         "errors": "403=无该号授权;404=账号不存在",
         "notes": "异步契约:起后台浏览器进创作中心笔记管理页,按标题悬停出删除图标→确认弹窗删除"
@@ -160,6 +163,12 @@ class NoteDeletionRequest(BaseModel):
 
     title: str = Field(min_length=1, max_length=100, description="笔记标题(精确匹配)")
     count: int = Field(default=1, ge=1, le=10, description="同题多篇时一次最多删几篇")
+    allow_ambiguous: bool = Field(
+        default=False,
+        description="管理页同题卡 ≥2 张时是否仍执行。默认拒绝(ambiguous_title):"
+                    "删除按管理页顺序取首张=最新篇,同题一死一活场景会删错;"
+                    "确系同题清理(删 N 留 1)才显式带 true",
+    )
 
 
 @router.post("/api/accounts/{account_id}/note-deletions", status_code=202)
@@ -177,7 +186,8 @@ async def start_note_deletion_endpoint(
             raise NotFoundError(f"账号 {account_id} 不存在")
         cookies = _decrypt_account_cookies(account)
     deletion_id = note_delete.start_delete(
-        account_id, cookies, payload.title, payload.count
+        account_id, cookies, payload.title, payload.count,
+        allow_ambiguous=payload.allow_ambiguous,
     )
     return {"deletion_id": deletion_id, "status": "running"}
 
