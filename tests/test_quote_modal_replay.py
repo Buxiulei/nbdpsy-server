@@ -89,21 +89,58 @@ def test_edited_note_is_excluded_from_candidates(scene):
 
 
 class _ReplayHuman:
-    """假拟人层:点击触发用例注入的状态迁移(见 ReplayPage.set_text 的分工说明)。"""
+    """假拟人层:点击触发用例注入的状态迁移(见 ReplayPage.set_text 的分工说明)。
+
+    这里复刻的两条迁移都来自夹具本身的证据,不是想象:
+
+    - 夹具采于"什么都没选中"那一刻,「确认引用」是 **disabled**(属性 + class 里的裸
+      token 双双在案)。所以"点候选卡 → 按钮解禁"是这个弹窗必然存在的一条迁移;
+    - **禁用的按钮点了无事发生** —— 2026-08-13 号 7 连续三单 ``quote_not_applied``
+      的真相。假拟人层如实照做,生产代码里的禁用闸才测得出来。
+    """
+
+    _BUTTON_LABELS = {
+        nc._QUOTE_CONFIRM_TEXT, nc._QUOTE_CANCEL_TEXT, nc._QUOTE_TAB_OTHER_TEXT, "我的笔记",
+    }
+    # 解禁后的 class:摘掉 disabled 属性与裸 token(夹具禁用态原文的对照版)
+    _ENABLED_CLS = ("d-button d-button-default d-button-with-content --color-static bold "
+                    "--color-bg-fill --color-white custom-button bg-red confirm-width")
 
     def __init__(self, page):
         self.page = page
         self.clicked = []
+        self.scrolls = 0
+        self.hovers = []
 
     def wait(self, *_a, **_kw):
         pass
 
-    def click(self, target, *, reason="", **_kw):
+    def scroll(self, *_a, **_kw):
+        self.scrolls += 1
+
+    def hover(self, target=None, *, reason="", **_kw):
+        self.hovers.append(
+            target.inner_text() if hasattr(target, "inner_text") else str(target)
+        )
+
+    def click(self, target, *, reason="", random_offset=True, **_kw):
         text = target.inner_text() if hasattr(target, "inner_text") else str(target)
         self.clicked.append(text)
-        # 点「确认引用」→ 引用区变成"引用了 <被选中那张卡的文案>"(真页面的可观察行为)
+        if text not in self._BUTTON_LABELS:
+            self._enable_confirm()      # 选中候选卡 → 「确认引用」解禁
+            return
+        # 点「确认引用」→ 引用区变成"引用了 <被选中那张卡的文案>"(真页面的可观察行为);
+        # **禁用态下什么都不会发生**
         if text == nc._QUOTE_CONFIRM_TEXT and len(self.clicked) >= 2:
-            self.page.set_text(nc._QUOTE_CONTAINER, f"引用了 {self.clicked[-2]}")
+            if nc._quote_confirm_state(self.page).get("enabled"):
+                self.page.set_text(nc._QUOTE_CONTAINER, f"引用了 {self.clicked[-2]}")
+
+    def _enable_confirm(self):
+        self.page.set_attrs(
+            f"{nc._QUOTE_MODAL} button",
+            {"disabled": None, "class": self._ENABLED_CLS},
+            match_text=nc._QUOTE_CONFIRM_TEXT,
+        )
 
     def type_text(self, target, text, **_kw):
         self.clicked.append(text)
@@ -240,7 +277,7 @@ def test_candidates_are_merged_across_pages(scene):
     pages = page.emit_recorded(nc._POSTED_API_MARK)
     assert pages >= 2, "这份夹具只有一页,证明不了合并;换个笔记多的账号重采"
 
-    merged = nc._wait_all_candidate_notes(page, responses, 0)
+    merged, _exhausted = nc._wait_all_candidate_notes(page, _ReplayHuman(page), responses, 0)
 
     per_page = [
         len(((r.get("body") or {}).get("data") or {}).get("notes") or [])
@@ -251,6 +288,92 @@ def test_candidates_are_merged_across_pages(scene):
     # 顺序是选卡算法的依据,去重不能打乱它
     first_page_first = ((scene["api"][0].get("body") or {}).get("data") or {})["notes"][0]
     assert str(merged[0]["id"]) == str(first_page_first["id"]), "应保持首次出现的顺序"
+
+
+def test_fixture_confirm_button_starts_disabled(scene):
+    """夹具本身就是「确认引用」**禁用态**的证据 —— 缺陷 B 的判据全靠它。
+
+    这条红了说明夹具是在"已经选中某张卡"的时刻采的,禁用态的原文就丢了,
+    ``_quote_confirm_state`` 的两路判据(disabled 属性 + class 裸 token)也就没了背书。
+    """
+    buttons = scene["dom"][f"{nc._QUOTE_MODAL} button"]
+    confirm = next(b for b in buttons if b["text"] == nc._QUOTE_CONFIRM_TEXT)
+
+    assert "disabled" in confirm["attrs"], "夹具里「确认引用」应带 disabled 属性"
+    assert nc._QUOTE_DISABLED_TOKEN in (confirm["attrs"].get("class") or "").split(), (
+        "夹具里「确认引用」的 class 应含**独立 token** disabled"
+    )
+
+    page = ReplayPage(scene)
+    assert nc._quote_confirm_state(page) == {
+        "found": True, "enabled": False, "cls": confirm["attrs"]["class"],
+    }
+
+
+def test_real_code_refuses_to_click_disabled_confirm(scene):
+    """选中态一直没生效 → 报 ``quote_card_select_not_applied``,**绝不点那颗禁用按钮**。
+
+    这是 2026-08-13 号 7 三单失败的病灶:老实现点完卡不回读就去点「确认引用」,
+    而没选中时它本就是禁用的,点了无事发生,最后以 ``quote_not_applied`` 的面目出现
+    —— 把排查引向"确认按钮/引用区",而真正坏掉的是**上一步**。
+    """
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+    human = _ReplayHuman(page)
+    human._enable_confirm = lambda: None      # 点卡片不解禁:复刻"选中静默失效"
+    target = next(
+        n for n in _api_notes(scene)
+        if str(n.get("id")) != scene["source_note_id"] and n.get("display_title")
+    )
+
+    out = nc._set_quote_in_modal(page, human, responses, str(target["id"]), 0)
+
+    assert out["status"] == "error"
+    assert "quote_card_select_not_applied" in out["reason"]
+    assert nc._QUOTE_CONFIRM_TEXT not in human.clicked
+
+
+def test_candidates_exhausted_when_scrolling_yields_nothing(scene):
+    """夹具是**静态**的:滚了也不会有新页 → 判定"翻到底了"(exhausted=True)。
+
+    ``exhausted`` 是降级门的依据:只有"确实把本账号笔记翻完了都没有它",
+    才谈得上"这多半是别人的笔记"。
+    """
+    page = ReplayPage(scene)
+    responses = nc.ComponentResponses()
+    responses.attach(page)
+    page.emit_recorded(nc._POSTED_API_MARK)
+    human = _ReplayHuman(page)
+
+    notes, exhausted = nc._wait_all_candidate_notes(page, human, responses, 0)
+
+    assert exhausted is True
+    assert len(notes) == len(_api_notes(scene))
+    assert human.scrolls == nc._QUOTE_SCROLL_IDLE_ROUNDS, "到底后不该继续空转"
+    assert human.hovers, "滚之前必须先 hover 到候选卡上(落点打错就滚了别的容器)"
+
+
+def test_scroll_anchor_stays_above_modal_footer(scene):
+    """滚轮落点必须选**页脚之上**那张卡 —— 夹具里第 3、4 行卡已经在页脚之下了。
+
+    页脚(「取消」)在 y=632,而卡片行分别在 y=188/386/584/782。拿末尾那张当落点
+    等于把鼠标移到弹窗外面去滚,正是本仓"滚轮打在侧栏"的老毛病。
+    """
+    page = ReplayPage(scene)
+    cards = page.query_selector_all(nc._QUOTE_NOTE_CARD)
+    footer_top = page.query_selector_all(f"{nc._QUOTE_MODAL} button")
+    limit = next(
+        b.bounding_box()["y"] for b in footer_top
+        if b.inner_text() == nc._QUOTE_CANCEL_TEXT
+    )
+
+    anchor = nc._pick_scroll_anchor(page, cards)
+    box = anchor.bounding_box()
+
+    assert box["y"] + box["height"] / 2 < limit, "落点卡落在弹窗页脚之下"
+    assert anchor is not cards[-1], "夹具里最后一张卡在页脚之下,不该被选成落点"
 
 
 def test_first_page_note_is_quotable(scene):

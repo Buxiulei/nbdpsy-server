@@ -16,6 +16,8 @@
 patch 纪律:打在被测模块的命名空间(顶层 import 的依赖),不是源模块。
 """
 
+import time
+
 import pytest
 
 from app.browser import matrix_interact as mi
@@ -32,9 +34,12 @@ class _El:
     """假元素:只提供被测代码真用到的能力(读文本/读 value/取矩形/子查询/被点)。"""
 
     def __init__(self, text="", *, on_click=None, value="", children=None, href=None,
-                 on_type=None, on_hover=None, on_files=None, cls=None):
+                 on_type=None, on_hover=None, on_files=None, cls=None, attrs=None,
+                 rect=None):
         self._text = text
         self._cls = cls
+        self._attrs = dict(attrs or {})   # 任意属性(「确认引用」的 disabled 要读它)
+        self._rect = rect                 # 需要几何关系时给(引用弹窗判"卡在页脚之上没")
         self.on_click = on_click
         self.on_type = on_type   # 被 type_text 输入时的副作用(他人笔记检索框用)
         self.on_hover = on_hover  # 被 hover 时的副作用(合集 chip 的 × 是 hover 才显)
@@ -53,12 +58,14 @@ class _El:
         return True
 
     def get_attribute(self, name):
+        if name in self._attrs:
+            return self._attrs[name]
         if name == "class":
             return self._cls
         return self._href if name == "href" else None
 
     def bounding_box(self):
-        return {"x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0}
+        return self._rect or {"x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0}
 
     def query_selector(self, sel):
         hits = self._children.get(sel) or []
@@ -72,19 +79,31 @@ class _El:
             self.on_files(paths)
 
 
+# 引用弹窗的几何:候选卡在页脚**之上**(照夹具的相对关系),这样"卡在不在可视区里"
+# 这条判据在假页面上也是真的走了一遍,而不是恰好读到同一个默认矩形。
+_CARD_RECT = {"x": 10.0, "y": 100.0, "width": 100.0, "height": 40.0}
+_FOOTER_RECT = {"x": 10.0, "y": 300.0, "width": 68.0, "height": 36.0}
+
+
 class _Human:
     """假拟人层:点击直接触发元素副作用,并记录 (reason, 文案) 供断言"不该点的没点"。"""
 
     def __init__(self, _page=None):
+        self._page = _page
         self.clicks = []
         self.typed = []
         self.hovers = []
+        self.scrolls = 0
 
     def wait(self, *_a, **_kw):
         pass
 
     def scroll(self, *_a, **_kw):
-        pass
+        self.scrolls += 1
+        # 真页面上滚列表会触发懒加载;假页面把这条迁移交给 Editor(它才知道还剩几页)
+        editor = getattr(self._page, "editor", None)
+        if editor is not None:
+            editor.on_scroll()
 
     def scroll_to_element(self, _el):
         pass
@@ -142,6 +161,8 @@ class Editor:
         permission_before_submit=None,
         permission_after_submit=None,
         quote_card_titles=None,
+        quote_select_silent=0,
+        quote_pages=None,
         other_notes=(),
         original_declared=False,
         original_consent_effective=True,
@@ -161,10 +182,16 @@ class Editor:
             for i, n, d in activities
         ]
         self.notes = list(notes)
+        # 候选列表**懒加载**:quote_pages 给"每滚一次才放出多少条"的节奏,None=一次给全
+        # (老行为)。放出来的条数同时决定接口发几页与渲染几张卡 —— 真页面就是这样。
+        self.quote_pages = list(quote_pages) if quote_pages else None
+        self.quote_released = len(self.notes) if self.quote_pages is None else 0
+        self.quote_page_i = 0
         self.quote_card_titles = (
             list(quote_card_titles) if quote_card_titles is not None
             else [t for _i, t in self.notes]
         )
+        self.quote_select_silent = quote_select_silent
         self.body = body
         self.title = title
         self.quote_text = "引用笔记"
@@ -257,13 +284,35 @@ class Editor:
             ]}},
         )
 
-    def _emit_posted(self):
+    def _emit_posted(self, start, end):
         self.page.emit(
             "https://creator.xiaohongshu.com/api/galaxy/v2/creator/note/user/posted?tab=1",
             {"data": {"notes": [
-                {"id": nid, "display_title": t} for nid, t in self.notes
+                {"id": nid, "display_title": t} for nid, t in self.notes[start:end]
             ]}},
         )
+
+    def _emit_next_quote_page(self):
+        """放出候选列表的下一页;没有下一页返回 False(什么都不发,与真页面同语义)。"""
+        if self.quote_pages is None:
+            self._emit_posted(0, len(self.notes))   # 老行为:一次给全
+            return True
+        if self.quote_page_i >= len(self.quote_pages):
+            return False
+        size = self.quote_pages[self.quote_page_i]
+        start, end = self.quote_released, min(self.quote_released + size, len(self.notes))
+        self.quote_page_i += 1
+        self.quote_released = end
+        self._emit_posted(start, end)
+        return True
+
+    def on_scroll(self):
+        """弹窗列表被滚 → 平台懒加载放出下一页(这正是原实现从来没触发过的那一步)。
+
+        ``quote_pages is None`` 时列表一次就给全了,再滚也不会有新响应 —— 如实照做。
+        """
+        if self.modal_open and not self.other_tab and self.quote_pages is not None:
+            self._emit_next_quote_page()
 
     def submit(self):
         """点发布:服务端处理 —— 这里回放"合集被静默丢弃"与"权限被改"两种实测坏行为。"""
@@ -306,7 +355,10 @@ class Editor:
 
     def _open_modal(self):
         self.modal_open = True
-        self._emit_posted()
+        if self.quote_pages is not None:
+            self.quote_page_i = 0
+            self.quote_released = 0
+        self._emit_next_quote_page()
 
     def _confirm_quote(self):
         if self._selected_quote is None:
@@ -336,6 +388,13 @@ class Editor:
     _selected_quote = None
 
     def _select_quote(self, title):
+        """点候选卡:``quote_select_silent`` 轮之内静默失效(复刻 2026-08-13 号 7 现场)。
+
+        真页面上"点了卡片但选中没生效"是可观测的 —— 「确认引用」保持禁用态。
+        """
+        if self.quote_select_silent > 0:
+            self.quote_select_silent -= 1
+            return
         self._selected_quote = title
 
     # ---- 原创声明的点击副作用(复刻真号探针实证的三段语义) ----
@@ -458,10 +517,13 @@ class Editor:
             if self.other_tab:
                 # 他人笔记:检索前空,检索后按 note_id 命中才出卡
                 hit = self.other_notes.get(self.other_query)
-                return [_El(hit, on_click=(lambda x=hit: self._select_quote(x)))] if hit else []
+                return [_El(hit, rect=_CARD_RECT,
+                            on_click=(lambda x=hit: self._select_quote(x)))] if hit else []
+            # 只渲染**已放出**的那几页(懒加载:没滚就只有第一页)
             return [
-                _El(f"{t} 封面", on_click=(lambda x=t: self._select_quote(x)))
-                for t in self.quote_card_titles
+                _El(f"{t} 封面", rect=_CARD_RECT,
+                    on_click=(lambda x=t: self._select_quote(x)))
+                for t in self.quote_card_titles[:self.quote_released]
             ]
         if sel == bnc._QUOTE_LINK_INPUT:
             if not (self.modal_open and self.other_tab):
@@ -473,12 +535,24 @@ class Editor:
         if sel in (f"{bnc._QUOTE_MODAL} button", ".d-modal button", "button"):
             if not self.modal_open:
                 return []
-            # 真弹窗里「确认引用」旁边就是「取消」——收尾只能点它(Escape 关不掉)
+            # 真弹窗里「确认引用」旁边就是「取消」——收尾只能点它(Escape 关不掉)。
+            # 「确认引用」的**禁用态照夹具实拍**:没选中任何卡时 disabled 属性 + class
+            # 里的裸 token 双双在案(quote_modal.json)。这不是装饰 —— 2026-08-13 号 7
+            # 三单失败正是点了这颗禁用按钮。
+            selected = self._selected_quote is not None
+            confirm_attrs = None if selected else {"disabled": ""}
+            confirm_cls = (
+                "d-button d-button-default d-button-with-content bg-red confirm-width"
+                if selected else
+                "d-button d-button-default disabled d-button-with-content "
+                "--color-text-disabled bg-red disabled confirm-width"
+            )
             return [
                 _El("我的笔记", on_click=self._switch_mine),
                 _El("他人笔记", on_click=self._switch_other),
-                _El("确认引用", on_click=self._confirm_quote),
-                _El("取消", on_click=self._cancel_quote),
+                _El("确认引用", cls=confirm_cls, attrs=confirm_attrs,
+                    rect=_FOOTER_RECT, on_click=self._confirm_quote),
+                _El("取消", rect=_FOOTER_RECT, on_click=self._cancel_quote),
             ]
         if sel == bnc._ACTIVITY_CARD:
             cards = []
@@ -623,6 +697,8 @@ def wired(monkeypatch):
         ("_EDITOR_READY_TIMEOUT_S", 0.5),
         ("_POPOVER_TIMEOUT_S", 0.4),
         ("_MODAL_TIMEOUT_S", 0.4),
+        ("_PAGE_SETTLE_S", 0.05),
+        ("_QUOTE_SELECT_SETTLE_S", 0.1),
         ("_CATALOG_TIMEOUT_S", 0.4),
         ("_ACTIVITY_FLIP_TIMEOUT_S", 0.4),
         ("_SUBMIT_TIMEOUT_S", 0.4),
@@ -870,6 +946,238 @@ def test_quote_note_not_in_candidates(monkeypatch, wired):
 
     assert "quoted_note_not_in_candidates" in result["failed"][0]["reason"]
     assert "确认引用" not in wired[0].texts
+
+
+# ---------------- 候选列表懒加载:必须主动滚动翻页(2026-08-13 缺陷 A) ----------------
+#
+# 生产现场:号 6 有 49 篇笔记,弹窗候选却只有 12 篇 —— 因为**没有任何代码去滚这个列表**,
+# 只被动等页面自己发的头一两页。排在第 37 位的目标必然被判「候选列表里没有」,
+# 再被降级门当成"别人的笔记"送进他人 tab,而那条路按设计排除本账号笔记,检索必然返回空。
+# 两路全死,运营看到的却是一句"笔记被删/私密/平台限制"的误导性报错。
+
+
+def test_quote_scrolls_to_load_later_pages(monkeypatch, wired):
+    """目标在**第 3 页**:必须滚出来才引得到(不滚的老实现在这里必红)。"""
+    notes = tuple((f"n-{i}", f"第{i}篇") for i in range(12))
+    editor = Editor(notes=notes, quote_pages=[5, 4, 3])
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-10")     # 第 11 位,只在第 3 页里
+
+    assert result["status"] == "done"
+    assert result["components"]["quote"]["title"] == "第10篇"
+    assert "第10篇" in editor.quote_text
+    assert wired[0].scrolls >= 2, "至少要滚两轮才拿得到第 3 页"
+
+
+def test_quote_scroll_anchor_is_a_candidate_card(monkeypatch, wired):
+    """滚轮落点必须**先 hover 到候选卡上**。
+
+    ``mouse.wheel`` 打在鼠标当前位置:落点挑错就是滚了别的容器(本仓 2026-05 血案:
+    滚轮打在侧栏,"翻两页就停")。所以这条锁的是"滚之前手放在列表里",
+    而不只是"滚了几次"。
+    """
+    notes = tuple((f"n-{i}", f"第{i}篇") for i in range(9))
+    editor = Editor(notes=notes, quote_pages=[4, 5])
+    _wire(monkeypatch, editor, wired)
+
+    _run(editor, quoted_note_id="n-8")
+
+    card_hovers = [t for r, t in wired[0].hovers if "封面" in str(t)]
+    assert card_hovers, f"滚动前没 hover 到候选卡上,实际 hover 记录:{wired[0].hovers}"
+
+
+def test_quote_stops_scrolling_once_target_arrives(monkeypatch, wired):
+    """目标一出现就收工:不为了"翻到底"白滚(每一轮都是真人时长)。"""
+    notes = tuple((f"n-{i}", f"第{i}篇") for i in range(20))
+    editor = Editor(notes=notes, quote_pages=[5, 5, 5, 5])
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-6")      # 第 2 页就有
+
+    assert result["status"] == "done"
+    assert wired[0].scrolls == 1, f"第 2 页就命中,只该滚 1 轮,实滚 {wired[0].scrolls}"
+
+
+def test_quote_scroll_stops_when_list_bottoms_out(monkeypatch, wired):
+    """翻到底(连续两轮没有新笔记也没有新卡)就停,不空转满封顶轮数。"""
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-b", "第二篇")), quote_pages=[2])
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-missing")
+
+    assert "quoted_note_not_in_candidates" in result["failed"][0]["reason"]
+    assert wired[0].scrolls == bnc._QUOTE_SCROLL_IDLE_ROUNDS, (
+        f"到底后该只再滚 {bnc._QUOTE_SCROLL_IDLE_ROUNDS} 轮确认,实滚 {wired[0].scrolls}"
+    )
+
+
+def test_post_scroll_settle_uses_a_short_window(monkeypatch):
+    """滚完之后没有下一页 → 按**短窗**收工,不烧开弹窗那次的整个超时。
+
+    这条钉的是成本:滚到底之后本就没有下一页,若沿用 ``_MODAL_TIMEOUT_S``(12 秒),
+    两轮确认到底就是 24 秒纯等待,每一次引用都要白付。
+    """
+    monkeypatch.setattr(bnc, "_PAGE_SETTLE_S", 0.05)
+    monkeypatch.setattr(bnc, "_QUOTE_SCROLL_WAIT_S", 0.3)
+    monkeypatch.setattr(bnc, "_MODAL_TIMEOUT_S", 5.0)
+    page = Editor().page
+    responses = bnc.ComponentResponses()
+
+    started = time.monotonic()
+    got_page = bnc._settle_candidate_pages(page, responses, 0, require_first=False)
+    elapsed = time.monotonic() - started
+
+    assert got_page is False
+    assert elapsed < 1.0, f"滚后静默窗烧了 {elapsed:.1f} 秒,说明用错了超时"
+
+
+def test_quote_scroll_treats_repeated_page_as_no_progress(monkeypatch, wired):
+    """平台把**同一页**重复发回来 → 算没进展,照样判到底。
+
+    "有没有进展"必须看多出来的笔记,不能看"有没有新响应到达"——到底之后平台完全可能
+    再回一次同样的内容,拿响应计数当进展会让循环永远用满封顶轮数,
+    ``exhausted`` 于是永远为假,跨账号引用那条合法的降级路就被自己人堵死了。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"),), quote_pages=[1])
+    # 每次滚动都把**同一页**再发一遍(响应计数在涨,内容一条没多)
+    editor.on_scroll = lambda: editor._emit_posted(0, 1) if editor.modal_open else None
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-missing")
+
+    assert "quoted_note_not_in_candidates" in result["failed"][0]["reason"]
+    assert wired[0].scrolls == bnc._QUOTE_SCROLL_IDLE_ROUNDS
+
+
+# ---------------- 降级到「他人笔记」的闸(2026-08-13 缺陷 A 第二层) ----------------
+
+
+def test_own_note_never_degrades_to_other_tab(monkeypatch, wired):
+    """台账说这篇是**本账号自己的** → 不在候选里也绝不走他人 tab(那是确定的死路)。"""
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=(("n-own", "本号的笔记 封面"),))
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-own", quoted_note_is_own=True)
+
+    reason = result["failed"][0]["reason"]
+    assert "quoted_note_not_in_candidates_after_scroll" in reason
+    assert "他人笔记" not in wired[0].texts, "本账号笔记不该切到他人 tab"
+    assert "确认引用" not in wired[0].texts
+
+
+def test_unknown_owner_still_degrades_to_other_tab(monkeypatch, wired):
+    """台账里查不到这篇(``None``)→ 照旧降级他人 tab。
+
+    跨账号引用接待员联系方式那篇是**真实业务**,不能因为台账没同步到就一并堵死。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=((_QR_NOTE, "小助手联系方式 封面"),))
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE, quoted_note_is_own=None)
+
+    assert result["status"] == "done"
+    assert result["components"]["quote"]["via"] == "other_notes_tab"
+
+
+def test_known_other_owner_degrades_to_other_tab(monkeypatch, wired):
+    """台账说这篇归**别的账号** → 正是他人 tab 该管的情形,照走。"""
+    editor = Editor(notes=(("n-a", "第一篇"),), other_notes=((_QR_NOTE, "小助手联系方式 封面"),))
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE, quoted_note_is_own=False)
+
+    assert result["status"] == "done"
+    assert result["components"]["quote"]["via"] == "other_notes_tab"
+
+
+# ---------------- 选中态回读 + 「确认引用」禁用闸(2026-08-13 缺陷 B) ----------------
+#
+# 生产现场:号 7 连续三单,候选里**找到了**目标卡、点了、也点了「确认引用」,回读却仍是
+# 空态。而夹具证明:没选中任何卡时「确认引用」本来就是 disabled 的(disabled 属性 +
+# class 里的裸 token 双双在案)—— 点一颗禁用按钮当然什么都不会发生。
+# 原实现点完卡只 wait 一下就往下走,"选中没生效"一路裸奔到最后才以 quote_not_applied
+# 的面目出现,把人往"确认按钮/引用区"上引,而真正坏掉的是**上一步**。
+
+
+def test_quote_confirm_state_reads_fixture_disabled_form(monkeypatch, wired):
+    """禁用判据认夹具实拍的两路:``disabled`` 属性 + class 里的**裸 token**。"""
+    editor = Editor()
+    _wire(monkeypatch, editor, wired, publish=False)
+    editor._open_modal()
+
+    assert bnc._quote_confirm_state(editor.page) == {
+        "found": True, "enabled": False,
+        "cls": "d-button d-button-default disabled d-button-with-content "
+               "--color-text-disabled bg-red disabled confirm-width",
+    }
+
+    editor._selected_quote = "随便哪篇"
+    assert bnc._quote_confirm_state(editor.page)["enabled"] is True
+
+
+def test_quote_retries_once_when_selection_silently_fails(monkeypatch, wired):
+    """首次点卡静默失效 → **关随机偏移**重点一次,成功。"""
+    editor = Editor(
+        notes=(("n-quote", "心理咨询师-徐瑞恒"),), quote_select_silent=1
+    )
+    _wire(monkeypatch, editor, wired)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done"
+    assert "心理咨询师-徐瑞恒" in editor.quote_text
+    reasons = [r for r, _t in wired[0].clicks]
+    assert any("重选被引用笔记" in r for r in reasons), f"没走重试:{reasons}"
+
+
+def test_quote_select_not_applied_never_clicks_disabled_confirm(monkeypatch, wired):
+    """两次都没选上 → 报 ``quote_card_select_not_applied``,且**一次都不点「确认引用」**。
+
+    这正是号 7 三单的病灶:老实现会去点那颗禁用按钮,于是"点了"这个事实把排查引向下游。
+    """
+    editor = Editor(
+        notes=(("n-quote", "心理咨询师-徐瑞恒"),), quote_select_silent=99
+    )
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    reason = result["failed"][0]["reason"]
+    assert "quote_card_select_not_applied" in reason
+    assert "确认引用" not in wired[0].texts
+    assert editor.modal_open is False, "失败也要关弹窗,否则盖住发布按钮"
+
+
+def test_other_tab_also_reads_back_selection(monkeypatch, wired):
+    """「他人笔记」那条路共用同一颗「确认引用」,选中态回读一视同仁。"""
+    editor = Editor(
+        notes=(("n-a", "第一篇"),),
+        other_notes=((_QR_NOTE, "小助手联系方式 封面"),),
+        quote_select_silent=99,
+    )
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id=_QR_NOTE)
+
+    assert "quote_card_select_not_applied" in result["failed"][0]["reason"]
+    assert "确认引用" not in wired[0].texts
+
+
+def test_quote_card_below_footer_is_scrolled_into_view_first(monkeypatch, wired):
+    """目标卡落在弹窗页脚**之下** → 先滚进可视区再点(点在页脚下就是白点)。"""
+    editor = Editor(notes=(("n-quote", "心理咨询师-徐瑞恒"),))
+    _wire(monkeypatch, editor, wired)
+    # 让候选卡的矩形落到页脚之下(其余几何不变)
+    below = {**_FOOTER_RECT, "y": _FOOTER_RECT["y"] + 100.0}
+    monkeypatch.setattr(_El, "bounding_box", lambda self: (
+        below if "封面" in self.inner_text() else (self._rect or _CARD_RECT)
+    ))
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    assert result["status"] == "done"
+    assert wired[0].scrolls >= 1, "卡在页脚之下却一次都没滚"
 
 
 # ---------------- 引用弹窗必须收尾(2026-08-02 发布连续超时事故) ----------------

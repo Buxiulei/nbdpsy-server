@@ -141,7 +141,7 @@ def _wire(
     def fake_apply_components(_page, _human, _responses, *, collection_id=None,
                               collection_name=None, remove_collection_id=None,
                               remove_collection_name=None, quoted_note_id=None,
-                              activity_id=None):
+                              quoted_note_is_own=None, activity_id=None):
         calls.append("components")
         return {
             key: components.get(key, {"status": "done", "name": "身边的心理学"})
@@ -717,3 +717,102 @@ async def test_ledger_not_touched_without_verified_text(monkeypatch, applied):
 
     assert written == []
     assert "ledger_synced" not in result
+
+
+# ---------------- 被引用笔记归谁:查台账 + 直传浏览器层(2026-08-13 缺陷 A 第二层) ----------------
+#
+# 浏览器层查不了库,而"这篇是不是本账号自己的"恰恰是降级门唯一站得住的依据:
+# 弹窗候选列表懒加载翻不全时,"不在候选里"会被误当成"这是别人的笔记",于是去走
+# 「他人笔记」tab —— 那条路按设计排除本账号笔记,检索必然返回空,两路全死。
+# 2026-08-12/13 三篇引用挂不上就是这么来的(目标全是各自账号自己的公开笔记)。
+
+
+@pytest.fixture
+def svc_session(monkeypatch, db):
+    """把 ``svc.get_session`` 接到 conftest 的临时库上(真建表、真查询)。"""
+
+    class _Ctx:
+        async def __aenter__(self):
+            return db
+
+        async def __aexit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(svc, "get_session", lambda: _Ctx())
+    return db
+
+
+async def _seed_note(session, account_id, note_id):
+    from datetime import datetime
+
+    from app.models.published_note import PublishedNote
+
+    session.add(PublishedNote(
+        account_id=account_id, note_id=note_id, title="某篇",
+        permission_code=0, published_at=datetime(2026, 8, 1), sync_status="linked",
+    ))
+    await session.commit()
+
+
+async def test_quoted_note_is_own_true_for_same_account(svc_session):
+    """台账里这篇挂在**本账号**下 → True(浏览器层据此拒绝走他人 tab)。"""
+    await _seed_note(svc_session, 7, "6a6848bd0000000001002c0c")
+
+    assert await svc._quoted_note_is_own(7, "6a6848bd0000000001002c0c") is True
+
+
+async def test_quoted_note_is_own_false_for_other_account(svc_session):
+    """台账里有这篇但挂在**别的号**下 → False(他人 tab 正是该管这种)。"""
+    await _seed_note(svc_session, 1, "6a6848bd0000000001002c0c")
+
+    assert await svc._quoted_note_is_own(7, "6a6848bd0000000001002c0c") is False
+
+
+async def test_quoted_note_is_own_none_when_absent(svc_session):
+    """台账里根本没有这篇 → None,**不是 False**。
+
+    两者必须分开:台账没同步到不等于"是别人的",跨账号引用接待员联系方式那篇是真实业务,
+    一刀切成 False 会把它连带堵死。
+    """
+    assert await svc._quoted_note_is_own(7, "从没见过的id") is None
+
+
+async def test_quoted_note_is_own_skips_query_without_id(monkeypatch):
+    """没请求引用 → 直接 None,**一次库都不查**(纯组件请求的开销不能因此变大)。"""
+    def boom():
+        raise AssertionError("没有 quoted_note_id 时不该开 session")
+
+    monkeypatch.setattr(svc, "get_session", boom)
+
+    assert await svc._quoted_note_is_own(7, None) is None
+
+
+async def test_execute_passes_owner_flag_to_browser_layer(monkeypatch, svc_session):
+    """服务层查完台账把结论**直传**浏览器层(这条断的就是"查了却没传下去")。"""
+    await _seed_note(svc_session, 7, "6a6848bd0000000001002c0c")
+    seen = {}
+
+    async def fake_load(_account_id):
+        return [{"name": "a", "value": "b"}]
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw):
+            self.page = object()
+
+        def start(self):
+            return {"success": True}
+
+        def stop(self):
+            pass
+
+    def fake_set(*_a, **kwargs):
+        seen.update(kwargs)
+        return {"status": "done", "applied": {"quote": True}}
+
+    monkeypatch.setattr(svc, "load_account_cookies", fake_load)
+    monkeypatch.setattr(svc, "SyncClient", _FakeClient)
+    monkeypatch.setattr(svc, "set_note_components", fake_set)
+
+    await svc.execute(7, {"note_id": _NOTE, "quoted_note_id": "6a6848bd0000000001002c0c"})
+
+    assert seen["quoted_note_is_own"] is True

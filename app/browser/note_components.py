@@ -107,6 +107,22 @@ _QUOTE_CONTAINER = ".quote-note-container"
 _QUOTE_MODAL = ".d-modal.select-note-modal"
 _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card"
 _QUOTE_CONFIRM_TEXT = "确认引用"
+# 「确认引用」的**禁用态判据**(quote_modal 夹具实测:未选中任何卡时按钮就是禁用的)。
+# 夹具里那颗按钮的属性原文::
+#
+#     disabled=""
+#     class="d-button d-button-default disabled d-button-with-content --color-static
+#            bold --color-bg-fill --color-text-disabled custom-button bg-red disabled
+#            confirm-width"
+#
+# 两路取或、任一命中即不可点:① 有 ``disabled`` 属性;② ``class`` 按空白切分后含
+# **独立 token** ``disabled``。与 ``podcast.create_button_state`` 同款纪律 ——
+# **整词**比较而不是 substring(substring 判法会被将来任何 ``xxx-disabled`` 类名命中,
+# 把按钮永久判死,那是比假绿更难查的反向故障)。
+#
+# 故意**不**把 ``--color-text-disabled`` 算进判据:它是跟随禁用态的配色类,平台若在解禁
+# 时忘了摘掉它,就会把一颗能点的按钮判死。上面两条已是直接证据,不需要第三条推测。
+_QUOTE_DISABLED_TOKEN = "disabled"
 # 引用区**未设置**时的占位文案(夹具实测)。与 _COLLECTION_EMPTY_TEXT 同性质:
 # 判"到底有没有设上"要认空态,不能只靠"跟之前比变了没有"——重复设同一篇时前后一样,
 # 拿变化当判据会把幂等重跑判成失败。
@@ -156,6 +172,21 @@ _POPOVER_TIMEOUT_S = 10.0
 _MODAL_TIMEOUT_S = 12.0
 # 候选列表分页到齐的判定:连续这么久没有新页就收工(见 _wait_all_candidate_notes)
 _PAGE_SETTLE_S = 1.5
+
+# ── 引用候选列表的**主动翻页**(2026-08-13 生产 RCA)──
+# 弹窗「我的笔记」列表是**懒加载**的:打开时只自己发头一两页,后面的页要滚到底才发。
+# 原实现只**被动等**响应,于是候选永远停在第一页(生产实录:49 篇的号只见 12 篇),
+# 排在深位的笔记必然被判「候选列表里没有」,再被降级门当成"别人的笔记"送进死路。
+# 故这里主动在列表里拟人滚动翻页,直到目标出现 / 翻不动了 / 用满封顶轮数。
+_QUOTE_SCROLL_ROUNDS = 10          # 封顶轮数(49 篇约 4-5 页,给足余量也不至于空转太久)
+_QUOTE_SCROLL_IDLE_ROUNDS = 2      # 连续这么多轮既无新页也无新卡 → 判定已到底
+# 每次滚动之后等下一页的窗口。**必须比 _MODAL_TIMEOUT_S 短得多**:滚到底之后本来就
+# 没有下一页,拿开弹窗那次的 12 秒来等,两轮空滚就是 24 秒纯等待,每一次引用都白付。
+_QUOTE_SCROLL_WAIT_S = 4.0
+# 目标卡滚进弹窗可视区的尝试轮数(尽力而为:滚不进只告警,点击后有选中态回读兜底)
+_QUOTE_CARD_VIEW_TRIES = 3
+# 点完候选卡后等「确认引用」解禁的窗口:选中态是纯前端翻转,给足一秒足够
+_QUOTE_SELECT_SETTLE_S = 1.5
 _CATALOG_TIMEOUT_S = 15.0
 _ACTIVITY_FLIP_TIMEOUT_S = 8.0
 _SUBMIT_TIMEOUT_S = 25.0
@@ -1165,7 +1196,11 @@ def _scroll_row_to_mid_viewport(page, human: SyncHumanActions, selector: str) ->
 
 
 def _set_quote(
-    page, human: SyncHumanActions, responses: ComponentResponses, quoted_note_id: str
+    page,
+    human: SyncHumanActions,
+    responses: ComponentResponses,
+    quoted_note_id: str,
+    quoted_note_is_own: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """引用笔记:开弹窗 → **按 note_id 定位候选**(标题交叉校验)→ 确认引用 → 读回。
 
@@ -1182,6 +1217,9 @@ def _set_quote(
     换图片体积/换活动/压正文字数试了三轮全是徒劳——**没有一个变量与真正的原因有关**。
 
     故收尾放在 ``finally`` 里:无论从哪条路径返回、还是中途抛异常,弹窗都关掉。
+
+    ``quoted_note_is_own``:被引用那篇在台账里是不是本账号自己的(``None``=台账查不到)。
+    只用来拦"本账号笔记走他人 tab"这条必死的降级路,判定见 ``_block_other_tab_reason``。
     """
     container = page.query_selector(_QUOTE_CONTAINER)
     if container is None:
@@ -1202,6 +1240,10 @@ def _set_quote(
         # 再试等于拿不确定去赌,正是本模块一直拒绝做的事。
         if "quoted_note_not_in_candidates" not in (result.get("reason") or ""):
             return result
+        blocked = _block_other_tab_reason(result, quoted_note_id, quoted_note_is_own)
+        if blocked is not None:
+            result["reason"] = blocked
+            return result
         logger.info(
             f"[note_components] 引用目标不在本账号笔记里,改走「{_QUOTE_TAB_OTHER_TEXT}」: "
             f"{quoted_note_id}"
@@ -1215,6 +1257,42 @@ def _set_quote(
     finally:
         # 成功路径上「确认引用」自己会关掉弹窗,这里是幂等收尾:还开着才点「取消」
         _close_quote_modal(page, human)
+
+
+def _block_other_tab_reason(
+    result: Dict[str, Any], quoted_note_id: str, quoted_note_is_own: Optional[bool]
+) -> Optional[str]:
+    """该不该拦住「他人笔记」这条降级路?该拦就返回**替换用的报错文案**,否则 None。
+
+    降级门原本假设"不在候选 = 别人的笔记"。2026-08-12/13 生产实录证明这个假设会被击穿:
+    三篇引用目标**都是各自账号自己的公开笔记**,只因候选列表懒加载没翻到它们就走了他人
+    tab —— 而他人 tab 的检索**按设计排除本账号笔记**,必然返回空,于是两路全死,运营看到
+    的却是一句"笔记被删/私密/平台限制"的误导性报错,顺着它查一整轮都查不到东西。
+
+    两种拦法,给运营的下一步不同:
+
+    - **台账说这篇归本账号**(``quoted_note_is_own=True``):他人 tab 是确定的死路,不去。
+    - **候选列表没翻到底**(封顶轮数用完还在出新页):"不在候选里"这个前提根本没成立,
+      此时降级等于拿一个没验证的结论去赌。
+
+    台账里查不到这篇(``None``)且列表确实翻到底了 → 放行:那才是"多半是别人的笔记"
+    (跨账号引用接待员联系方式那篇是真实业务,不能一刀切堵死)。
+    """
+    if quoted_note_is_own:
+        return (
+            f"quoted_note_not_in_candidates_after_scroll: 台账里 note_id={quoted_note_id} "
+            f"就是**本账号自己**的笔记,但把「我的笔记」候选列表翻完也没有它 —— "
+            f"不走「{_QUOTE_TAB_OTHER_TEXT}」(那条路按设计排除本账号笔记,检索必然返回空)。"
+            f"请核对这篇是否已删/转私密/不在图文 tab 下;原始判定:{result.get('reason')}"
+        )
+    if result.get("candidates_exhausted") is False:
+        return (
+            f"quoted_note_candidates_truncated: 候选列表滚满封顶轮数仍在出新页,"
+            f"没能确认 note_id={quoted_note_id} 真不在本账号笔记里,故不降级到"
+            f"「{_QUOTE_TAB_OTHER_TEXT}」(这个号的笔记数可能超出翻页上限,"
+            f"需要调高 _QUOTE_SCROLL_ROUNDS);原始判定:{result.get('reason')}"
+        )
+    return None
 
 
 def _set_quote_via_other_tab(
@@ -1278,14 +1356,13 @@ def _set_quote_via_other_tab(
             "reason": f"quote_other_not_unique: 按 note_id 检索到 {len(cards)} 张候选卡"
                       f"(要求恰好 1 张,绝不猜)",
         }
-    human.click(cards[0], reason="选中被引用的他人笔记")
-    human.wait(0.5, 1.0, context="等选中态生效")
-
-    confirm = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
-    if confirm is None:
-        return {"status": "error", "reason": "quote_confirm_not_found: 弹窗里没有「确认引用」"}
-    human.click(confirm, reason="确认引用")
-    human.wait(0.8, 1.5, context="等引用生效")
+    # 选中态回读与「我的笔记」那条路共用一套(同一个弹窗、同一颗「确认引用」)
+    picked = _select_quote_card(page, human, cards[0], "他人笔记")
+    if picked["status"] != "done":
+        return picked
+    failed = _click_quote_confirm(page, human)
+    if failed is not None:
+        return failed
 
     after = read_quote_text(page)
     # 与「我的笔记」那条路同口径:看是不是不再是空态,不看"跟之前比变了没有"
@@ -1335,33 +1412,12 @@ def _close_quote_modal(page, human: SyncHumanActions) -> None:
         logger.warning(f"[note_components] 关引用弹窗异常(不阻断发布): {exc}")
 
 
-def _wait_all_candidate_notes(page, responses: ComponentResponses, seen: int) -> List[dict]:
-    """收齐引用候选列表的**全部分页**并按接口顺序拼起来(去重后返回)。
+def _merge_candidate_notes(responses: ComponentResponses, seen: int) -> List[dict]:
+    """把 ``seen`` 之后收到的候选分页按到达顺序拼起来(按 note_id 去重)。
 
-    **候选列表是分页的**(2026-08-03 回放夹具实测):弹窗打开时连发
-    ``posted?tab=1&page=0``(11 条)与 ``page=1``(10 条),两页一起渲染成 20 张卡。
-    而原实现用 ``_wait_body`` 取 ``latest`` —— **只看得见最后一页**,于是第 0 页的任何
-    一篇都会被报成「候选列表里没有」,尽管它就在弹窗里摆着。生产日志里那些
-    ``quoted_note_not_in_candidates`` 就是这么来的。
-
-    等法:先等到第一页,之后只要还有新页到达就继续等,连续 ``_PAGE_SETTLE_S`` 没有新页
-    才收工 —— 不能只等一页(会漏),也不能死等满超时(白白拖慢每一次引用)。
-
-    按 note_id 去重但**保持首次出现的顺序**:顺序是选卡算法的依据(见
-    ``_pick_untitled_card``),打乱它等于把刚修好的东西又弄坏。
+    去重但**保持首次出现的顺序**:顺序是选卡算法的依据(见 ``_pick_untitled_card``),
+    打乱它等于把修好的东西又弄坏。
     """
-    deadline = time.monotonic() + _MODAL_TIMEOUT_S
-    last_count = seen
-    settled_at = None
-    while time.monotonic() < deadline:
-        count = responses.count(_POSTED_API_MARK)
-        if count > last_count:
-            last_count = count
-            settled_at = time.monotonic()
-        elif settled_at is not None and time.monotonic() - settled_at >= _PAGE_SETTLE_S:
-            break
-        page.wait_for_timeout(300)
-
     merged: List[dict] = []
     seen_ids: set = set()
     for body in (responses.bodies.get(_POSTED_API_MARK) or [])[seen:]:
@@ -1372,6 +1428,156 @@ def _wait_all_candidate_notes(page, responses: ComponentResponses, seen: int) ->
             seen_ids.add(note_id)
             merged.append(note)
     return merged
+
+
+def _settle_candidate_pages(
+    page, responses: ComponentResponses, baseline: int, *, require_first: bool
+) -> bool:
+    """等候选分页安静下来:连续 ``_PAGE_SETTLE_S`` 没有新页即收工;返回**有没有到过新页**。
+
+    两种用法,差别只在"一页都没来时等多久"——这个差别很贵,不能合并:
+
+    - ``require_first=True``(**开弹窗那次**):页必然会来,只是不知道多晚,故必须先等到
+      第一页才谈得上"安静",等不到就耗满 ``_MODAL_TIMEOUT_S``;
+    - ``require_first=False``(**每次滚动之后**):很可能已经到底、根本没有下一页。这时
+      从滚完那一刻起算静默窗,``_PAGE_SETTLE_S`` 内没动静就判"没有下一页"——**不能**
+      套用上一种(那会让每一轮空滚都白烧 12 秒,两轮到底就是 24 秒纯等待)。
+
+    判错了也不丢数据:响应是累加的,迟到的那一页会在下一轮重新合并时被算进去。
+    """
+    timeout_s = _MODAL_TIMEOUT_S if require_first else _QUOTE_SCROLL_WAIT_S
+    deadline = time.monotonic() + timeout_s
+    last_count = baseline
+    settled_at = None if require_first else time.monotonic()
+    while time.monotonic() < deadline:
+        count = responses.count(_POSTED_API_MARK)
+        if count > last_count:
+            last_count = count
+            settled_at = time.monotonic()
+        elif settled_at is not None and time.monotonic() - settled_at >= _PAGE_SETTLE_S:
+            break
+        page.wait_for_timeout(300)
+    return last_count > baseline
+
+
+def _pick_scroll_anchor(page, cards: List[Any]):
+    """挑一个**在弹窗可视区里**的候选卡当滚轮落点;挑不出就用第一张。
+
+    ``mouse.wheel`` 打在鼠标**当前位置**,落点挑错就是滚了别的容器(本仓 2026-05 血案:
+    滚轮打在侧栏,"翻两页就停")。所以落点只用**列表里的候选卡本身**,
+    **绝不按"最大 overflow 容器"之类的面积启发式去猜**。
+
+    可视区下沿取弹窗页脚(「取消」按钮)的上沿:候选网格就在页脚之上。夹具实测印证了
+    这条边界的必要性 —— 页脚在 y=632,而第 3、4 行卡在 y=584/782,拿末尾那张当落点
+    等于把鼠标移到弹窗外面去滚。页脚找不到时退回第一张卡(弹窗开着它必然可见)。
+    """
+    limit = _element_top(_find_button_by_text(page, _QUOTE_CANCEL_TEXT))
+    if limit is None:
+        return cards[0]
+    visible = [c for c in cards if _above_limit(_element_center_y(c), limit)]
+    return visible[-1] if visible else cards[0]
+
+
+def _element_top(element) -> Optional[float]:
+    """元素矩形上沿;元素不在/读不出返回 None(调用方按"没有这条边界"处理)。"""
+    if element is None:
+        return None
+    try:
+        box = element.bounding_box()
+    except Exception:  # noqa: BLE001 — 元素已 detach,当作读不出
+        return None
+    return box["y"] if box else None
+
+
+def _element_center_y(element) -> Optional[float]:
+    """元素矩形中心的纵坐标;读不出返回 None。"""
+    try:
+        box = element.bounding_box()
+    except Exception:  # noqa: BLE001
+        return None
+    return box["y"] + box["height"] / 2 if box else None
+
+
+def _above_limit(center_y: Optional[float], limit: float) -> bool:
+    """中心在 limit 之上(读不出坐标一律判否:宁可不选它当落点)。"""
+    return center_y is not None and center_y < limit
+
+
+def _scroll_candidate_list(page, human: SyncHumanActions) -> bool:
+    """在候选列表里拟人滚一屏(翻页用);列表里一张卡都没有 → 返回 False。"""
+    cards = page.query_selector_all(_QUOTE_NOTE_CARD)
+    if not cards:
+        return False
+    human.hover(_pick_scroll_anchor(page, cards), reason="移进引用候选列表准备滚动")
+    human.scroll("down")
+    human.wait(0.4, 0.9, context="等候选列表加载下一页")
+    return True
+
+
+def _wait_all_candidate_notes(
+    page,
+    human: SyncHumanActions,
+    responses: ComponentResponses,
+    seen: int,
+    target_note_id: Optional[str] = None,
+) -> tuple:
+    """收齐引用候选列表的**全部分页**(必要时主动滚动翻页),返回 ``(notes, exhausted)``。
+
+    **候选列表是分页 + 懒加载的**。分页那一半 2026-08-03 回放夹具已实测:弹窗打开时连发
+    ``posted?tab=1&page=0``(11 条)与 ``page=1``(10 条),两页一起渲染成 20 张卡;
+    原实现用 ``_wait_body`` 取 ``latest`` 只看得见最后一页,已于当时修成"合并全部分页"。
+
+    懒加载那一半是 2026-08-13 生产 RCA 补的:**没有任何代码去滚这个列表**,所以自动发的
+    头一两页就是全部——49 篇的号实录只收到 12 篇候选,排在第 37 位的目标必然被判
+    ``quoted_note_not_in_candidates``,再被降级门当成"别人的笔记"送进必死的他人 tab。
+    故这里主动在列表内拟人滚动,每滚一轮再等一次分页。
+
+    停止条件三选一(``exhausted`` 只在后两种为真):
+
+    - **目标已出现**在累计响应里 —— 再往下翻没有意义,直接收工;
+    - 连续 ``_QUOTE_SCROLL_IDLE_ROUNDS`` 轮既没有新页、也没有新卡 → 列表到底了;
+    - 用满 ``_QUOTE_SCROLL_ROUNDS`` 轮 → **``exhausted=False``**:此时"不在候选里"这个
+      结论不成立(可能只是还没翻到),调用方据此拒绝降级到他人 tab。
+
+    ``exhausted`` 是给降级门用的:只有"确实把本账号笔记翻完了都没有它",
+    才谈得上"这多半是别人的笔记"。
+    """
+    _settle_candidate_pages(page, responses, seen, require_first=True)
+    merged = _merge_candidate_notes(responses, seen)
+    target = str(target_note_id) if target_note_id else None
+
+    def _hit() -> bool:
+        return bool(target) and any(
+            str((n or {}).get("id") or "").strip() == target for n in merged
+        )
+
+    idle = 0
+    for _ in range(_QUOTE_SCROLL_ROUNDS):
+        if _hit():
+            return merged, False
+        cards_before = len(page.query_selector_all(_QUOTE_NOTE_CARD))
+        notes_before = len(merged)
+        baseline = responses.count(_POSTED_API_MARK)
+        if not _scroll_candidate_list(page, human):
+            return merged, True          # 一张卡都没有:没得可翻,列表就这么多
+        _settle_candidate_pages(page, responses, baseline, require_first=False)
+        merged = _merge_candidate_notes(responses, seen)
+        cards_after = len(page.query_selector_all(_QUOTE_NOTE_CARD))
+        # "有没有进展"看的是**多出来的笔记/卡片**,不是"有没有新响应到达":
+        # 到底之后平台完全可能把同一页再发回来一次,拿"来了新响应"当进展会让循环
+        # 永远用满封顶轮数,``exhausted`` 于是永远为假 —— 跨账号引用那条合法的降级路
+        # 就被自己人堵死了。
+        if len(merged) > notes_before or cards_after > cards_before:
+            idle = 0
+            continue
+        idle += 1
+        if idle >= _QUOTE_SCROLL_IDLE_ROUNDS:
+            return merged, True
+    logger.warning(
+        f"[note_components] 引用候选列表滚满 {_QUOTE_SCROLL_ROUNDS} 轮仍在出新页"
+        f"(已收 {len(merged)} 篇),不再翻;此时「不在候选里」不足以断定是他人笔记"
+    )
+    return merged, False
 
 
 def _pick_untitled_card(cards: List[Any], notes: List[dict], index: int):
@@ -1415,6 +1621,141 @@ def _pick_untitled_card(cards: List[Any], notes: List[dict], index: int):
     return {"_card": cards[card_index], "_title": ""}
 
 
+def _quote_confirm_state(page) -> Dict[str, Any]:
+    """读「确认引用」按钮的可点态:``{"found", "enabled", "cls"}``。
+
+    判据见 ``_QUOTE_DISABLED_TOKEN`` 的注释(夹具实测的两路:``disabled`` 属性 +
+    class 里的独立 token)。**纯属性读取,不走 JS** —— 弹窗这条路要能在回放夹具上跑,
+    而 JS 求值没法离线重放(见 ``tests/page_replay``)。
+
+    找不到按钮返回 ``{"found": False}``,调用方当作**不可点**处理:找不到是页面状态异常,
+    不是"可以点了"。
+    """
+    button = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
+    if button is None:
+        return {"found": False, "enabled": False, "cls": ""}
+    try:
+        cls = button.get_attribute("class") or ""
+        disabled_attr = button.get_attribute("disabled") is not None
+    except Exception:  # noqa: BLE001 — 元素已 detach,当作读不出 → 不可点
+        return {"found": False, "enabled": False, "cls": ""}
+    disabled = disabled_attr or _QUOTE_DISABLED_TOKEN in cls.split()
+    return {"found": True, "enabled": not disabled, "cls": cls}
+
+
+def _safe_class(element) -> str:
+    """读元素 class,读不出返回空串(只用于取证日志,绝不因此打断流程)。"""
+    try:
+        return element.get_attribute("class") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _wait_confirm_enabled(page) -> Dict[str, Any]:
+    """轮询等「确认引用」解禁(选中态生效的**可观测判据**);超时返回最后一次读数。"""
+    deadline = time.monotonic() + _QUOTE_SELECT_SETTLE_S
+    state = _quote_confirm_state(page)
+    while not state.get("enabled") and time.monotonic() < deadline:
+        page.wait_for_timeout(200)
+        state = _quote_confirm_state(page)
+    return state
+
+
+def _bring_card_into_view(page, human: SyncHumanActions, card) -> bool:
+    """把目标候选卡滚进弹窗可视区;返回**最终在不在带内**(尽力而为,滚不进只告警)。
+
+    带的下沿是弹窗页脚上沿(见 ``_pick_scroll_anchor``);上沿不设 —— 卡被滚到列表顶部
+    之上时 ``human.click`` 自带的 ``scroll_into_view_if_needed`` 会把它拉回来,
+    真正会出事的是**下沿**:卡落在页脚之下就是点在弹窗外/被页脚盖住。
+    """
+    for _ in range(_QUOTE_CARD_VIEW_TRIES):
+        limit = _element_top(_find_button_by_text(page, _QUOTE_CANCEL_TEXT))
+        if limit is None:
+            return True              # 读不出边界就不折腾,交给点击自带的滚动
+        if _above_limit(_element_center_y(card), limit):
+            return True
+        cards = page.query_selector_all(_QUOTE_NOTE_CARD)
+        if not cards:
+            return False
+        human.hover(_pick_scroll_anchor(page, cards), reason="移进引用候选列表准备滚动")
+        human.scroll("down")
+        human.wait(0.3, 0.7, context="把目标候选卡滚进弹窗可视区")
+    logger.warning(
+        f"[note_components] 目标候选卡滚 {_QUOTE_CARD_VIEW_TRIES} 次仍在弹窗页脚之下,"
+        "按当前位置点击(选中态回读会兜底)"
+    )
+    return False
+
+
+def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[str, Any]:
+    """点选候选卡并**回读选中态**;没选上重试一次,仍不成则报错。
+
+    2026-08-13 生产 RCA(号 7 连续三单同款失败):候选里找到了目标卡、点了、也点了
+    「确认引用」,回读却仍是空态 —— 而夹具证明**没选中时「确认引用」本来就是 disabled 的**,
+    点一颗禁用按钮当然什么都不会发生。原实现点完卡只 ``wait`` 一下就往下走,
+    于是"选中没生效"这件事一路裸奔到最后,才以 ``quote_not_applied`` 的面目出现,
+    把人往"确认按钮/引用区"上引 —— 真正坏掉的是**上一步**。
+
+    回读判据用**「确认引用」由禁用转可点**:这是夹具里有直接证据的那条(卡片选中态挂了
+    什么 class 没有实测,猜一个就是回到"照着代码的假设写测试"的老路)。
+    重试按本仓堆叠浮层纪律:**小目标关随机偏移**——卡片中心是选中命中率最稳的落点,
+    而 0.3~0.7 的随机偏移可能落在封面角标/遮罩这类吃掉事件的子元素上。
+
+    第一次没选上时把**卡片自己的 class** 也记进日志:平台到底靠什么标记选中态,
+    下次排查时由生产日志白送上门,不必为这一个问题再开一次真号。
+    """
+    _bring_card_into_view(page, human, card)
+    human.click(card, reason=f"选中被引用笔记「{label}」")
+    human.wait(0.5, 1.0, context="等选中态生效")
+    state = _wait_confirm_enabled(page)
+    if state.get("enabled"):
+        return {"status": "done", "confirm_cls": state.get("cls", "")}
+
+    logger.warning(
+        f"[note_components] 候选卡「{label}」点了但「{_QUOTE_CONFIRM_TEXT}」仍禁用"
+        f"(confirm_cls={state.get('cls', '')[:120]!r} "
+        f"card_cls={_safe_class(card)[:120]!r}),关随机偏移重点一次"
+    )
+    _bring_card_into_view(page, human, card)
+    human.click(card, random_offset=False, reason=f"重选被引用笔记「{label}」(取卡片中心)")
+    human.wait(0.5, 1.0, context="等选中态生效(重试)")
+    state = _wait_confirm_enabled(page)
+    if state.get("enabled"):
+        return {"status": "done", "confirm_cls": state.get("cls", "")}
+    return {
+        "status": "error",
+        "reason": f"quote_card_select_not_applied: 候选卡「{label}」点了两次(第二次取卡片"
+                  f"中心)「{_QUOTE_CONFIRM_TEXT}」仍是禁用态,选中没生效 —— "
+                  f"卡没点上就不可能引用成功,拒绝去点一颗禁用按钮"
+                  f"(confirm_found={state.get('found')} cls={state.get('cls', '')[:120]!r})",
+    }
+
+
+def _click_quote_confirm(page, human: SyncHumanActions) -> Optional[Dict[str, Any]]:
+    """点「确认引用」;按钮不在/仍禁用时**不点**并返回错误,一切正常返回 None。
+
+    点前查禁用态是 2026-08-09 播客 7 单假绿留下的规矩(``podcast.create_button_state``):
+    点一颗禁用按钮无事发生,而"点了"这个事实会把排查引向下游。
+    """
+    state = _quote_confirm_state(page)
+    if not state.get("found"):
+        return {"status": "error",
+                "reason": f"quote_confirm_not_found: 弹窗里没有「{_QUOTE_CONFIRM_TEXT}」"}
+    if not state.get("enabled"):
+        return {
+            "status": "error",
+            "reason": f"quote_confirm_disabled: 「{_QUOTE_CONFIRM_TEXT}」是禁用态,不点"
+                      f"(点了也无事发生,只会把排查引向下游);cls={state.get('cls', '')[:120]!r}",
+        }
+    confirm = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
+    if confirm is None:
+        return {"status": "error",
+                "reason": f"quote_confirm_not_found: 弹窗里没有「{_QUOTE_CONFIRM_TEXT}」"}
+    human.click(confirm, reason="确认引用")
+    human.wait(0.8, 1.5, context="等引用生效")
+    return None
+
+
 def _set_quote_in_modal(
     page,
     human: SyncHumanActions,
@@ -1423,7 +1764,9 @@ def _set_quote_in_modal(
     seen: int,
 ) -> Dict[str, Any]:
     """引用弹窗内的本体流程(弹窗的开与关都由 ``_set_quote`` 负责)。"""
-    notes = _wait_all_candidate_notes(page, responses, seen)
+    notes, exhausted = _wait_all_candidate_notes(
+        page, human, responses, seen, target_note_id=quoted_note_id
+    )
     if not notes:
         return {
             "status": "error",
@@ -1441,6 +1784,8 @@ def _set_quote_in_modal(
             "status": "error",
             "reason": f"quoted_note_not_in_candidates: 候选列表({len(notes)} 篇)里没有 "
                       f"note_id={quoted_note_id}(候选只含**我的笔记**这一 tab)",
+            # 给降级门用:列表没翻到底时,"不在候选里"这个结论本身就不成立
+            "candidates_exhausted": exhausted,
         }
 
     cards = _wait_quote_cards(page)
@@ -1469,14 +1814,12 @@ def _set_quote_in_modal(
             return picked            # 算不准就原样上抛拒绝原因
         card = picked["_card"]
 
-    human.click(card, reason=f"选中被引用笔记「{title[:15] or '(空标题)'}」")
-    human.wait(0.5, 1.0, context="等选中态生效")
-
-    confirm = _find_button_by_text(page, _QUOTE_CONFIRM_TEXT)
-    if confirm is None:
-        return {"status": "error", "reason": "quote_confirm_not_found: 弹窗里没有「确认引用」"}
-    human.click(confirm, reason="确认引用")
-    human.wait(0.8, 1.5, context="等引用生效")
+    picked = _select_quote_card(page, human, card, title[:15] or "(空标题)")
+    if picked["status"] != "done":
+        return picked
+    failed = _click_quote_confirm(page, human)
+    if failed is not None:
+        return failed
 
     quoted = read_quote_text(page)
     # 判据与提交后回读同口径:**看引用区是不是不再是空态**,而不是"含不含标题"。
@@ -1919,12 +2262,17 @@ def apply_components(
     remove_collection_id: Optional[str] = None,
     remove_collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
+    quoted_note_is_own: Optional[bool] = None,
     activity_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """在**已打开的编辑器页**上设置三组件,逐项返回结果(单项失败不阻断其余项)。
 
     只处理传了 id 的项;返回形如
     ``{"collection": {"status": "done"|"skipped"|"error", ...}, ...}``,键只含请求过的组件。
+
+    ``quoted_note_is_own``:被引用那篇在 ``published_notes`` 台账里**是不是本账号自己的**
+    (``None``=台账里查不到,即"不知道")。浏览器层查不了库,这个事实必须由服务层带进来;
+    它只有一个用处 —— 拦住"本账号笔记走他人 tab"这条必死的降级路(见 ``_block_other_tab_reason``)。
 
     这里的 ``done`` 是**编辑器内**回读确认(合集区显示了名字 / 引用区出现了标题 / 活动
     按钮翻转成「取消关联」),**不等于**服务端接受 —— 私密笔记的合集绑定会被服务端静默
@@ -1936,7 +2284,8 @@ def apply_components(
             page, human, responses, cid, collection_name=remove_collection_name)),
         ("collection", collection_id, lambda cid: _set_collection(
             page, human, responses, cid, collection_name=collection_name)),
-        ("quote", quoted_note_id, lambda nid: _set_quote(page, human, responses, nid)),
+        ("quote", quoted_note_id, lambda nid: _set_quote(
+            page, human, responses, nid, quoted_note_is_own=quoted_note_is_own)),
         ("activity", activity_id, lambda aid: _set_activity(page, human, responses, aid)),
     )
     outcomes: Dict[str, Dict[str, Any]] = {}
@@ -2360,6 +2709,7 @@ def set_note_components(
     remove_collection_id: Optional[str] = None,
     remove_collection_name: Optional[str] = None,
     quoted_note_id: Optional[str] = None,
+    quoted_note_is_own: Optional[bool] = None,
     activity_id: Optional[str] = None,
     title: Optional[str] = None,
     content: Optional[str] = None,
@@ -2380,6 +2730,9 @@ def set_note_components(
         account_id: 账号 id(日志用)。
         note_id: 目标笔记的平台 id(深链定位,设计 3.2 —— 台账 title 会过期,只认 id)。
         collection_id / quoted_note_id / activity_id: 要设置的三组件,均可选。
+        quoted_note_is_own: 被引用那篇在 ``published_notes`` 台账里是不是**本账号自己**的
+            (``None``=台账查不到)。只用来拦"本账号笔记走他人 tab"这条必死的降级路,
+            由服务层查库后带进来(浏览器层不碰 DB)。
         remove_collection_id: 要**移出**的合集 id(与 collection_id 加入对称,幂等:
             本就不在 → skipped 不算失败)。``remove_collection_name`` 强烈建议同传 ——
             浏览器层靠名字确认"当前所在合集就是目标",比对不上绝不动手。
@@ -2482,6 +2835,7 @@ def set_note_components(
             remove_collection_id=remove_collection_id,
             remove_collection_name=remove_collection_name,
             quoted_note_id=quoted_note_id,
+            quoted_note_is_own=quoted_note_is_own,
             activity_id=activity_id,
         )
 

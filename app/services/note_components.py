@@ -163,6 +163,12 @@ async def execute(account_id: int, payload: dict) -> dict:
         cookies = await load_account_cookies(account_id)
         if not cookies:
             return {"error": "账号无可用 cookie,跳过三组件设置"}
+        # 被引用那篇归谁:浏览器层查不了库,这个事实只能在这里查好带下去
+        # (拦"本账号笔记走他人 tab"这条必死降级路,见 _quoted_note_is_own)。
+        # 放在**闸外**做:这是一次纯 DB 读,没理由占着浏览器并发名额。
+        quoted_note_is_own = await _quoted_note_is_own(
+            account_id, components.get("quoted_note_id")
+        )
         # 与发布/cookie 检测共用同一把 per-account 锁:同号浏览器操作串行,避免 kill_orphans 互杀。
         async with account_locks.get(account_id):
             # 全局浏览器并发闸:封顶总 camoufox 数,超出排队。
@@ -171,6 +177,7 @@ async def execute(account_id: int, payload: dict) -> dict:
                     _apply_sync, account_id, cookies, note_id, components, edits,
                     collection_name, remove_collection_name,
                     set_original_declaration, cover_path, topics,
+                    quoted_note_is_own,
                 )
         # 台账回写在**闸外**做:浏览器已经收工,这是一次纯 DB 写,没理由继续占着并发名额。
         return await _sync_ledger(account_id, note_id, result)
@@ -185,6 +192,35 @@ async def execute(account_id: int, payload: dict) -> dict:
         return {"error": f"三组件设置任务异常:{exc}"}
 
 
+async def _quoted_note_is_own(account_id: int, quoted_note_id: str | None) -> bool | None:
+    """被引用的这篇在台账里归谁:``True``=本账号 / ``False``=别的账号 / ``None``=台账里没有。
+
+    浏览器层拿它当**降级门的闸**用(见 ``app.browser.note_components._block_other_tab_reason``):
+    弹窗候选列表懒加载翻不全时,"不在候选里"会被误当成"这是别人的笔记",于是去走
+    「他人笔记」tab —— 而那条路按设计排除本账号笔记,检索必然返回空,两路全死。
+    2026-08-12/13 三篇引用挂不上就是这么来的(目标全是各自账号自己的公开笔记)。
+
+    ``None`` 必须与 ``False`` 分开:台账查不到不等于"是别人的",跨账号引用接待员联系方式
+    那篇是真实业务,不能因为台账没同步到就把它一并堵死。
+    """
+    if not quoted_note_id:
+        return None
+    async with get_session() as session:
+        mine = await session.scalar(
+            select(PublishedNote.id).where(
+                PublishedNote.account_id == account_id,
+                PublishedNote.note_id == quoted_note_id,
+            )
+        )
+        if mine is not None:
+            return True
+        # 台账里有这篇但挂在别的号下 → 确定是他人笔记;根本没有这篇 → 不知道
+        other = await session.scalar(
+            select(PublishedNote.id).where(PublishedNote.note_id == quoted_note_id)
+        )
+    return False if other is not None else None
+
+
 def _apply_sync(
     account_id: int,
     cookies: list[dict],
@@ -196,6 +232,7 @@ def _apply_sync(
     set_original_declaration: bool = False,
     cover_path: str | None = None,
     topics: list[str] | None = None,
+    quoted_note_is_own: bool | None = None,
 ) -> dict:
     """同一线程内:建 SyncClient → start → 设置三组件/编辑 → stop 收尾(finally 防泄漏)。
 
@@ -209,6 +246,7 @@ def _apply_sync(
             raise NoteComponentsError(f"browser_start_failed: {start.get('error')}")
         return set_note_components(
             client.page, account_id, note_id, **components,
+            quoted_note_is_own=quoted_note_is_own,
             collection_name=collection_name,
             remove_collection_name=remove_collection_name,
             set_original_declaration=set_original_declaration,

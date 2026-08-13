@@ -125,6 +125,27 @@ class ReplayPage:
         if items:
             items[0] = {**items[0], "text": text}
 
+    def set_attrs(
+        self, sel: str, attrs: Dict[str, Any], *, match_text: Optional[str] = None
+    ) -> None:
+        """改写某选择器下元素的属性(``None`` 值=删掉该属性),用于**由用例注入状态迁移**。
+
+        与 ``set_text`` 同一分工:夹具只提供结构(按钮长什么样),迁移由用例给
+        (点了卡片之后「确认引用」解禁)。夹具采集于"什么都没选中"那一刻,
+        按钮天然是禁用的 —— 把"选中后会解禁"写进夹具就等于把期望混进证据。
+
+        ``match_text``:只改文案含它的那些元素(一个选择器下有四颗按钮时要用)。
+        """
+        items = self._dom.get(sel) or []
+        for i, item in enumerate(items):
+            if match_text is not None and match_text not in (item.get("text") or ""):
+                continue
+            merged = {**(item.get("attrs") or {}), **attrs}
+            items[i] = {
+                **item,
+                "attrs": {k: v for k, v in merged.items() if v is not None},
+            }
+
     def evaluate(self, js, arg=None):  # noqa: D401 — 明确不支持
         raise NotImplementedError(
             "回放夹具不支持 evaluate:JS 求值没法离线重放。"
