@@ -131,8 +131,9 @@ CAPABILITY_GROUPS = [
         "summary": "以自己的号对笔记做真实互动:发评论、历史笔记点赞收藏补量。"
                    "全部会在平台留下真实痕迹,且受同号会话频次总闸约束。"
                    "另有一个纯 DB 读的反查:某篇笔记收到的赞/藏/评论里有多少是自家矩阵刷的"
-                   "(做数据分析前要把它减掉)。",
+                   "(做数据分析前要把它减掉),以及互刷完成率总账(每号覆盖率/欠账,日报口径)。",
         "paths": [
+            "/api/interaction-coverage",
             "/api/accounts/{account_id}/note-comments",
             "/api/note-comments/{comment_id}",
             "/api/interaction-backfills",
@@ -262,6 +263,21 @@ CHANGELOG_KINDS = frozenset({"feature", "fix", "breaking", "deprecation"})
 CHANGELOG_COVERAGE_SINCE = "2026-07-28"
 
 CHANGELOG_ENTRIES = [
+    {
+        "date": "2026-08-13",
+        "title": "新增互刷完成率总账端点:每号覆盖率/欠账一次拉全,日报别再手拼分母",
+        "kind": "feature",
+        "summary": "「每个账号的历史公开笔记都被其余每个号点赞收藏」现在有了唯一权威口径:"
+                   "GET /api/interaction-coverage 返回每号 公开篇数/应补/已补/完成率、"
+                   "不可调度分解(无 note_id 待同步/非公开不进分母)、零互动篇数,"
+                   "外加 actors 出勤欠账表(谁欠多少活,始终全池)。口径与调度选篇完全一致,"
+                   "此前运营手拼并集分母连续两次算歪的问题从根上终结。"
+                   "配套后台新增保底台账同步:全部有效登录的号(含纯手工运营号)12 小时"
+                   "保底同步一次笔记台账,手工发的新笔记不再依赖发布钩子搭便车才入册。",
+        "endpoints": [
+            "/api/interaction-coverage",
+        ],
+    },
     {
         "date": "2026-08-13",
         "title": "互动补量两个断路器:半死的号与被平台屏蔽的笔记不再被反复重试",
