@@ -359,8 +359,10 @@ async def plan_round(
     - 已做完的篇跳过、刚失败过的篇在冷却期内跳过(**避免白开浏览器**);
     - 篇数取 ``min(单轮上限, 该 actor 当日剩余配额, 调用方 limit)``。
 
-    优先级:**新发现的笔记 > 最近发布的 > 更早的**(``first_seen_at`` 降序为主,
-    平台发布时间降序次之)—— 手工新增的笔记同步当场 first_seen_at 最新,自然浮到最前。
+    优先级(2026-08-14 老板指令):**零互动的笔记 > 其余;各级内部按真实发布时间
+    新到老**。此前按 first_seen_at 降序为主——但手工老笔记的 first_seen 是"入台账
+    时刻",会让 5-6 月的老帖伪装成新帖排到前面,与"新笔记优先吃推荐窗口期"的业务
+    意图相反,故主键换成 platform_published_at。
     """
     now = now or datetime.utcnow()
     if scope not in SCOPES:
@@ -464,6 +466,25 @@ async def plan_round(
             + detail,
             suppressed,
         )
+
+    # ── 选篇顺序(2026-08-14 老板指令:「从新到老,永远优先最新的,没有赞和藏的先互动」)──
+    # 两次稳定排序合成两级优先:①零互动笔记(池内任何 actor 都没 done/skipped 过的)
+    # 永远排最前——新笔记正处平台推荐窗口期,早到的赞藏对分发有加成;②各级内部按真实
+    # 发布时间新到老(platform_published_at,缺失退 published_at 再退 first_seen_at——
+    # 手工老笔记的 first_seen 是"入台账时刻"会伪装成新,不能当主键)。
+    # ⚠️ 队列行为注记:5-6 月老积压会沉到队尾**最后才清,这是设计意图不是卡死**——
+    # 老笔记补赞只是还账,晚几天无损;将来看队列觉得"积压不动了"先读这一段。
+    covered_note_ids = {
+        row.note_id for row in ledger if row.status in ("done", "skipped")
+    }
+    _EPOCH = datetime(2000, 1, 1)
+
+    def _note_ts(n) -> datetime:
+        return (n.platform_published_at or n.published_at
+                or n.first_seen_at or _EPOCH)
+
+    notes.sort(key=_note_ts, reverse=True)                      # 各级内部:新到老
+    notes.sort(key=lambda n: n.note_id in covered_note_ids)     # 稳定排序:零互动浮顶
 
     def _daily_cap_of(actor_id: int) -> int:
         """该 actor 的互动日上限:账号值优先,没设(或 <=0)退回全局。

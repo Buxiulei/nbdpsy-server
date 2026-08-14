@@ -327,8 +327,13 @@ async def test_scope_requires_matching_ids(wired_db):
     assert (await _plan(svc.SCOPE_NEWCOMER))["reason"]
 
 
-async def test_priority_new_discovery_then_recent(wired_db):
-    """优先级:新发现的笔记 > 最近发布的 > 更早的。"""
+async def test_priority_newest_published_first(wired_db):
+    """优先级(2026-08-14 老板指令):各级内部按**真实发布时间**新到老。
+
+    此前按 first_seen_at 降序为主——手工老笔记的 first_seen 是"入台账时刻",会让
+    老帖伪装成新帖排到前面,与"新笔记优先吃推荐窗口期"的业务意图相反。
+    本用例的「刚发现的」是 2024 年的老帖(只是台账 08-02 才捞到),必须排最后。
+    """
     await _add_account(1)
     await _add_account(2)
     old = datetime(2026, 1, 1)
@@ -339,7 +344,28 @@ async def test_priority_new_discovery_then_recent(wired_db):
                     platform_published_at=datetime(2024, 1, 1))
 
     plan = await _plan(svc.SCOPE_ACCOUNT, target=1)
-    assert [t["note_id"] for t in plan["targets"]] == ["刚发现的", "老帖但新发的", "老帖"]
+    assert [t["note_id"] for t in plan["targets"]] == ["老帖但新发的", "老帖", "刚发现的"]
+
+
+async def test_priority_zero_interaction_floats_to_top(wired_db):
+    """零互动的笔记永远排最前(哪怕它比别的旧);已有互动的按新到老跟在后面。
+
+    「零互动」= 池内任何 actor 都没有 done/skipped 行。注意:是**别的 actor** 互动过
+    也算"有互动"——本用例里号2 给「新但已被赞」点过赞,对号5 来说它依然排在
+    「旧但零互动」之后。
+    """
+    await _add_account(1)
+    await _add_account(2)
+    await _add_account(5)
+    await _add_note(1, "新但已被赞", platform_published_at=datetime(2026, 8, 10))
+    await _add_note(1, "旧但零互动", platform_published_at=datetime(2026, 3, 1))
+    async with db_module.async_session() as s2:
+        s2.add(NoteInteraction(actor_account_id=2, note_id="新但已被赞",
+                               action="like", status="done"))
+        await s2.commit()
+
+    plan = await _plan(svc.SCOPE_ALL, actor=5)
+    assert [t["note_id"] for t in plan["targets"]] == ["旧但零互动", "新但已被赞"]
 
 
 async def test_actor_must_be_valid_with_cookies(wired_db):
