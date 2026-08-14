@@ -1188,20 +1188,51 @@ def test_other_tab_also_reads_back_selection(monkeypatch, wired):
     assert "确认引用" not in wired[0].texts
 
 
-def test_quote_card_below_footer_is_scrolled_into_view_first(monkeypatch, wired):
-    """目标卡落在弹窗页脚**之下** → 先滚进可视区再点(点在页脚下就是白点)。"""
-    editor = Editor(notes=(("n-quote", "心理咨询师-徐瑞恒"),))
-    _wire(monkeypatch, editor, wired)
-    # 让候选卡的矩形落到页脚之下(其余几何不变)
+def _card_rect_below_until_scrolled(monkeypatch, wired, *, rounds):
+    """让候选卡在滚够 ``rounds`` 轮之前一直落在可视区外(其余几何不变)。
+
+    ``rounds`` 给 999 就是"怎么滚都进不来" —— 用来分开两条路径:滚得进要照常点,
+    滚不进必须判失败。``wired`` 传的是那个**还没填**的列表:拟人层要等 ``_run`` 里
+    才被造出来,滚了几轮只能到时候现读。
+    """
     below = {**_FOOTER_RECT, "y": _FOOTER_RECT["y"] + 100.0}
     monkeypatch.setattr(_El, "bounding_box", lambda self: (
-        below if "封面" in self.inner_text() else (self._rect or _CARD_RECT)
+        below if ("封面" in self.inner_text()
+                  and (wired[0].scrolls if wired else 0) < rounds)
+        else (self._rect or _CARD_RECT)
     ))
+
+
+def test_quote_card_out_of_view_is_scrolled_in_before_clicking(monkeypatch, wired):
+    """目标卡落在可视区**之外** → 先滚进来再点(点在区外就是点到别的元素)。"""
+    editor = Editor(notes=(("n-quote", "心理咨询师-徐瑞恒"),))
+    _wire(monkeypatch, editor, wired)
+    # 恰好卡在重试上限:滚满 _QUOTE_CARD_VIEW_TRIES 次才进来
+    _card_rect_below_until_scrolled(monkeypatch, wired, rounds=bnc._QUOTE_CARD_VIEW_TRIES)
 
     result = _run(editor, quoted_note_id="n-quote")
 
     assert result["status"] == "done"
-    assert wired[0].scrolls >= 1, "卡在页脚之下却一次都没滚"
+    assert wired[0].scrolls >= bnc._QUOTE_CARD_VIEW_TRIES, "把重试轮数用满才该进来"
+
+
+def test_quote_card_that_never_enters_view_is_never_clicked(monkeypatch, wired):
+    """怎么滚都进不了可视区 → 报 ``quote_card_offscreen``,**一次都不点**。
+
+    2026-08-13 号 7 三单的真因就在这:老实现滚不进也照点,点到的是弹窗外的别的元素,
+    失败于是以「选中没生效 / 平台拒绝」的面目出现在下游,归因整整偏了一轮。
+    """
+    editor = Editor(notes=(("n-quote", "心理咨询师-徐瑞恒"),))
+    _wire(monkeypatch, editor, wired, publish=False)
+    _card_rect_below_until_scrolled(monkeypatch, wired, rounds=999)   # 怎么滚都进不来
+
+    result = _run(editor, quoted_note_id="n-quote")
+
+    reason = result["failed"][0]["reason"]
+    assert "quote_card_offscreen" in reason
+    assert "徐瑞恒" not in wired[0].texts, "卡在区外还点,点到的就是别的元素"
+    assert "确认引用" not in wired[0].texts
+    assert editor.modal_open is False, "失败也要关弹窗,否则盖住发布按钮"
 
 
 # ---------------- 引用弹窗必须收尾(2026-08-02 发布连续超时事故) ----------------

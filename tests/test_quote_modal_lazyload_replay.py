@@ -15,10 +15,15 @@
 滚轮打给不可滚的 ``d-modal-content``,后两轮空转 → 判"到底了"。实测三轮响应
 1→2→3、候选 12→22→40,平台压根没到底。
 
-**缺陷 B(号 7 报错指错方向)**:点目标卡时平台弹 toast 明说「无法引用」,确认钮恒禁用;
-而同一次探针点普通卡 confirm 正常解禁(``..._165013`` 对照组)——**点击链是好的,
-是平台拒绝**。原实现一律报 ``quote_card_select_not_applied`` 并重试一次,
-把人往"点击没生效"上引,还白重试一次。
+**缺陷 B(号 7 三单失败的真因)**:目标卡矩形 ``x=1037 y=727 w=136 h=182``,而滚动容器
+可视区是 ``[184, 608]`` —— 卡在可视区**下方 119px**,点击落点(卡心 y≈818)落在弹窗之外,
+**根本没点到卡**,确认钮当然不解禁。原实现的 ``_bring_card_into_view`` 滚不进也返回成功
+("尽力而为"),于是照着区外坐标点了下去。
+
+同一份快照里那条「非公开可见笔记,无法引用」的 toast **不是**平台对目标笔记的裁决:
+2026-08-14 人工在同一目标(002c0c)上手动引用**成功**。它多半是点在卡外命中其它元素的
+下游现象,何况 toast 根容器还会累加历史通知。所以本文件里它只被当作"出现了这条提示"
+这个事实,断言也只锁"原文照抄 + 归因警告",不再锁"该换目标"。
 """
 
 import pytest
@@ -43,22 +48,25 @@ def scene():
 
 
 class _Human:
-    """假拟人层:只记录动作,**不注入任何状态迁移**。
+    """假拟人层:只记录动作,**不注入任何状态迁移**(滚了也不动)。
 
-    两处缺陷的场景恰好都是"点了之后确认钮不解禁",所以这里什么都不翻转就是实况;
-    需要迁移的用例(点卡 → 解禁)见 ``test_quote_modal_replay.py``。
+    这正是"滚不动"的实况:目标卡永远进不了可视区。想让滚动真的生效用 ``_ScrollingHuman``。
     """
 
     def __init__(self):
         self.clicked = []
         self.hovers = []
         self.scrolls = 0
+        self.directions = []
+        self.distances = []
 
     def wait(self, *_a, **_kw):
         pass
 
-    def scroll(self, *_a, **_kw):
+    def scroll(self, direction="down", distance=None, *_a, **_kw):
         self.scrolls += 1
+        self.directions.append(direction)
+        self.distances.append(distance)
 
     def hover(self, target=None, *, reason="", **_kw):
         self.hovers.append(target)
@@ -69,8 +77,32 @@ class _Human:
         )
 
 
+class _ScrollingHuman(_Human):
+    """滚动会真的把候选卡整体推走 —— 真页面上滚列表的可观察后果。
+
+    容器 ``scrollHeight`` 1575 > 可视区 424(探针实测),所以"目标卡能被滚进可视区"
+    在真页面上确实成立;不给这条迁移,凡是"先滚进可视区再点"的路径在回放里都走不通。
+    """
+
+    _STEP = 200.0
+
+    def __init__(self, page):
+        super().__init__()
+        self.page = page
+
+    def scroll(self, direction="down", distance=None, *_a, **_kw):
+        super().scroll(direction, distance)
+        self.page.shift_rects(
+            nc._QUOTE_NOTE_CARD, -self._STEP if direction == "down" else self._STEP
+        )
+
+
 def _wrap_rect(scene):
     return scene["dom"][nc._QUOTE_LIST_WRAP][0]["rect"]
+
+
+def _card_rect(page):
+    return page.query_selector(nc._QUOTE_NOTE_CARD).bounding_box()
 
 
 # ---------------- 缺陷 A:滚轮落点 ----------------
@@ -207,36 +239,179 @@ def test_absent_cards_no_longer_declare_candidates_exhausted(scene):
     assert exhausted is True, "确实滚过又确实没进展,这时判到底是对的"
 
 
-# ---------------- 缺陷 B:toast 归因 ----------------
+# ---------------- 缺陷 B 之一:toast 只报事实,不下裁决 ----------------
 
 
 def _pick_card(page):
     return page.query_selector(nc._QUOTE_NOTE_CARD)
 
 
-def test_platform_toast_reports_not_quotable_with_its_own_wording(scene):
-    """平台弹「无法引用」→ 报 ``quote_target_not_quotable``,detail 带**平台原文**。
+def test_platform_toast_reports_the_prompt_as_a_fact_not_a_verdict(scene):
+    """点卡后出现「无法引用」→ 报 ``quote_target_not_quotable`` 并带**平台原文**。
 
-    平台的判据比我们的 ``permission_code`` 台账权威:台账可能过期,toast 是当场的裁决。
+    但只报"出现了这条提示"这个**事实**:2026-08-14 人工在同一目标(002c0c)上手动引用
+    **成功**,证伪了上一版"这是平台裁决、重试无用、该换目标"的说法。提示可能来自点击落在
+    候选卡之外命中的其它元素,toast 容器还会累加历史通知 —— 文案里必须留下这条警告,
+    否则运营照着"该换目标"去做,就会绕开真正的几何缺陷。
     """
     page = ReplayPage(scene)
-    human = _Human()
+    human = _ScrollingHuman(page)
 
     out = nc._select_quote_card(page, human, _pick_card(page), "刘琼")
 
     assert out["status"] == "error"
     assert "quote_target_not_quotable" in out["reason"]
     assert "非公开可见笔记，无法引用" in out["reason"], "必须原样带上平台文案"
+    assert "不能据此断定该笔记不可被引用" in out["reason"], "必须给出归因警告"
+    for verdict in ("重试无用", "平台侧的裁决", "请换一篇引用目标"):
+        assert verdict not in out["reason"], f"「{verdict}」已被人工操作证伪,不该再出现"
 
 
-def test_not_quotable_is_not_retried(scene):
-    """平台拒绝就是拒绝,**重试无用** —— 再点一次只是多一次真号动作。"""
+def test_prompt_path_still_clicks_only_once(scene):
+    """出现提示后**不重复点** —— 重点一次只是多一次真号动作,并不能改变什么。"""
     page = ReplayPage(scene)
+    human = _ScrollingHuman(page)
+
+    nc._select_quote_card(page, human, _pick_card(page), "刘琼")
+
+    assert len(human.clicked) == 1, f"出现提示后不该重点,实际点了 {len(human.clicked)} 次"
+
+
+# ---------------- 候选卡不在可视区(2026-08-13 号 7 三单真因)----------------
+
+
+def test_fixture_target_card_sits_below_the_scroll_container_viewport(scene):
+    """夹具本身就是真因的证据:目标卡在滚动容器可视区**下方**,点它等于点在弹窗外。
+
+    这条红了说明夹具换了几何,整条推理要重做,别急着改代码去迁就它。
+    """
+    card = _card_rect(ReplayPage(scene))
+    wrap = _wrap_rect(scene)
+
+    assert card["y"] > wrap["y"] + wrap["height"], (
+        f"卡片纵向 [{card['y']}, {card['y'] + card['height']}] 应整段落在容器可视区 "
+        f"[{wrap['y']}, {wrap['y'] + wrap['height']}] 之下"
+    )
+
+
+def test_card_that_never_enters_the_viewport_is_never_clicked(scene):
+    """滚不进可视区 → 报 ``quote_card_offscreen`` 且**一次都不点**。
+
+    老实现在这里"尽力而为":滚满三轮仍在区外也照点,点到的是弹窗外的别的元素,
+    失败于是以「平台拒绝 / 选中没生效」的面目出现在下游 —— 归因整整偏了一轮。
+    """
+    page = ReplayPage(scene)
+    human = _Human()          # 滚了也不动:复刻"就是滚不进去"
+
+    out = nc._select_quote_card(page, human, _pick_card(page), "刘琼")
+
+    assert out["status"] == "error"
+    assert "quote_card_offscreen" in out["reason"]
+    assert human.clicked == [], "卡在区外还点,点到的就是别的元素"
+    assert human.scrolls == nc._QUOTE_CARD_VIEW_TRIES, "判失败之前要把重试轮数用满"
+
+
+def test_offscreen_detail_carries_both_rects(scene):
+    """回执必须带**卡片矩形与可视区矩形两组数** —— 判据就是这两个纵向区间。
+
+    下次再出同类失败,回执自己就能说明是不是同一堵墙,不必再开一次真号取证。
+    """
+    page = ReplayPage(scene)
+    wrap = _wrap_rect(scene)
+
+    out = nc._select_quote_card(page, _Human(), _pick_card(page), "刘琼")
+
+    assert out["card_rect"]["y"] == 727 and out["card_rect"]["height"] == 182
+    assert out["view_rect"]["y"] == wrap["y"] and out["view_rect"]["height"] == wrap["height"]
+    # 结构化字段之外,文案里也要看得见(日志里只有 reason 那一行)
+    assert "727" in out["reason"] and "909" in out["reason"], "文案缺卡片纵向区间"
+    assert "184" in out["reason"] and "608" in out["reason"], "文案缺可视区纵向区间"
+
+
+def test_card_is_clicked_once_it_has_been_scrolled_into_view(scene):
+    """滚得进去就照常点 —— 修法不能把"能走通的路"一起堵死。"""
+    page = ReplayPage(scene)
+    human = _ScrollingHuman(page)
+
+    nc._select_quote_card(page, human, _pick_card(page), "刘琼")
+
+    assert human.scrolls >= 1, "卡在区外却一次都没滚"
+    assert len(human.clicked) == 1, "滚进可视区之后必须真的点一次"
+    card, wrap = _card_rect(page), _wrap_rect(scene)
+    assert card["y"] >= wrap["y"], "点的时候卡片上沿仍在可视区之上"
+    assert card["y"] + card["height"] <= wrap["y"] + wrap["height"], "卡片下沿仍在可视区之外"
+
+
+def test_card_above_the_viewport_scrolls_back_up(scene):
+    """卡被滚到列表**顶部之上**同样点不中 → 往回滚,而不是继续往下滚。
+
+    上沿这条边界是新加的:老判据只看"在不在页脚之下",卡滚过头了照样判"在区里"。
+    也不能指望 ``human.click`` 自带的 ``scroll_into_view_if_needed`` —— 本仓早有记录:
+    它认的是"元素技术上可见",被祖先容器裁掉时它不滚。
+    """
+    page = ReplayPage(scene)
+    page.shift_rects(nc._QUOTE_NOTE_CARD, -700.0)   # 727 → 27:整段跑到容器上沿之上
+    human = _Human()
+
+    out = nc._select_quote_card(page, human, _pick_card(page), "刘琼")
+
+    assert human.directions == ["up"] * nc._QUOTE_CARD_VIEW_TRIES, (
+        f"卡在可视区上方却往下滚:{human.directions}"
+    )
+    assert "quote_card_offscreen" in out["reason"], "滚不回来一样不许点"
+
+
+def test_scroll_distance_matches_the_gap_instead_of_the_random_default(scene):
+    """差多少滚多少(带增益),而不是默认的随机 300~800 一脚跨过去。
+
+    容器只有 424 高、卡 182 高,随机步长跨过头再跨回来,三次重试全耗在震荡上 ——
+    而现在"滚不进"是**判失败**的,震荡就成了假失败。
+    """
+    page = ReplayPage(scene)
+    card, wrap = _card_rect(page), _wrap_rect(scene)
+    gap = (card["y"] + card["height"]) - (wrap["y"] + wrap["height"])
     human = _Human()
 
     nc._select_quote_card(page, human, _pick_card(page), "刘琼")
 
-    assert len(human.clicked) == 1, f"拒绝态不该重试,实际点了 {len(human.clicked)} 次"
+    assert human.distances[0] == int(gap * nc._QUOTE_CARD_SCROLL_GAIN)
+    assert human.distances[0] >= nc._QUOTE_CARD_SCROLL_MIN_PX
+
+
+def test_scroll_distance_falls_back_to_default_without_container_geometry():
+    """退回页脚判据时算不出差值 → ``distance=None``,交回默认随机距离(拟人层的事)。"""
+    page = ReplayPage(load_scene("quote_modal"))
+    state = nc._card_view_state(page, _pick_card(page))
+
+    assert nc._card_scroll_plan(state) == ("down", None)
+
+
+def test_falls_back_to_footer_when_the_scroll_container_is_absent():
+    """滚动容器读不出 → 退回原来的页脚判据(带告警),不能因为改判据把老路砍了。
+
+    ``quote_modal`` 那份夹具采集时没记 list-wrap,正好当"容器缺失"的真实样本。
+    """
+    page = ReplayPage(load_scene("quote_modal"))
+    assert page.query_selector(nc._QUOTE_LIST_WRAP) is None, "这份夹具本就没采 list-wrap"
+
+    state = nc._card_view_state(page, _pick_card(page))
+
+    assert state["mode"] == "footer"
+    assert state["footer_top"] == 632, "退回判据取的是页脚(「取消」)上沿"
+    assert state["inside"] is True, "首行卡在页脚之上,退回判据下应判在区内"
+
+
+def test_view_state_without_any_boundary_does_not_block_the_click():
+    """卡片矩形/两条边界都读不出 → ``inside=None``,按"没判据不折腾"处理照常点。
+
+    没有判据时硬判失败,等于把一条本来能走通的路堵死 —— 这类反向故障比假绿更难查。
+    """
+    page = ReplayPage({"dom": {}})
+    human = _Human()
+
+    assert nc._card_view_state(page, None)["inside"] is None
+    assert nc._bring_card_into_view(page, human, None)["ok"] is True
+    assert human.scrolls == 0
 
 
 def test_no_toast_still_reports_select_not_applied():
@@ -254,14 +429,23 @@ def test_no_toast_still_reports_select_not_applied():
     assert out["status"] == "error"
     assert "quote_card_select_not_applied" in out["reason"]
     assert len(human.clicked) == 2, "无 toast 的静默失效仍要重试一次(关随机偏移)"
+    assert "落在滚动容器可视区外" in out["reason"], (
+        "静默失效多半就是没点中卡,回执要把人先引向矩形数据"
+    )
 
 
-def test_error_codes_document_whether_retry_helps():
-    """两个错误码的语义写在 docstring 里 —— 调用方靠它决定重不重试。"""
+def test_error_codes_are_documented_without_the_falsified_verdict():
+    """三个错误码的语义写在 docstring 里,且**不再断言平台裁决/重试无用**。
+
+    那句断言 2026-08-14 被人工操作证伪:同一目标手动引用成功。留着它就会继续把排查
+    引向"换个目标",而真正坏掉的是候选卡根本没被点到。
+    """
     doc = nc._select_quote_card.__doc__ or ""
 
-    assert "quote_target_not_quotable" in doc and "重试无用" in doc
-    assert "quote_card_select_not_applied" in doc
+    for code in ("quote_card_offscreen", "quote_target_not_quotable",
+                 "quote_card_select_not_applied"):
+        assert code in doc
+    assert "重试无用" not in doc and "平台侧的裁决" not in doc
 
 
 # ---------------- 候选覆盖面(平台候选窗口那堵墙)----------------

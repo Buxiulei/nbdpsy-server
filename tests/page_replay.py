@@ -155,6 +155,22 @@ class ReplayPage:
                 "attrs": {k: v for k, v in merged.items() if v is not None},
             }
 
+    def shift_rects(self, sel: str, dy: float) -> None:
+        """把某选择器下所有元素的矩形整体纵向平移,用于**由用例注入"滚动"这条迁移**。
+
+        与 ``set_text`` / ``set_attrs`` 同一分工:夹具只记"采集那一刻页面长什么样",
+        "滚了之后会怎样"由用例给。滚动的**可观察后果**就是列表里的元素整体位移 ——
+        没有它,静态夹具里任何"先滚进可视区再点"的代码路径都测不出真假:
+        不滚也过(假绿)或滚了也不过(假红)都只是夹具静止的产物。
+
+        矩形**原地改**(不换 dict):调用方手里可能已经握着某个 ``ReplayElement``,
+        换掉 dict 会让它读到旧坐标 —— 那正是被测代码握着卡片句柄反复读矩形的用法。
+        """
+        for item in self._dom.get(sel) or []:
+            rect = item.get("rect")
+            if rect:
+                rect["y"] = rect["y"] + dy
+
     def evaluate(self, js, arg=None):  # noqa: D401 — 明确不支持
         raise NotImplementedError(
             "回放夹具不支持 evaluate:JS 求值没法离线重放。"

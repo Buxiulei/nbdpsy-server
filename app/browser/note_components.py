@@ -195,8 +195,15 @@ _QUOTE_SCROLL_IDLE_ROUNDS = 2      # 连续这么多轮既无新页也无新卡 
 # 每次滚动之后等下一页的窗口。**必须比 _MODAL_TIMEOUT_S 短得多**:滚到底之后本来就
 # 没有下一页,拿开弹窗那次的 12 秒来等,两轮空滚就是 24 秒纯等待,每一次引用都白付。
 _QUOTE_SCROLL_WAIT_S = 4.0
-# 目标卡滚进弹窗可视区的尝试轮数(尽力而为:滚不进只告警,点击后有选中态回读兜底)
+# 目标卡滚进候选列表可视区的尝试轮数。用满仍在区外就**判失败**(报 quote_card_offscreen),
+# 绝不"尽力而为"照点 —— 区外那个坐标落在弹窗之外,点下去命中的是别的元素(2026-08-13 事故)。
 _QUOTE_CARD_VIEW_TRIES = 3
+# 滚它进来时"差多少滚多少"的补偿与下限。默认的随机 300~800 对 424 高的容器太粗:
+# 一脚跨过头、下一轮再跨回来,三次重试全耗在来回震荡上 —— 而现在滚不进是**判失败**的,
+# 震荡就成了假失败。``SyncHumanActions.scroll`` 分段变速(speed=1-0.5t),实际位移约为
+# 请求值的四分之三,故乘个增益补回来;下限免得几像素的差值发出一串等于没动的滚轮。
+_QUOTE_CARD_SCROLL_GAIN = 1.4
+_QUOTE_CARD_SCROLL_MIN_PX = 120
 # 点完候选卡后等「确认引用」解禁的窗口:选中态是纯前端翻转,给足一秒足够
 _QUOTE_SELECT_SETTLE_S = 1.5
 _CATALOG_TIMEOUT_S = 15.0
@@ -1518,14 +1525,26 @@ def _pick_scroll_anchor(page, cards: List[Any]):
     return visible[-1] if visible else cards[0]
 
 
-def _list_wrap_center(page) -> Optional[tuple]:
-    """候选列表滚动容器的中心坐标(已夹进视口);容器不在/矩形读不出返回 None。"""
+def _list_wrap_box(page) -> Optional[Dict[str, float]]:
+    """候选列表滚动容器的矩形;容器不在/矩形读不出返回 None。
+
+    它同时是两件事的依据:滚轮落点(``_pick_scroll_anchor``)和"目标卡在不在可视区里"
+    (``_card_view_state``)—— 后者才是 2026-08-13 号 7 三单失败的判据来源。
+    """
     try:
         wrap = page.query_selector(_QUOTE_LIST_WRAP)
     except Exception:  # noqa: BLE001 — 读不出就当没有,交给退回路径
         return None
     box = _element_box(wrap)
     if not box or box["width"] <= 0 or box["height"] <= 0:
+        return None
+    return box
+
+
+def _list_wrap_center(page) -> Optional[tuple]:
+    """候选列表滚动容器的中心坐标(已夹进视口);容器不在/矩形读不出返回 None。"""
+    box = _list_wrap_box(page)
+    if box is None:
         return None
     return _clamp_to_viewport(
         page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
@@ -1779,30 +1798,127 @@ def _wait_confirm_enabled(page) -> Dict[str, Any]:
     return state
 
 
-def _bring_card_into_view(page, human: SyncHumanActions, card) -> bool:
-    """把目标候选卡滚进弹窗可视区;返回**最终在不在带内**(尽力而为,滚不进只告警)。
+def _card_view_state(page, card) -> Dict[str, Any]:
+    """判目标候选卡在不在**滚动容器可视区**里,并把判据用到的两组矩形一起带出来。
 
-    带的下沿是弹窗页脚上沿(见 ``_pick_scroll_anchor``);上沿不设 —— 卡被滚到列表顶部
-    之上时 ``human.click`` 自带的 ``scroll_into_view_if_needed`` 会把它拉回来,
-    真正会出事的是**下沿**:卡落在页脚之下就是点在弹窗外/被页脚盖住。
+    ``inside`` 三态:``True`` 在区内、``False`` 在区外、``None`` **读不出判据**
+    (卡片矩形读不出,或容器和页脚两条边界都没有)。``None`` 按"不折腾"处理 ——
+    没有判据时硬判失败会把一条能走通的路堵死。
+
+    边界取 ``.select-note-modal__list-wrap`` 的矩形,**上下都判**、且要求卡片矩形
+    **完整**落在里面:
+
+    - 用容器而不是弹窗页脚:2026-08-13 真号探针(``..._171433``)拍到目标卡
+      ``y=727 h=182``、容器可视区 ``y=184 h=424``(即 [184, 608])—— 卡在可视区**下方
+      119px**,点击落点(卡心 y≈818)落在弹窗之外,根本没点到卡。老判据的边界是页脚上沿
+      ``y=632``,而 608~632 这 24px 是被 ``overflow`` 裁掉、``bounding_box()`` 却照样读得出
+      的死带,拿它当边界等于把"已经看不见了"判成"还在区里"。
+    - 上沿同样要判:卡被滚到列表顶部之上一样点不中。**不能指望** ``human.click`` 自带的
+      ``scroll_into_view_if_needed`` —— 本仓早有记录:它认的是"元素技术上可见",元素被
+      祖先容器裁掉时它不滚。
+    - 容器读不出(``quote_modal`` 那份夹具就没采到)才退回原来的页脚判据
+      (告警由 ``_bring_card_into_view`` 发,那里一轮只发一次)。
     """
+    card_box = _element_box(card)
+    state: Dict[str, Any] = {
+        "inside": None,
+        "mode": "unknown",
+        "card_rect": card_box,
+        "view_rect": None,
+        "footer_top": None,
+    }
+    if card_box is None:
+        return state
+
+    wrap_box = _list_wrap_box(page)
+    if wrap_box is not None:
+        top = wrap_box["y"]
+        bottom = wrap_box["y"] + wrap_box["height"]
+        state["mode"] = "list_wrap"
+        state["view_rect"] = wrap_box
+        state["inside"] = (
+            card_box["y"] >= top and card_box["y"] + card_box["height"] <= bottom
+        )
+        return state
+
+    limit = _element_top(_find_button_by_text(page, _QUOTE_CANCEL_TEXT))
+    if limit is None:
+        return state                 # 两条边界都没有:没判据,不折腾
+    state["mode"] = "footer"
+    state["footer_top"] = limit
+    state["inside"] = _above_limit(card_box["y"] + card_box["height"] / 2, limit)
+    return state
+
+
+def _fmt_rect(box: Optional[Dict[str, float]]) -> str:
+    """矩形写成一行取证文案(带纵向区间 —— 判据比的就是这两个区间)。"""
+    if not box:
+        return "读不出"
+    top = box["y"]
+    bottom = box["y"] + box["height"]
+    return (f"x={box['x']:.0f} y={top:.0f} w={box['width']:.0f} h={box['height']:.0f}"
+            f"(纵向 [{top:.0f}, {bottom:.0f}])")
+
+
+def _view_evidence(state: Dict[str, Any]) -> str:
+    """把"卡片矩形 vs 可视区矩形"两组数摊开 —— 它们本身就是判据,报错必须带上。"""
+    card = f"卡片矩形 {_fmt_rect(state.get('card_rect'))}"
+    if state.get("mode") == "footer":
+        return f"{card};滚动容器读不出,退回页脚上沿 y={state.get('footer_top')}"
+    return f"{card};滚动容器可视区 {_fmt_rect(state.get('view_rect'))}"
+
+
+def _card_scroll_plan(state: Dict[str, Any]) -> tuple:
+    """滚哪边、滚多远:``(direction, distance)``,``distance=None`` 表示用默认随机距离。
+
+    卡在可视区**上方**就往回滚(方向挑反了三轮全白费),并且**差多少滚多少**——
+    理由见 ``_QUOTE_CARD_SCROLL_GAIN`` 那段注释。退回页脚判据时没有容器矩形、算不出
+    差值,那条路仍走默认随机距离。
+    """
+    card = state.get("card_rect") or {}
+    view = state.get("view_rect")
+    if not view or card.get("y") is None:
+        return "down", None
+    if card["y"] < view["y"]:
+        direction, gap = "up", view["y"] - card["y"]
+    else:
+        direction = "down"
+        gap = (card["y"] + card["height"]) - (view["y"] + view["height"])
+    return direction, max(_QUOTE_CARD_SCROLL_MIN_PX, int(gap * _QUOTE_CARD_SCROLL_GAIN))
+
+
+def _bring_card_into_view(page, human: SyncHumanActions, card) -> Dict[str, Any]:
+    """把目标候选卡滚进候选列表可视区;返回 ``{"ok": bool, "state": 最后一次判读}``。
+
+    ``ok=False`` 就是**真的没滚进去**,调用方据此报 ``quote_card_offscreen``、**不点**。
+    老实现在这里"尽力而为":滚满仍在区外也返回 ``True``,然后照着区外坐标点下去 ——
+    点到的是弹窗外的别的元素,失败于是以"选中没生效 / 平台拒绝"的面目出现在下游
+    (2026-08-13 号 7 三单)。判据与三态语义见 ``_card_view_state``。
+    """
+    state = _card_view_state(page, card)
+    if state["mode"] == "footer":
+        logger.warning(
+            f"[note_components] 引用弹窗里读不出滚动容器 {_QUOTE_LIST_WRAP},"
+            f"退回页脚上沿(y={state['footer_top']})判卡在不在可视区里 —— "
+            "页脚与容器下沿之间有死带,这条判据偏松"
+        )
     for _ in range(_QUOTE_CARD_VIEW_TRIES):
-        limit = _element_top(_find_button_by_text(page, _QUOTE_CANCEL_TEXT))
-        if limit is None:
-            return True              # 读不出边界就不折腾,交给点击自带的滚动
-        if _above_limit(_element_center_y(card), limit):
-            return True
+        if state["inside"] is not False:   # True=已在区内;None=没判据,不折腾
+            return {"ok": True, "state": state}
         cards = page.query_selector_all(_QUOTE_NOTE_CARD)
         if not cards:
-            return False
+            break                          # 列表空了,滚也没意义
         human.hover(_pick_scroll_anchor(page, cards), reason="移进引用候选列表准备滚动")
-        human.scroll("down")
+        human.scroll(*_card_scroll_plan(state))
         human.wait(0.3, 0.7, context="把目标候选卡滚进弹窗可视区")
+        state = _card_view_state(page, card)
+    if state["inside"] is not False:
+        return {"ok": True, "state": state}
     logger.warning(
-        f"[note_components] 目标候选卡滚 {_QUOTE_CARD_VIEW_TRIES} 次仍在弹窗页脚之下,"
-        "按当前位置点击(选中态回读会兜底)"
+        f"[note_components] 目标候选卡滚 {_QUOTE_CARD_VIEW_TRIES} 次仍在候选列表可视区外,"
+        f"拒绝按当前坐标点击;{_view_evidence(state)}"
     )
-    return False
+    return {"ok": False, "state": state}
 
 
 def _read_quote_reject_toast(page) -> str:
@@ -1825,7 +1941,7 @@ def _read_quote_reject_toast(page) -> str:
 
 
 def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[str, Any]:
-    """点选候选卡并**回读选中态**;平台明说拒绝就当场收工,静默失效才重试一次。
+    """点选候选卡并**回读选中态**;出现平台提示就当场收工,静默失效才重试一次。
 
     2026-08-13 生产 RCA(号 7 连续三单同款失败):候选里找到了目标卡、点了、也点了
     「确认引用」,回读却仍是空态 —— 而夹具证明**没选中时「确认引用」本来就是 disabled 的**,
@@ -1836,26 +1952,30 @@ def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[
     回读判据用**「确认引用」由禁用转可点**:这是夹具里有直接证据的那条(卡片选中态挂了
     什么 class 没有实测,猜一个就是回到"照着代码的假设写测试"的老路)。
 
-    **两个错误码,语义不同,调用方据此决定重不重试**:
+    **三个错误码,语义不同,调用方据此判下一步**:
 
-    - ``quote_target_not_quotable`` —— 点卡之后平台弹了 toast 明说「无法引用」
-      (夹具原文「非公开可见笔记,无法引用」)。这是**平台侧的裁决**,比我们的
-      ``permission_code`` 台账权威(台账可能过期)。**重试无用**:换引用目标,
-      或先把那篇笔记的可见性处理掉。
-    - ``quote_card_select_not_applied`` —— 点了、**没 toast**、确认钮也没解禁,
-      属于点击静默失效。这一种才重试:按本仓堆叠浮层纪律**小目标关随机偏移**
-      (卡片中心是选中命中率最稳的落点,0.3~0.7 的随机偏移可能落在封面角标/遮罩这类
-      吃掉事件的子元素上)。
+    - ``quote_card_offscreen`` —— 目标卡滚不进候选列表可视区,**一次都没点**
+      (点区外坐标只会命中别的元素)。detail 带卡片矩形与可视区矩形两组数。
+    - ``quote_target_not_quotable`` —— 点卡之后页面上出现了含「无法引用」的平台提示。
+      **只是"点完出现了这条提示"这个事实**,不是"这篇不可引用"的结论:2026-08-14
+      人工在同一目标(002c0c)上手动引用成功,可见平台并未禁止;而 toast 根容器会把历史
+      通知累加进同一个节点,提示本身也可能是**上一次**操作留下的。detail 照抄原文,
+      归因交给看日志的人。
+    - ``quote_card_select_not_applied`` —— 点了、没提示、确认钮也没解禁,属于点击没生效。
+      这一种才重试:按本仓堆叠浮层纪律**小目标关随机偏移**(卡片中心是选中命中率最稳的
+      落点,0.3~0.7 的随机偏移可能落在封面角标/遮罩这类吃掉事件的子元素上)。
 
-    先读 toast 再等解禁,顺序是刻意的:平台既然已经拒绝,确认钮就永远不会解禁,
-    先去耗满 ``_QUOTE_SELECT_SETTLE_S`` 不但白等,还可能把 toast 等没了 —— 那条
-    平台原文正是整个失败里信息量最大的东西。
+    先读 toast 再等解禁,顺序是刻意的:toast 会自己消失,先去耗满
+    ``_QUOTE_SELECT_SETTLE_S`` 可能把它等没了 —— 那条平台原文是这次失败里少有的
+    一手线索,丢了就只剩"确认钮没解禁"这句什么也说明不了的话。
 
     没选上时把**卡片自己的 class** 也记进日志:平台到底靠什么标记选中态,
     下次排查时由生产日志白送上门,不必为这一个问题再开一次真号。
     """
     def _attempt(random_offset: bool, reason: str) -> Dict[str, Any]:
-        _bring_card_into_view(page, human, card)
+        view = _bring_card_into_view(page, human, card)
+        if not view["ok"]:
+            return {"status": "offscreen", "view": view["state"]}
         human.click(card, random_offset=random_offset, reason=reason)
         human.wait(0.5, 1.0, context="等选中态生效")
         rejected = _read_quote_reject_toast(page)
@@ -1869,6 +1989,8 @@ def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[
     out = _attempt(True, f"选中被引用笔记「{label}」")
     if out["status"] == "done":
         return out
+    if out["status"] == "offscreen":
+        return _card_offscreen(label, out["view"])
     if out["status"] == "rejected":
         return _not_quotable(label, out["toast"])
 
@@ -1881,6 +2003,8 @@ def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[
     out = _attempt(False, f"重选被引用笔记「{label}」(取卡片中心)")
     if out["status"] == "done":
         return out
+    if out["status"] == "offscreen":
+        return _card_offscreen(label, out["view"])
     if out["status"] == "rejected":
         return _not_quotable(label, out["toast"])
     state = out["state"]
@@ -1888,23 +2012,46 @@ def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[
         "status": "error",
         "reason": f"quote_card_select_not_applied: 候选卡「{label}」点了两次(第二次取卡片"
                   f"中心)「{_QUOTE_CONFIRM_TEXT}」仍是禁用态,选中没生效 —— "
-                  f"卡没点上就不可能引用成功,拒绝去点一颗禁用按钮"
+                  f"卡没点上就不可能引用成功,拒绝去点一颗禁用按钮;"
+                  f"多为点击没命中候选卡(卡片落在滚动容器可视区外),"
+                  f"先看回执里的矩形数据"
                   f"(confirm_found={state.get('found')} cls={state.get('cls', '')[:120]!r})",
     }
 
 
-def _not_quotable(label: str, toast: str) -> Dict[str, Any]:
-    """平台拒绝的失败条目:**原文照抄**,不做任何转译。
+def _card_offscreen(label: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """滚不进可视区就**不点**:区外那个坐标落在弹窗之外,点下去命中的是别的元素。
 
-    转译等于把平台的裁决换成我们的猜测 —— 「非公开可见笔记」这五个字直接告诉运营
-    该去哪儿改,换成我们自己编的说法反而要再查一轮。
+    detail 带**卡片矩形与可视区矩形两组数** —— 判据就是这两个纵向区间,
+    下次再出同类失败,回执自己会说明它是不是同一堵墙,不必再开一次真号。
     """
-    logger.warning(f"[note_components] 平台拒绝引用候选卡「{label}」: {toast}")
+    evidence = _view_evidence(state)
+    logger.warning(f"[note_components] 候选卡「{label}」滚不进候选列表可视区: {evidence}")
     return {
         "status": "error",
-        "reason": f"quote_target_not_quotable: 点了候选卡「{label}」,平台弹出「{toast}」"
-                  f"—— 这是平台侧的裁决(比 permission_code 台账权威),**重试无用**。"
-                  f"请换一篇引用目标,或先处理该笔记的可见性",
+        "reason": f"quote_card_offscreen: 候选卡「{label}」滚 {_QUOTE_CARD_VIEW_TRIES} 次"
+                  f"仍在候选列表可视区之外,一次都没点(点区外坐标只会命中别的元素);"
+                  f"{evidence}",
+        "card_rect": state.get("card_rect"),
+        "view_rect": state.get("view_rect"),
+    }
+
+
+def _not_quotable(label: str, toast: str) -> Dict[str, Any]:
+    """点完卡出现了含「无法引用」的平台提示:**原文照抄**,不做任何转译、也不下结论。
+
+    转译等于把平台的原话换成我们的猜测,而这条提示的**归因并不确定**:
+    2026-08-14 人工在同一目标上手动引用成功,证明平台并未禁止引用它;提示既可能来自
+    点击落在候选卡之外命中的其它元素,也可能是 toast 根容器累加下来的历史通知。
+    所以这里只报"出现了这条提示"这个事实,由看日志的人结合矩形数据判因。
+    """
+    logger.warning(f"[note_components] 点候选卡「{label}」后出现平台提示: {toast}")
+    return {
+        "status": "error",
+        "reason": f"quote_target_not_quotable: 点了候选卡「{label}」,页面出现平台提示"
+                  f"「{toast}」。**注意**:该提示可能来自点击落在候选卡之外命中的其它元素,"
+                  f"且 toast 容器会累加历史通知 —— 不能据此断定该笔记不可被引用"
+                  f"(2026-08-14 实测同一目标人工可成功引用)",
         "platform_toast": toast,
     }
 

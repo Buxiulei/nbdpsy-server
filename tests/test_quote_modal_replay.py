@@ -23,6 +23,9 @@ from app.browser import note_components as nc
 from tests.page_replay import ReplayPage, load_scene
 
 _SCENE = "quote_modal"
+# 一次拟人滚动把列表推上去多少像素。真实现随机 300~800,这里取个偏小的定值:
+# 偏小才逼着"滚不动就别硬点"的判据真的走满重试轮数,偏大会把边界一步跨过去。
+_SCROLL_STEP = 200.0
 
 
 @pytest.fixture(autouse=True)
@@ -111,12 +114,37 @@ class _ReplayHuman:
         self.clicked = []
         self.scrolls = 0
         self.hovers = []
+        self._offset = 0.0          # 已累计滚掉的距离(等价于真列表的 scrollTop)
 
     def wait(self, *_a, **_kw):
         pass
 
-    def scroll(self, *_a, **_kw):
+    def scroll(self, direction="down", *_a, **_kw):
+        """滚动 = 候选卡整体位移(真页面的可观察后果),到底就不再动。
+
+        这条迁移是**必须**的:这份夹具里 20 张卡分四行 y=188/386/584/782,后两行本就在
+        弹窗页脚之下。不给位移,"先滚进可视区再点"这条生产路径在回放里永远走不通,
+        测出来的只是夹具静止而已。
+        """
         self.scrolls += 1
+        step = _SCROLL_STEP if direction == "down" else -_SCROLL_STEP
+        moved = min(max(self._offset + step, 0.0), self._max_offset()) - self._offset
+        self._offset += moved
+        self.page.shift_rects(nc._QUOTE_NOTE_CARD, -moved)
+
+    def _max_offset(self) -> float:
+        """滚到底的上限:最后一张卡的下沿刚好落到可视区下沿(真列表的 scrollTop 上限)。"""
+        cards = self.page.query_selector_all(nc._QUOTE_NOTE_CARD)
+        if not cards:
+            return 0.0
+        bottom = max(b["y"] + b["height"] for b in (c.bounding_box() for c in cards))
+        limit = next(
+            (b.bounding_box()["y"] for b in self.page.query_selector_all(
+                f"{nc._QUOTE_MODAL} button")
+             if b.inner_text() == nc._QUOTE_CANCEL_TEXT),
+            None,
+        )
+        return max(0.0, bottom + self._offset - limit) if limit is not None else 0.0
 
     def hover(self, target=None, *, reason="", **_kw):
         self.hovers.append(
@@ -170,7 +198,9 @@ def test_real_code_quotes_every_candidate_on_real_layout(scene):
         note_id = str((note or {}).get("id"))
         if note_id == edited:
             continue
-        page = ReplayPage(scene)
+        # 每篇都从**新读的**场景起步:滚动会原地改矩形(见 ReplayPage.shift_rects),
+        # 共用一份 scene 会让后一篇踩在前一篇滚过的列表上,测的就不是同一件事了
+        page = ReplayPage(load_scene(_SCENE))
         human = _ReplayHuman(page)
         responses = nc.ComponentResponses()
         responses.attach(page)
