@@ -114,7 +114,7 @@ async def test_put_managed_sets_flag_and_cap(tmp_path, monkeypatch):
                         json={"managed": True, "note_cap": 30},
                         headers=bearer(ADMIN_KEY))
         assert r.status_code == 200, r.text
-        assert r.json() == {"account_id": acc, "name": "号A",
+        assert r.json() == {"account_id": acc, "name": "号A", "interaction_daily_limit": None,
                             "managed": True, "note_cap": 30}
 
         # 只改一个字段,另一个保持不变
@@ -722,3 +722,28 @@ async def test_publish_broadcast_still_validates_images_first(tmp_path, monkeypa
 
         async with db_module.async_session() as s:
             assert (await s.execute(select(PublishJob))).scalars().all() == []
+
+
+async def test_put_interaction_daily_limit_and_clear(tmp_path, monkeypatch):
+    """账号级互动日上限:可设、传 0 = 清除覆盖回退全局、省略不改。
+
+    恢复期/新号爬坡用——刚被软风控隔离过的号回池就顶满配额是行为突变,本身即风控特征。
+    """
+    async with rest_client(tmp_path, monkeypatch) as c:
+        acc = await seed_account("号爬坡", "uP", _COOKIES)
+
+        r = await c.put(f"/api/accounts/{acc}/managed",
+                        json={"interaction_daily_limit": 10}, headers=bearer(ADMIN_KEY))
+        assert r.status_code == 200, r.text
+        assert r.json()["interaction_daily_limit"] == 10
+
+        # 0 = 清除覆盖(回退全局),不是"每天 0 篇"
+        r = await c.put(f"/api/accounts/{acc}/managed",
+                        json={"interaction_daily_limit": 0}, headers=bearer(ADMIN_KEY))
+        assert r.json()["interaction_daily_limit"] is None
+
+        # 省略该字段 = 不改(既有 no-op 语义不受影响)
+        r = await c.put(f"/api/accounts/{acc}/managed",
+                        json={"note_cap": 50}, headers=bearer(ADMIN_KEY))
+        assert r.json()["interaction_daily_limit"] is None
+        assert r.json()["note_cap"] == 50

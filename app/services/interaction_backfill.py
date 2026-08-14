@@ -465,13 +465,24 @@ async def plan_round(
             suppressed,
         )
 
+    def _daily_cap_of(actor_id: int) -> int:
+        """该 actor 的互动日上限:账号值优先,没设(或 <=0)退回全局。
+
+        账号值用于**恢复期/新号爬坡**——刚被软风控隔离过的号回池即满配额是行为突变,
+        本身就是风控特征。<=0 当未设:一个"方向反了的兜底"比没有兜底更危险。
+        """
+        own = getattr(by_id.get(actor_id), "interaction_daily_limit", None)
+        if own is not None and int(own) > 0:
+            return int(own)
+        return max(1, int(settings.NOTE_INTERACTION_DAILY_LIMIT))
+
     daily_cap = max(1, int(settings.NOTE_INTERACTION_DAILY_LIMIT))
     round_cap = _round_limit_of(limit)
     capped: list[int] = []
     best: tuple[int, int, list[PublishedNote]] | None = None  # (今日用量, actor_id, 候选篇)
     for aid in sorted(actor_pool):
         used = _used_today(ledger, aid, now)
-        if used >= daily_cap:
+        if used >= _daily_cap_of(aid):
             capped.append(aid)
             continue
         eligible = [
@@ -493,7 +504,7 @@ async def plan_round(
         return _no_plan(reason, suppressed)
 
     used, actor_id, eligible = best
-    take = min(round_cap, daily_cap - used)
+    take = min(round_cap, _daily_cap_of(actor_id) - used)
     if actor_id in probing:
         # 半开探测只做一篇:一轮上限是 5 篇,让半死的号一次探 5 篇等于每个冷却周期照旧
         # 白开 5 次页 —— 断路器就只剩一半意义了。探成了下一轮自然复位,照常做满一轮。

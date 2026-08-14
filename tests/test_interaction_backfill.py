@@ -64,7 +64,8 @@ async def wired_db(tmp_path, monkeypatch):
 
 
 async def _add_account(
-    account_id: int, user_id: str = None, cookie_status: str = "valid"
+    account_id: int, user_id: str = None, cookie_status: str = "valid",
+    interaction_daily_limit: int | None = None,
 ) -> int:
     """造一个矩阵账号(默认 valid + 有 cookie,即可当互动方)。"""
     async with db_module.async_session() as s:
@@ -74,6 +75,7 @@ async def _add_account(
                 name=f"号{account_id}",
                 user_id=user_id if user_id is not None else f"u-{account_id}",
                 cookie_status=cookie_status,
+                interaction_daily_limit=interaction_daily_limit,
                 login_cookies="enc",
             )
         )

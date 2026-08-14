@@ -60,3 +60,9 @@ class XhsAccount(Base):
     # 该号笔记数量上限:超限时由 RetentionScheduler 按加权得分淘汰最低的几篇。
     # 仅对 managed=1 的号生效(非代管号不跑淘汰,这个值只是躺着)。
     note_cap: Mapped[int] = mapped_column(default=100, server_default=text("100"))
+    # 该号的互动日上限;为空则用全局 NOTE_INTERACTION_DAILY_LIMIT。
+    # 用途是**恢复期/新号爬坡**:一个刚被软风控隔离过的号(李牧阳 2026-08-13 连败 96 次
+    # 后隔离一周)回池就顶满 20 篇是典型**行为突变**——绝对频次没超红线,但模式突变本身
+    # 就是风控特征;新号入矩阵头几天同理,不该把最脆弱的时期配上最激进的行为。
+    # <=0 视为未设(方向反了的兜底比没有兜底危险,与 note_cap 同一条教训)。
+    interaction_daily_limit: Mapped[int | None] = mapped_column(nullable=True)

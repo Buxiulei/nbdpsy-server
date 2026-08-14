@@ -78,14 +78,17 @@ MANIFEST_ENTRIES = [
     },
     {
         "method": "PUT", "path": "/api/accounts/{account_id}/managed",
-        "summary": "设置该号是否代管、以及它的笔记数量上限",
+        "summary": "设置该号是否代管、笔记数量上限、互动日上限",
         "admin_only": False,
         "params": {
             "account_id": "path,int",
             "managed": "body,bool|None(省略=不改;true=代管账号/内容号,false=水军号/互动号)",
             "note_cap": f"body,int|None(省略=不改;{_MIN_NOTE_CAP}-{_MAX_NOTE_CAP},默认 100)",
+            "interaction_daily_limit": "body,int|None(省略=不改;0-100,**0=清除覆盖回退全局**;"
+                                       "该号每天最多互动几篇。**恢复期/新号爬坡用**——刚被软风控"
+                                       "隔离过的号回池就顶满配额是行为突变,本身即风控特征)",
         },
-        "returns": "{account_id, name, managed, note_cap}",
+        "returns": "{account_id, name, managed, note_cap, interaction_daily_limit}",
         "errors": "403=无该号授权;404=账号不存在;"
                   f"422=note_cap 越界({_MIN_NOTE_CAP}-{_MAX_NOTE_CAP})或传了这两个之外的字段",
         "notes": "空请求体 {} 是 no-op,返回当前状态(可当「查一个号」用)。"
@@ -201,6 +204,10 @@ class ManagedUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     managed: bool | None = None
     note_cap: int | None = Field(default=None, ge=_MIN_NOTE_CAP, le=_MAX_NOTE_CAP)
+    interaction_daily_limit: int | None = Field(
+        default=None, ge=0, le=100,
+        description="该号互动日上限;传 0 = 清除覆盖回退全局值。恢复期/新号爬坡用",
+    )
 
 
 class ProtectedUpdateRequest(BaseModel):
@@ -402,12 +409,17 @@ async def update_managed_endpoint(account_id: int, payload: ManagedUpdateRequest
             account.managed = payload.managed
         if "note_cap" in fields and payload.note_cap is not None:
             account.note_cap = payload.note_cap
+        if "interaction_daily_limit" in fields:
+            # 0 = 清除覆盖(回退全局值);None 走 fields 判断本就不会进来
+            value = payload.interaction_daily_limit
+            account.interaction_daily_limit = None if not value else int(value)
         await session.commit()
         return {
             "account_id": account.id,
             "name": account.name,
             "managed": bool(account.managed),
             "note_cap": int(account.note_cap or 0),
+            "interaction_daily_limit": account.interaction_daily_limit,
         }
 
 
