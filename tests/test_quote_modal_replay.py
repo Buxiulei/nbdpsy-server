@@ -277,7 +277,9 @@ def test_candidates_are_merged_across_pages(scene):
     pages = page.emit_recorded(nc._POSTED_API_MARK)
     assert pages >= 2, "这份夹具只有一页,证明不了合并;换个笔记多的账号重采"
 
-    merged, _exhausted = nc._wait_all_candidate_notes(page, _ReplayHuman(page), responses, 0)
+    merged, _exhausted, _rounds = nc._wait_all_candidate_notes(
+        page, _ReplayHuman(page), responses, 0
+    )
 
     per_page = [
         len(((r.get("body") or {}).get("data") or {}).get("notes") or [])
@@ -347,9 +349,10 @@ def test_candidates_exhausted_when_scrolling_yields_nothing(scene):
     page.emit_recorded(nc._POSTED_API_MARK)
     human = _ReplayHuman(page)
 
-    notes, exhausted = nc._wait_all_candidate_notes(page, human, responses, 0)
+    notes, exhausted, rounds = nc._wait_all_candidate_notes(page, human, responses, 0)
 
     assert exhausted is True
+    assert rounds == human.scrolls, "滚了几轮要如实报出来(候选覆盖面靠它)"
     assert len(notes) == len(_api_notes(scene))
     assert human.scrolls == nc._QUOTE_SCROLL_IDLE_ROUNDS, "到底后不该继续空转"
     assert human.hovers, "滚之前必须先 hover 到候选卡上(落点打错就滚了别的容器)"

@@ -1012,6 +1012,30 @@ def test_quote_scroll_stops_when_list_bottoms_out(monkeypatch, wired):
     )
 
 
+def test_not_in_candidates_carries_the_coverage_to_the_caller(monkeypatch, wired):
+    """"不在候选里"这条失败必须把**候选覆盖面**一路带到 ``result["failed"]``。
+
+    2026-08-13 取证:平台给候选列表设了上限(号 7 翻到 49 篇≈上限 50、只覆盖到
+    2026-02-13,2025-05-18 那篇**永远翻不到**),这和懒加载翻页是**两堵独立的墙**。
+    只报"候选 N 篇里没有它",调用方分不清"目标不存在"还是"目标在窗口外";
+    有了这三个数就能一眼判:翻满了还没有 = 窗口外,换目标;没翻满就停 = 翻页还有问题。
+
+    钉到 ``result["failed"]`` 而不是内部返回值,是因为**只有这里**是调用方真看得见的地方
+    —— 中间哪一层把字段过滤掉了,这条会红。
+    """
+    editor = Editor(notes=(("n-a", "第一篇"), ("n-b", "第二篇")), quote_pages=[2])
+    _wire(monkeypatch, editor, wired, publish=False)
+
+    result = _run(editor, quoted_note_id="n-missing")
+
+    entry = result["failed"][0]
+    assert entry["candidates_count"] == 2
+    assert entry["scroll_rounds"] == wired[0].scrolls
+    # 这个假页面的候选不带 time 字段 → 覆盖面退回"最老那篇的标题"
+    assert entry["candidates_oldest"] == "第二篇"
+    assert "候选覆盖面" in entry["reason"], "日志里也要看得见,不能只有结构化字段"
+
+
 def test_post_scroll_settle_uses_a_short_window(monkeypatch):
     """滚完之后没有下一页 → 按**短窗**收工,不烧开弹窗那次的整个超时。
 

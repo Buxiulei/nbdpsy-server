@@ -106,6 +106,18 @@ _ANY_MODAL = ".d-modal"
 _QUOTE_CONTAINER = ".quote-note-container"
 _QUOTE_MODAL = ".d-modal.select-note-modal"
 _QUOTE_NOTE_CARD = ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card"
+# 候选列表**真正的滚动容器**(quote_modal_lazyload 夹具实测:``overflow-y:auto``,
+# 矩形 x=423 y=184 754×424,``scrollHeight`` 随懒加载 586→1575 增长)。滚轮落点必须打进
+# 它的矩形里 —— 卡片、网格、``d-modal-content`` 全都不滚,只有它滚。
+_QUOTE_LIST_WRAP = ".d-modal.select-note-modal .select-note-modal__list-wrap"
+# 平台 toast:点候选卡被拒时弹出来的那条(夹具原文 class 含 ``d-toast-icon-danger``)。
+# ``_QUOTE_TOAST`` 是根容器 —— 它会把多条通知**累加**进同一个节点,文案因此重复;
+# 干净的单条文案在 ``_QUOTE_TOAST_TEXT`` 那个叶子上,故优先读叶子。
+_QUOTE_TOAST = ".d-new-toast"
+_QUOTE_TOAST_TEXT = ".d-new-toast .d-toast-description"
+# 拒绝语义的判据只认这四个字。夹具实测原文是「非公开可见笔记,无法引用」,但把整句写死
+# 会被平台换一个字就绕过;而「无法引用」四个字就是这条 toast 的语义本身。
+_QUOTE_TOAST_REJECT_MARK = "无法引用"
 _QUOTE_CONFIRM_TEXT = "确认引用"
 # 「确认引用」的**禁用态判据**(quote_modal 夹具实测:未选中任何卡时按钮就是禁用的)。
 # 夹具里那颗按钮的属性原文::
@@ -1253,6 +1265,14 @@ def _set_quote(
         # 没发生过,排查时又要重走一遍。
         if other.get("status") != "done":
             other["reason"] = f"{other.get('reason')}(先前:{result.get('reason')})"
+            # **结构化取证也要跟着过来**:候选覆盖面(candidates_count/oldest/
+            # scroll_rounds/exhausted)是判"目标在窗口外还是翻页没到底"的唯一依据,
+            # 只合并 reason 文本等于把它们丢在降级路上——调用方拿到的是他人 tab 的
+            # 失败结构,里面没有这几个数,于是又只能靠猜。
+            # 不覆盖 other 自己已有的键:后一条路的取证优先级更高。
+            for key, value in result.items():
+                if key not in ("status", "reason") and key not in other:
+                    other[key] = value
         return other
     finally:
         # 成功路径上「确认引用」自己会关掉弹窗,这里是幂等收尾:还开着才点「取消」
@@ -1283,7 +1303,10 @@ def _block_other_tab_reason(
             f"quoted_note_not_in_candidates_after_scroll: 台账里 note_id={quoted_note_id} "
             f"就是**本账号自己**的笔记,但把「我的笔记」候选列表翻完也没有它 —— "
             f"不走「{_QUOTE_TAB_OTHER_TEXT}」(那条路按设计排除本账号笔记,检索必然返回空)。"
-            f"请核对这篇是否已删/转私密/不在图文 tab 下;原始判定:{result.get('reason')}"
+            f"先看下面的候选覆盖面:平台给候选列表设了**上限**(实测 ≈50 篇,按时间倒序),"
+            f"比窗口更老的笔记再怎么翻也进不来 —— 覆盖面里最老那篇比目标还新,就是这种;"
+            f"翻的轮数明显偏少才该怀疑翻页。也请核对这篇是否已删/转私密/不在图文 tab 下。"
+            f"原始判定:{result.get('reason')}"
         )
     if result.get("candidates_exhausted") is False:
         return (
@@ -1461,16 +1484,33 @@ def _settle_candidate_pages(
 
 
 def _pick_scroll_anchor(page, cards: List[Any]):
-    """挑一个**在弹窗可视区里**的候选卡当滚轮落点;挑不出就用第一张。
+    """挑滚轮落点:**滚动容器的可见矩形中心**;容器读不出才退回候选卡启发式。
 
     ``mouse.wheel`` 打在鼠标**当前位置**,落点挑错就是滚了别的容器(本仓 2026-05 血案:
-    滚轮打在侧栏,"翻两页就停")。所以落点只用**列表里的候选卡本身**,
-    **绝不按"最大 overflow 容器"之类的面积启发式去猜**。
+    滚轮打在侧栏,"翻两页就停")。这里点名 ``.select-note-modal__list-wrap`` 这个类,
+    **不是**按"最大 overflow 容器"之类的面积启发式去猜 —— 2026-08-13 真号探针把整条
+    祖先链的 ``overflow-y`` / ``scrollHeight`` 都拍下来了,滚的就是它,而且滚轮冒泡到它
+    就被消费(``prevented_count=0``)。容器中心必然落在它自己的矩形里,这是唯一
+    "怎么滚都不会打偏"的落点。
 
-    可视区下沿取弹窗页脚(「取消」按钮)的上沿:候选网格就在页脚之上。夹具实测印证了
-    这条边界的必要性 —— 页脚在 y=632,而第 3、4 行卡在 y=584/782,拿末尾那张当落点
-    等于把鼠标移到弹窗外面去滚。页脚找不到时退回第一张卡(弹窗开着它必然可见)。
+    **为什么不能继续用候选卡**(缺陷 A 的病灶):老判据取"页脚上沿之上的最后一张卡",
+    可页脚上沿在 y=632,而容器可视区下沿只到 y=608 —— 中间 24px 是被 ``overflow`` 裁掉、
+    ``bounding_box()`` 却照样读得出的**死带**。第一轮滚动之后,落进死带的卡就会被选成落点,
+    鼠标于是停在滚动容器外面,滚轮打给不可滚的 ``d-modal-content``,后两轮空转被判"到底了"。
+    生产实录:候选停在 22 篇,而同一时刻探针连滚两轮拿到 40 篇。
+
+    容器读不出时退回原有的候选卡启发式(那份 ``quote_modal`` 夹具就没采到容器);
+    **两者都没有返回 ``None``**,调用方据此判"弹窗里根本没东西可滚"。
     """
+    center = _list_wrap_center(page)
+    if center is not None:
+        return center
+    if not cards:
+        return None
+    logger.warning(
+        f"[note_components] 引用弹窗里读不出滚动容器 {_QUOTE_LIST_WRAP},"
+        "退回候选卡当滚轮落点(可能落进页脚死带,翻页会打折扣)"
+    )
     limit = _element_top(_find_button_by_text(page, _QUOTE_CANCEL_TEXT))
     if limit is None:
         return cards[0]
@@ -1478,23 +1518,58 @@ def _pick_scroll_anchor(page, cards: List[Any]):
     return visible[-1] if visible else cards[0]
 
 
-def _element_top(element) -> Optional[float]:
-    """元素矩形上沿;元素不在/读不出返回 None(调用方按"没有这条边界"处理)。"""
+def _list_wrap_center(page) -> Optional[tuple]:
+    """候选列表滚动容器的中心坐标(已夹进视口);容器不在/矩形读不出返回 None。"""
+    try:
+        wrap = page.query_selector(_QUOTE_LIST_WRAP)
+    except Exception:  # noqa: BLE001 — 读不出就当没有,交给退回路径
+        return None
+    box = _element_box(wrap)
+    if not box or box["width"] <= 0 or box["height"] <= 0:
+        return None
+    return _clamp_to_viewport(
+        page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    )
+
+
+def _element_box(element) -> Optional[Dict[str, float]]:
+    """元素矩形;元素不在/已 detach 返回 None。"""
     if element is None:
         return None
     try:
-        box = element.bounding_box()
-    except Exception:  # noqa: BLE001 — 元素已 detach,当作读不出
+        return element.bounding_box()
+    except Exception:  # noqa: BLE001
         return None
+
+
+def _clamp_to_viewport(page, x: float, y: float) -> tuple:
+    """把坐标夹进当前视口(留 10% 边距);读不到视口尺寸就按常见 1280x800 兜底。
+
+    与 ``note_comments_read._clamp_to_viewport`` 同款(本仓既有写法):鼠标"移"到视口外
+    不是真的悬停,滚轮落点也就无从谈起。引用弹窗一般整个在视口里,这一道是防御性的 ——
+    小窗口/高 DPI 缩放下容器中心确实可能被挤出去。
+    """
+    try:
+        size = page.viewport_size or {}
+    except Exception:  # noqa: BLE001
+        size = {}
+    width = float(size.get("width") or 1280)
+    height = float(size.get("height") or 800)
+    return (
+        min(max(x, width * 0.1), width * 0.9),
+        min(max(y, height * 0.1), height * 0.9),
+    )
+
+
+def _element_top(element) -> Optional[float]:
+    """元素矩形上沿;元素不在/读不出返回 None(调用方按"没有这条边界"处理)。"""
+    box = _element_box(element)
     return box["y"] if box else None
 
 
 def _element_center_y(element) -> Optional[float]:
     """元素矩形中心的纵坐标;读不出返回 None。"""
-    try:
-        box = element.bounding_box()
-    except Exception:  # noqa: BLE001
-        return None
+    box = _element_box(element)
     return box["y"] + box["height"] / 2 if box else None
 
 
@@ -1504,11 +1579,21 @@ def _above_limit(center_y: Optional[float], limit: float) -> bool:
 
 
 def _scroll_candidate_list(page, human: SyncHumanActions) -> bool:
-    """在候选列表里拟人滚一屏(翻页用);列表里一张卡都没有 → 返回 False。"""
-    cards = page.query_selector_all(_QUOTE_NOTE_CARD)
-    if not cards:
+    """在候选列表里拟人滚一屏(翻页用)。
+
+    返回 ``False`` **只**表示一件事:弹窗里连滚动容器带候选卡一个都找不到 —— 真的没得可翻。
+    这个语义是刻意收严的:老实现"列表里一张卡都没有"就返回 False,而上层把 False 当成
+    "列表到底了"直接收工。可"这一瞬没渲染出卡"跟"平台没有下一页"是两回事,把前者当后者
+    就是缺陷 A 的上层放大器 —— 一轮都不肯再试。**落点挑不出不等于到底**,该由上层按
+    "这轮没新增"的正常停滞计数去判。
+    """
+    anchor = _pick_scroll_anchor(page, page.query_selector_all(_QUOTE_NOTE_CARD))
+    if anchor is None:
+        logger.warning(
+            "[note_components] 引用弹窗里既没有滚动容器也没有候选卡,没得可翻"
+        )
         return False
-    human.hover(_pick_scroll_anchor(page, cards), reason="移进引用候选列表准备滚动")
+    human.hover(anchor, reason="移进引用候选列表准备滚动")
     human.scroll("down")
     human.wait(0.4, 0.9, context="等候选列表加载下一页")
     return True
@@ -1521,7 +1606,12 @@ def _wait_all_candidate_notes(
     seen: int,
     target_note_id: Optional[str] = None,
 ) -> tuple:
-    """收齐引用候选列表的**全部分页**(必要时主动滚动翻页),返回 ``(notes, exhausted)``。
+    """收齐引用候选列表的**全部分页**(必要时主动滚动翻页)。
+
+    返回 ``(notes, exhausted, rounds)``;``rounds`` 是实际滚了几轮 —— 它和候选篇数一起
+    构成**候选覆盖面**,是 ``quoted_note_not_in_candidates`` 那条失败唯一能自证的东西
+    (见 ``_set_quote_in_modal``:翻满了还没有 = 目标在平台候选窗口外;没翻满就停 =
+    翻页本身还有问题。少了轮数这两种分不开,只能靠猜)。
 
     **候选列表是分页 + 懒加载的**。分页那一半 2026-08-03 回放夹具已实测:弹窗打开时连发
     ``posted?tab=1&page=0``(11 条)与 ``page=1``(10 条),两页一起渲染成 20 张卡;
@@ -1552,14 +1642,18 @@ def _wait_all_candidate_notes(
         )
 
     idle = 0
+    rounds = 0
     for _ in range(_QUOTE_SCROLL_ROUNDS):
         if _hit():
-            return merged, False
+            return merged, False, rounds
         cards_before = len(page.query_selector_all(_QUOTE_NOTE_CARD))
         notes_before = len(merged)
         baseline = responses.count(_POSTED_API_MARK)
         if not _scroll_candidate_list(page, human):
-            return merged, True          # 一张卡都没有:没得可翻,列表就这么多
+            # 收严后这里只剩一种情形:滚动容器和候选卡**双双**不在 —— 弹窗里真没东西可滚。
+            # (老实现"没卡就 False"会把"卡还没渲染出来"那一瞬当成到底,一轮都不肯再试。)
+            return merged, True, rounds
+        rounds += 1
         _settle_candidate_pages(page, responses, baseline, require_first=False)
         merged = _merge_candidate_notes(responses, seen)
         cards_after = len(page.query_selector_all(_QUOTE_NOTE_CARD))
@@ -1572,12 +1666,36 @@ def _wait_all_candidate_notes(
             continue
         idle += 1
         if idle >= _QUOTE_SCROLL_IDLE_ROUNDS:
-            return merged, True
+            return merged, True, rounds
     logger.warning(
         f"[note_components] 引用候选列表滚满 {_QUOTE_SCROLL_ROUNDS} 轮仍在出新页"
         f"(已收 {len(merged)} 篇),不再翻;此时「不在候选里」不足以断定是他人笔记"
     )
-    return merged, False
+    return merged, False, rounds
+
+
+def _candidates_oldest(notes: List[dict]) -> Optional[str]:
+    """翻到的**最老一篇**(时间;取不到退回它的标题,再取不到 None)——候选窗口的下边界。
+
+    取"最后一条"而不是排序求最小:候选接口按时间**倒序**返回(2026-08-13 取证:号 7
+    的 49 篇从当天一路排到 2026-02-13),末尾那条就是翻到的最老一篇。这么取也不必对
+    ``time`` 的格式做任何假设 —— 换成别的写法照样是"最后那条"。
+    """
+    last = next((n for n in reversed(notes) if n), None)
+    if not last:
+        return None
+    return _norm(last.get("time")) or _norm(last.get("display_title")) or None
+
+
+def _coverage_phrase(count: int, oldest: Optional[str], rounds: int) -> str:
+    """候选覆盖面的一句人话(结构化版本是 ``candidates_count`` / ``candidates_oldest``
+    / ``scroll_rounds`` 三个字段)。
+
+    两个数一起看就能判定该往哪儿查:**翻满了还没有** = 目标在平台候选窗口外(换目标);
+    **没翻满就停** = 翻页本身还有问题(查滚动落点)。
+    """
+    tail = f",最老一篇 {oldest}" if oldest else ""
+    return f"候选覆盖面:滚了 {rounds} 轮共翻到 {count} 篇{tail}"
 
 
 def _pick_untitled_card(cards: List[Any], notes: List[dict], index: int):
@@ -1687,8 +1805,27 @@ def _bring_card_into_view(page, human: SyncHumanActions, card) -> bool:
     return False
 
 
+def _read_quote_reject_toast(page) -> str:
+    """读平台 toast:含拒绝语义就返回**平台原文**,否则空串(读不出一律当没有)。
+
+    优先读 ``_QUOTE_TOAST_TEXT`` 那个叶子 —— 根容器 ``.d-new-toast`` 会把多条通知累加进
+    同一个节点,连点几次就读成「…无法引用 …无法引用 …无法引用」,拿它当 detail 只会
+    刷屏。叶子读不到再退回根容器(总比丢掉平台的原话强)。
+    """
+    for sel in (_QUOTE_TOAST_TEXT, _QUOTE_TOAST):
+        try:
+            nodes = page.query_selector_all(sel)
+        except Exception:  # noqa: BLE001 — 取证读数绝不制造异常
+            continue
+        for node in nodes:
+            text = _norm_safe_text(node)
+            if _QUOTE_TOAST_REJECT_MARK in text:
+                return text
+    return ""
+
+
 def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[str, Any]:
-    """点选候选卡并**回读选中态**;没选上重试一次,仍不成则报错。
+    """点选候选卡并**回读选中态**;平台明说拒绝就当场收工,静默失效才重试一次。
 
     2026-08-13 生产 RCA(号 7 连续三单同款失败):候选里找到了目标卡、点了、也点了
     「确认引用」,回读却仍是空态 —— 而夹具证明**没选中时「确认引用」本来就是 disabled 的**,
@@ -1698,36 +1835,77 @@ def _select_quote_card(page, human: SyncHumanActions, card, label: str) -> Dict[
 
     回读判据用**「确认引用」由禁用转可点**:这是夹具里有直接证据的那条(卡片选中态挂了
     什么 class 没有实测,猜一个就是回到"照着代码的假设写测试"的老路)。
-    重试按本仓堆叠浮层纪律:**小目标关随机偏移**——卡片中心是选中命中率最稳的落点,
-    而 0.3~0.7 的随机偏移可能落在封面角标/遮罩这类吃掉事件的子元素上。
 
-    第一次没选上时把**卡片自己的 class** 也记进日志:平台到底靠什么标记选中态,
+    **两个错误码,语义不同,调用方据此决定重不重试**:
+
+    - ``quote_target_not_quotable`` —— 点卡之后平台弹了 toast 明说「无法引用」
+      (夹具原文「非公开可见笔记,无法引用」)。这是**平台侧的裁决**,比我们的
+      ``permission_code`` 台账权威(台账可能过期)。**重试无用**:换引用目标,
+      或先把那篇笔记的可见性处理掉。
+    - ``quote_card_select_not_applied`` —— 点了、**没 toast**、确认钮也没解禁,
+      属于点击静默失效。这一种才重试:按本仓堆叠浮层纪律**小目标关随机偏移**
+      (卡片中心是选中命中率最稳的落点,0.3~0.7 的随机偏移可能落在封面角标/遮罩这类
+      吃掉事件的子元素上)。
+
+    先读 toast 再等解禁,顺序是刻意的:平台既然已经拒绝,确认钮就永远不会解禁,
+    先去耗满 ``_QUOTE_SELECT_SETTLE_S`` 不但白等,还可能把 toast 等没了 —— 那条
+    平台原文正是整个失败里信息量最大的东西。
+
+    没选上时把**卡片自己的 class** 也记进日志:平台到底靠什么标记选中态,
     下次排查时由生产日志白送上门,不必为这一个问题再开一次真号。
     """
-    _bring_card_into_view(page, human, card)
-    human.click(card, reason=f"选中被引用笔记「{label}」")
-    human.wait(0.5, 1.0, context="等选中态生效")
-    state = _wait_confirm_enabled(page)
-    if state.get("enabled"):
-        return {"status": "done", "confirm_cls": state.get("cls", "")}
+    def _attempt(random_offset: bool, reason: str) -> Dict[str, Any]:
+        _bring_card_into_view(page, human, card)
+        human.click(card, random_offset=random_offset, reason=reason)
+        human.wait(0.5, 1.0, context="等选中态生效")
+        rejected = _read_quote_reject_toast(page)
+        if rejected:
+            return {"status": "rejected", "toast": rejected}
+        state = _wait_confirm_enabled(page)
+        if state.get("enabled"):
+            return {"status": "done", "confirm_cls": state.get("cls", "")}
+        return {"status": "not_applied", "state": state}
 
+    out = _attempt(True, f"选中被引用笔记「{label}」")
+    if out["status"] == "done":
+        return out
+    if out["status"] == "rejected":
+        return _not_quotable(label, out["toast"])
+
+    state = out["state"]
     logger.warning(
         f"[note_components] 候选卡「{label}」点了但「{_QUOTE_CONFIRM_TEXT}」仍禁用"
         f"(confirm_cls={state.get('cls', '')[:120]!r} "
         f"card_cls={_safe_class(card)[:120]!r}),关随机偏移重点一次"
     )
-    _bring_card_into_view(page, human, card)
-    human.click(card, random_offset=False, reason=f"重选被引用笔记「{label}」(取卡片中心)")
-    human.wait(0.5, 1.0, context="等选中态生效(重试)")
-    state = _wait_confirm_enabled(page)
-    if state.get("enabled"):
-        return {"status": "done", "confirm_cls": state.get("cls", "")}
+    out = _attempt(False, f"重选被引用笔记「{label}」(取卡片中心)")
+    if out["status"] == "done":
+        return out
+    if out["status"] == "rejected":
+        return _not_quotable(label, out["toast"])
+    state = out["state"]
     return {
         "status": "error",
         "reason": f"quote_card_select_not_applied: 候选卡「{label}」点了两次(第二次取卡片"
                   f"中心)「{_QUOTE_CONFIRM_TEXT}」仍是禁用态,选中没生效 —— "
                   f"卡没点上就不可能引用成功,拒绝去点一颗禁用按钮"
                   f"(confirm_found={state.get('found')} cls={state.get('cls', '')[:120]!r})",
+    }
+
+
+def _not_quotable(label: str, toast: str) -> Dict[str, Any]:
+    """平台拒绝的失败条目:**原文照抄**,不做任何转译。
+
+    转译等于把平台的裁决换成我们的猜测 —— 「非公开可见笔记」这五个字直接告诉运营
+    该去哪儿改,换成我们自己编的说法反而要再查一轮。
+    """
+    logger.warning(f"[note_components] 平台拒绝引用候选卡「{label}」: {toast}")
+    return {
+        "status": "error",
+        "reason": f"quote_target_not_quotable: 点了候选卡「{label}」,平台弹出「{toast}」"
+                  f"—— 这是平台侧的裁决(比 permission_code 台账权威),**重试无用**。"
+                  f"请换一篇引用目标,或先处理该笔记的可见性",
+        "platform_toast": toast,
     }
 
 
@@ -1764,7 +1942,7 @@ def _set_quote_in_modal(
     seen: int,
 ) -> Dict[str, Any]:
     """引用弹窗内的本体流程(弹窗的开与关都由 ``_set_quote`` 负责)。"""
-    notes, exhausted = _wait_all_candidate_notes(
+    notes, exhausted, rounds = _wait_all_candidate_notes(
         page, human, responses, seen, target_note_id=quoted_note_id
     )
     if not notes:
@@ -1780,13 +1958,24 @@ def _set_quote_in_modal(
         None,
     )
     if index is None:
-        return {
+        oldest = _candidates_oldest(notes)
+        failed = {
             "status": "error",
             "reason": f"quoted_note_not_in_candidates: 候选列表({len(notes)} 篇)里没有 "
-                      f"note_id={quoted_note_id}(候选只含**我的笔记**这一 tab)",
+                      f"note_id={quoted_note_id}(候选只含**我的笔记**这一 tab);"
+                      f"{_coverage_phrase(len(notes), oldest, rounds)}",
             # 给降级门用:列表没翻到底时,"不在候选里"这个结论本身就不成立
             "candidates_exhausted": exhausted,
+            # **候选覆盖面**(2026-08-13 取证补的):平台自己给候选列表设了上限,与懒加载
+            # 翻页是**两堵独立的墙** —— 号 7 候选 49 篇≈上限 50、只覆盖到 2026-02-13,
+            # 2025-05-18 那篇**永远翻不到**;号 6 覆盖到 07-27,更老的 5 篇同样进不去。
+            # 没有这三个数,"目标不存在"和"目标在候选窗口外"就分不开,只能靠猜。
+            "candidates_count": len(notes),
+            "scroll_rounds": rounds,
         }
+        if oldest:
+            failed["candidates_oldest"] = oldest
+        return failed
 
     cards = _wait_quote_cards(page)
     title = _norm((notes[index] or {}).get("display_title"))

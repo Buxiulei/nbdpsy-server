@@ -87,6 +87,15 @@ class ReplayPage:
     def wait_for_timeout(self, _ms: int) -> None:
         pass
 
+    @property
+    def viewport_size(self):
+        """采集时的视口尺寸;夹具没记就返回 None(调用方自己兜底)。
+
+        坐标类判据(把滚轮落点夹进视口)只有在**真实视口**下才有意义 —— 拿默认值算,
+        夹具里那些 y>794 的元素就看不出"已经在视口外面"了。
+        """
+        return self.snapshot.get("viewport")
+
     def inner_text(self, _sel: str) -> str:
         return self.snapshot.get("body_text", "")
 

@@ -1,0 +1,132 @@
+{
+  "scene": "quote_modal_lazyload",
+  "captured_at": "2026-08-13T09:14:31.110350+00:00",
+  "account_id": 6,
+  "source_note_id": "6a7c61120000000025005a79",
+  "url": "https://creator.xiaohongshu.com/publish/update?id=6a7c61120000000025005a79&noteType=normal",
+  "viewport": {
+    "width": 1600,
+    "height": 794
+  },
+  "dom": {
+    ".d-modal.select-note-modal .select-note-modal__list-wrap": [
+      {
+        "text": "",
+        "attrs": {
+          "class": "select-note-modal__list-wrap"
+        },
+        "visible": true,
+        "rect": {
+          "x": 423,
+          "y": 184,
+          "width": 754,
+          "height": 424
+        }
+      }
+    ],
+    ".d-modal.select-note-modal .select-note-modal__note-grid > .note-card": [
+      {
+        "text": "心理咨询师-刘琼，陪你走出原生家庭阴影 NBDpsy-亲密关系 7",
+        "attrs": {
+          "data-v-1d71586a": "",
+          "data-v-a42a9788": "",
+          "class": "note-card"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1037,
+          "y": 727,
+          "width": 136,
+          "height": 182
+        }
+      }
+    ],
+    ".d-modal.select-note-modal button": [
+      {
+        "text": "我的笔记",
+        "attrs": {
+          "class": "select-note-modal__tab select-note-modal__tab--active"
+        },
+        "visible": true,
+        "rect": {
+          "x": 423,
+          "y": 136,
+          "width": 88,
+          "height": 32
+        }
+      },
+      {
+        "text": "他人笔记",
+        "attrs": {
+          "class": "select-note-modal__tab"
+        },
+        "visible": true,
+        "rect": {
+          "x": 515,
+          "y": 136,
+          "width": 88,
+          "height": 32
+        }
+      },
+      {
+        "text": "取消",
+        "attrs": {
+          "class": "d-button d-button-default d-button-with-content --color-static bold --color-bg-fill --color-text-paragraph custom-button cancel-width"
+        },
+        "visible": true,
+        "rect": {
+          "x": 1001,
+          "y": 632,
+          "width": 68,
+          "height": 36
+        }
+      },
+      {
+        "text": "确认引用",
+        "attrs": {
+          "class": "d-button d-button-default disabled d-button-with-content --color-static bold --color-bg-fill --color-text-disabled custom-button bg-red disa",
+          "disabled": ""
+        },
+        "visible": true,
+        "rect": {
+          "x": 1081,
+          "y": 632,
+          "width": 96,
+          "height": 36
+        }
+      }
+    ],
+    ".d-new-toast": [
+      {
+        "text": "非公开可见笔记，无法引用",
+        "attrs": {
+          "class": "d-new-toast"
+        },
+        "visible": true,
+        "rect": {
+          "x": 0,
+          "y": 40,
+          "width": 1600,
+          "height": 66
+        }
+      }
+    ],
+    ".d-new-toast .d-toast-description": [
+      {
+        "text": "非公开可见笔记，无法引用",
+        "attrs": {
+          "class": "d-toast-description"
+        },
+        "visible": true,
+        "rect": {
+          "x": 730,
+          "y": 53,
+          "width": 168,
+          "height": 20
+        }
+      }
+    ]
+  },
+  "api": [],
+  "note": "真号只读探针实拍,机械转换自 data/scene_captures/quote_modal_mechanics_20260813_171433.json(号 6,只开弹窗/滚动/点候选卡,绝未点「确认引用」、未提交)。取用字段:滚动容器与视口取 result.baseline.grid_chain 的 select-note-modal__list-wrap / d-modal-mask;候选卡取 result.card_before.self;四颗按钮取 result.modal_buttons;toast 取 result.select_ladder[0].toast 里 d-new-toast 根容器与 d-toast-description 文案叶子。**没有 api 响应体** ——探针只记了 URL/条数,分页合并那条路继续用 quote_modal 夹具。"
+}
